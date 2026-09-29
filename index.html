@@ -213,7 +213,10 @@ tr.total-row td{border-top:1.5px solid var(--ink-2);font-weight:800;padding-top:
 .toggle-list-actions{display:flex;gap:14px;padding:8px 14px;border-bottom:1px solid var(--border);}
 .toggle-list-actions button{background:none;border:none;color:var(--accent);font-size:12px;font-weight:700;cursor:pointer;padding:0;}
 .toggle-list-rows{max-height:340px;overflow-y:auto;}
-.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 14px;font-size:12.5px;color:var(--ink-2);cursor:pointer;border-bottom:1px solid var(--grid);}
+.toggle-list-cols{column-gap:0;}
+@media (max-width:900px){.toggle-list-cols{column-count:2 !important;}}
+@media (max-width:560px){.toggle-list-cols{column-count:1 !important;}}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 14px;font-size:12.5px;color:var(--ink-2);cursor:pointer;border-bottom:1px solid var(--grid);break-inside:avoid;}
 .toggle-row:hover{background:var(--plane);}
 .toggle-row:last-child{border-bottom:none;}
 .toggle-pill{font-size:11px;font-weight:800;padding:2px 9px;border-radius:999px;flex:none;}
@@ -1518,7 +1521,7 @@ function TiposTab({compositionData, motivoEntries, hasMotivo}){
     </div>
   );
 }
-function ToggleList({title, items, included, onChange}){
+function ToggleList({title, items, included, onChange, columns}){
   if(!items.length) return null;
   function toggle(key){
     const next = new Set(included);
@@ -1532,7 +1535,7 @@ function ToggleList({title, items, included, onChange}){
         <button type="button" onClick={()=>onChange(new Set(items.map(i=>i.key)))}>Marcar todos</button>
         <button type="button" onClick={()=>onChange(new Set())}>Desmarcar todos</button>
       </div>
-      <div className="toggle-list-rows">
+      <div className={"toggle-list-rows"+(columns?" toggle-list-cols":"")} style={columns?{columnCount:columns}:undefined}>
         {items.map(it=>(
           <div key={it.key} className="toggle-row" onClick={()=>toggle(it.key)}>
             <span>{it.label}</span>
@@ -1544,9 +1547,12 @@ function ToggleList({title, items, included, onChange}){
   );
 }
 
-function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, idIncluded, setIdIncluded, presIncluded, setPresIncluded}){
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel}){
   const [unitFilter, setUnitFilter] = useState("__all");
+  const [soloVigentes, setSoloVigentes] = useState(true);
   const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
+  const hasPlantel = plantel && plantel.length>0;
+  const plantelByLegajo = useMemo(()=> new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p])), [plantel]);
   const employees = useMemo(()=>{
     const byLegajo = new Map();
     scopeUnitsMap.forEach((rows, name)=>{
@@ -1557,12 +1563,17 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
         if(!idIncluded.has(idKey)) return;
         if(r.presidencia && !presIncluded.has(r.presidencia)) return;
         const k = name+"::"+r.legajo;
-        if(!byLegajo.has(k)) byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, sindicato:r.sindicato||"", count:0});
+        if(!byLegajo.has(k)){
+          const p = plantelByLegajo.get(r.legajo.toUpperCase());
+          byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, sindicato:r.sindicato||"", estado:(p&&p.estado)||"", count:0});
+        }
         byLegajo.get(k).count++;
       });
     });
-    return Array.from(byLegajo.values()).sort((a,b)=>b.count-a.count).slice(0,20);
-  }, [scopeUnitsMap, unitFilter, idIncluded, presIncluded]);
+    let list = Array.from(byLegajo.values());
+    if(hasPlantel && soloVigentes) list = list.filter(e=>e.estado==="Vigente");
+    return list.sort((a,b)=>b.count-a.count).slice(0,20);
+  }, [scopeUnitsMap, unitFilter, idIncluded, presIncluded, plantelByLegajo, hasPlantel, soloVigentes]);
 
   return (
     <div className="tabpanel">
@@ -1573,25 +1584,33 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
       <div className="card table-card">
         <h3>Ranking de empleados</h3>
         <p className="caption">Suma filas cuyo Id Motivo y Agrupador cuadro presidencia estén tildados arriba — independiente del resto de filtros de ausentismo.</p>
-        {hasUnidad && (
-          <div className="filter-row">
+        <div className="filter-row" style={{display:"flex", gap:14, flexWrap:"wrap", alignItems:"center"}}>
+          {hasUnidad && (
             <select value={unitFilter} onChange={e=>setUnitFilter(e.target.value)}>
               <option value="__all">Todas las unidades</option>
               {unitNames.map(u=>(<option key={u} value={u}>{u}</option>))}
             </select>
-          </div>
-        )}
+          )}
+          {hasPlantel && (
+            <label className="motivo-check">
+              <input type="checkbox" checked={soloVigentes} onChange={e=>setSoloVigentes(e.target.checked)} />
+              Solo empleados vigentes
+            </label>
+          )}
+          {!hasPlantel && <span className="hint">Subí el Plantel para ver el Estado y filtrar por vigentes.</span>}
+        </div>
         <div className="overflow-x">
           <table>
-            <thead><tr><th>Legajo</th><th>Empleado</th>{hasUnidad && <th>Unidad</th>}<th>Sindicato</th><th className="num">Filas incluidas</th></tr></thead>
+            <thead><tr><th>Legajo</th><th>Empleado</th>{hasUnidad && <th>Unidad</th>}<th>Sindicato</th><th>Estado</th><th className="num">Filas incluidas</th></tr></thead>
             <tbody>
-              {!employees.length && <tr><td colSpan="5" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
+              {!employees.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
               {employees.map(e=>(
                 <tr key={e.unidad+"::"+e.legajo}>
                   <td>{e.legajo}</td>
                   <td>{e.nombre}</td>
                   {hasUnidad && <td>{e.unidad}</td>}
                   <td>{e.sindicato||"—"}</td>
+                  <td>{e.estado||"—"}</td>
                   <td className="num">{fmt(e.count)}</td>
                 </tr>
               ))}
@@ -2018,7 +2037,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Crónicos…</p></div>
       )}
-      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label}))} included={motivoIncluded} onChange={persistMotivos} />
+      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label}))} included={motivoIncluded} onChange={persistMotivos} columns={4} />
 
       {!motivoIncluded.size ? (
         <div className="card table-card">
@@ -2742,7 +2761,7 @@ function App({userEmail, onSignOut}){
           {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
-          {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} />}
+          {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
           {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
           {activeTab==="simulador" && <SimuladorTab rankingUnits={rankingUnits} objetivo={objetivo} />}
           {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} />}
