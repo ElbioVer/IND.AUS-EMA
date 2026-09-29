@@ -108,6 +108,7 @@ tr.total td{border-top:1.5px solid var(--ink-2);font-weight:800;padding-top:10px
 .cat{display:inline-flex;align-items:center;gap:8px;}
 .cat .dot{width:9px;height:9px;border-radius:3px;flex:none;}
 .overflow-x{overflow-x:auto;}
+.top-scrollbar{overflow-x:auto;overflow-y:hidden;height:14px;margin-bottom:2px;}
 .footer-card{padding:18px 20px;display:flex;flex-direction:column;gap:12px;}
 .footer-card h3{margin:0;font-size:13.5px;font-weight:750;}
 .warn-banner{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:10px;background:color-mix(in srgb, var(--critical) 12%, var(--surface));color:var(--critical);font-size:13px;font-weight:700;}
@@ -1982,9 +1983,54 @@ function DetalleEmpleadosTab({parsed, plantel}){
   );
 }
 
+/* ===================== barra de scroll horizontal arriba de una tabla ancha ===================== */
+function TopScrollSync({targetRef}){
+  const topRef = useRef(null);
+  const [width, setWidth] = useState(0);
+  useEffect(()=>{
+    const el = targetRef.current;
+    if(!el) return;
+    function sync(){ setWidth(el.scrollWidth); }
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    const mo = new MutationObserver(sync);
+    mo.observe(el, {childList:true, subtree:true});
+    function onBottomScroll(){ if(topRef.current) topRef.current.scrollLeft = el.scrollLeft; }
+    el.addEventListener("scroll", onBottomScroll);
+    return ()=>{ ro.disconnect(); mo.disconnect(); el.removeEventListener("scroll", onBottomScroll); };
+  }, [targetRef]);
+  function onTopScroll(e){ if(targetRef.current) targetRef.current.scrollLeft = e.target.scrollLeft; }
+  if(width<=0) return null;
+  return (
+    <div ref={topRef} onScroll={onTopScroll} className="top-scrollbar">
+      <div style={{width, height:1}}></div>
+    </div>
+  );
+}
+
 /* ===================== crónicos (tab) ===================== */
 const CRONICOS_CASOS_TABLE = "cronicos_casos";
 const CRONICOS_CONFIG_TABLE = "cronicos_config";
+const CRONICO_COLUMNS = [
+  {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text"},
+  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text"},
+  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text"},
+  {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text"},
+  {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text"},
+  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text"},
+  {key:"tipo", label:"Tipo", get:c=>c.tipo||"", sortType:"text"},
+  {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num"},
+  {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num"},
+  {key:"motivo", label:"Motivo/Diagnóstico", get:c=>c.motivoLabel||"", sortType:"text"},
+  {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num"},
+  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text"},
+  {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text"},
+  {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text"},
+  {key:"posibleAlta", label:"Posible alta", get:c=>c.posibleAlta||"", sortType:"text"},
+  {key:"accion", label:"Acción", get:c=>c.accion||"", sortType:"text"},
+  {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num"}
+];
 function casoRowToManual(row){
   return {
     tipo: row.tipo||"", notificar: row.notificar||"", opinionMedica: row.opinion_medica||"",
@@ -2001,6 +2047,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const [search, setSearch] = useState("");
   const [tipoFilter, setTipoFilter] = useState("__all");
   const [saveStatus, setSaveStatus] = useState("");
+  const [sortKey, setSortKey] = useState("dias");
+  const [sortDir, setSortDir] = useState("desc");
+  const scrollRef = useRef(null);
 
   useEffect(()=>{
     let alive = true;
@@ -2052,6 +2101,23 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
     });
   }, [casesFull, search, tipoFilter]);
 
+  const sorted = useMemo(()=>{
+    const col = CRONICO_COLUMNS.find(c=>c.key===sortKey) || CRONICO_COLUMNS.find(c=>c.key==="dias");
+    const dir = sortDir==="asc" ? 1 : -1;
+    return filtered.slice().sort((a,b)=>{
+      const va = col.get(a), vb = col.get(b);
+      if(col.sortType==="num") return ((va||0)-(vb||0))*dir;
+      return String(va).localeCompare(String(vb), "es", {sensitivity:"base"}) * dir;
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  function handleSort(key){
+    if(sortKey===key){ setSortDir(d=> d==="asc"?"desc":"asc"); return; }
+    const col = CRONICO_COLUMNS.find(c=>c.key===key);
+    setSortKey(key);
+    setSortDir(col && col.sortType==="num" ? "desc" : "asc");
+  }
+
   function saveCase(caseObj){
     setSaveStatus("Guardando...");
     supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
@@ -2095,11 +2161,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       thead th{text-align:left;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 5px 6px;border-bottom:1px solid #ccc;}
       tbody td{padding:5px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
     `;
-    const rows = filtered.map(c=>{
+    const rows = sorted.map(c=>{
       const ultimaObs = c.observaciones.length ? c.observaciones[c.observaciones.length-1].texto : "";
       return "<tr><td>"+c.legajo+"</td><td>"+(c.nombre||"—")+"</td><td>"+(c.grupo||"—")+"</td><td>"+(c.sindicato||"—")+"</td><td>"+(c.gerencia||"—")+"</td><td>"+(c.codpla||"—")+"</td><td>"+(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+(c.notificar||"—")+"</td><td>"+(c.opinionMedica||"—")+"</td><td>"+(c.tactoEmpleado||"—")+"</td><td>"+(c.posibleAlta||"—")+"</td><td>"+(c.accion||"—")+"</td><td>"+(ultimaObs||"—")+"</td></tr>";
     }).join("");
-    const html = "<h2>Crónicos</h2><p>"+filtered.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
+    const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
       "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo/Diagnóstico</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Última observación</th></tr></thead><tbody>"+rows+"</tbody></table>";
     const win = window.open("", "_blank");
     if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
@@ -2132,14 +2198,19 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
           </div>
-          <div className="overflow-x">
+          <TopScrollSync targetRef={scrollRef} />
+          <div className="overflow-x" ref={scrollRef}>
             <table>
               <thead><tr>
-                <th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th className="num">Días</th><th>Motivo/Diagnóstico</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Observación / Evolución</th>
+                {CRONICO_COLUMNS.map(col=>(
+                  <th key={col.key} className={col.align==="num"?"num":undefined} style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>handleSort(col.key)}>
+                    {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
+                  </th>
+                ))}
               </tr></thead>
               <tbody>
-                {!filtered.length && <tr><td colSpan="17" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
-                {filtered.map(c=>(
+                {!sorted.length && <tr><td colSpan="17" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
+                {sorted.map(c=>(
                   <React.Fragment key={c.id}>
                     <tr>
                       <td>{c.legajo}</td>
