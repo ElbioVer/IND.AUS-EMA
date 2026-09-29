@@ -252,10 +252,75 @@ tr.total-row td{border-top:1.5px solid var(--ink-2);font-weight:800;padding-top:
 <script type="text/babel" data-presets="react">
 const {useState,useMemo,useCallback,useEffect,useRef} = React;
 
-/* ===================== supabase (login + guardado de crónicos) ===================== */
+/* ===================== supabase (login + guardado de cronicos) ===================== */
 const SUPABASE_URL = "https://rfavfuibywwaytlgpcqp.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_SiBV5y1l6xs2bLr8HvCl6A_Syc89Xkn";
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ===================== guardado en Supabase: ausentismo + plantel ===================== */
+const AUSENTISMO_TABLE = "ausentismo_registros";
+const PLANTEL_TABLE = "plantel_empleados";
+const SYNC_PAGE_SIZE = 1000;
+const SYNC_BATCH_SIZE = 1000;
+
+async function fetchAllRows(table){
+  let from = 0, out = [];
+  while(true){
+    const {data, error} = await supabaseClient.from(table).select("*").range(from, from+SYNC_PAGE_SIZE-1);
+    if(error) throw error;
+    out = out.concat(data);
+    if(!data.length || data.length < SYNC_PAGE_SIZE) break;
+    from += SYNC_PAGE_SIZE;
+  }
+  return out;
+}
+async function upsertInBatches(table, rows, onConflict, onProgress){
+  for(let i=0;i<rows.length;i+=SYNC_BATCH_SIZE){
+    const batch = rows.slice(i, i+SYNC_BATCH_SIZE);
+    const {error} = await supabaseClient.from(table).upsert(batch, {onConflict});
+    if(error) throw error;
+    if(onProgress) onProgress(Math.min(i+SYNC_BATCH_SIZE, rows.length), rows.length);
+  }
+}
+function tsToISODate(ts){ const d = new Date(ts); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+function isoDateToTs(s){ if(!s) return null; const [y,m,d] = s.split("-").map(Number); return Date.UTC(y,m-1,d); }
+
+function ausRecordToRow(r){
+  return {
+    id: (r.legajo||"").toUpperCase()+"|"+r.dateKey,
+    legajo: r.legajo||"", fecha: r.anio+"-"+pad2(r.mes)+"-"+pad2(r.dia), anio: r.anio, mes: r.mes, dia: r.dia,
+    agrup: r.agrup||"", unidad: r.unidad||"", sector: r.sector||"", gerencia: r.gerencia||"",
+    departamento: r.departamento||"", empresa: r.empresa||"", nombre: r.nombre||"",
+    id_motivo: r.idMotivo||"", motivo: r.motivo||"", estado: r.estado||"", razon: r.razon||"",
+    puesto: r.puesto||"", jefe: r.jefe||"", presidencia: r.presidencia||"", sindicato: r.sindicato||"",
+    updated_at: new Date().toISOString()
+  };
+}
+function ausRowToRecord(row){
+  const ts = Date.UTC(row.anio, row.mes-1, row.dia);
+  const monthKey = row.anio+"-"+pad2(row.mes);
+  const dateKey = monthKey+"-"+pad2(row.dia);
+  return {legajo:row.legajo||"", agrup:row.agrup||"", cat:row.agrup||"F", unidad:row.unidad||"", sector:row.sector||"",
+    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", nombre:row.nombre||"",
+    idMotivo:row.id_motivo||"", motivo:row.motivo||"", estado:row.estado||"", razon:row.razon||"", puesto:row.puesto||"",
+    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"",
+    valid:true, dia:row.dia, mes:row.mes, anio:row.anio, ts, monthKey, dateKey};
+}
+function plantelRecordToRow(p){
+  return {
+    legajo: p.legajo, nombre: p.nombre||"", fecha_alta: tsToISODate(p.altaTs),
+    fecha_baja: p.bajaTs!=null ? tsToISODate(p.bajaTs) : null,
+    fecha_nacimiento: p.nacimientoTs!=null ? tsToISODate(p.nacimientoTs) : null,
+    estado: p.estado||"", unidad: p.unidad||"", sector: p.sector||"", gerencia: p.gerencia||"",
+    departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
+    updated_at: new Date().toISOString()
+  };
+}
+function plantelRowToRecord(row){
+  return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
+    nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
+    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||""};
+}
 
 function LoginForm({onSignedIn}){
   const [email, setEmail] = useState("");
@@ -267,19 +332,19 @@ function LoginForm({onSignedIn}){
     setError(""); setLoading(true);
     const {data, error} = await supabaseClient.auth.signInWithPassword({email, password});
     setLoading(false);
-    if(error){ setError(error.message==="Invalid login credentials" ? "Email o contraseña incorrectos." : error.message); return; }
+    if(error){ setError(error.message==="Invalid login credentials" ? "Email o password incorrectos." : error.message); return; }
     onSignedIn(data.session);
   }
   return (
     <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center"}}>
       <form onSubmit={handleSubmit} className="card login-form" style={{width:320, padding:28}}>
         <h2 style={{margin:"0 0 4px"}}>Indicador de Ausentismo</h2>
-        <p className="desc" style={{margin:"0 0 18px"}}>Iniciá sesión para continuar.</p>
+        <p className="desc" style={{margin:"0 0 18px"}}>Login para continuar.</p>
         <div style={{display:"flex", flexDirection:"column", gap:10}}>
           <input type="email" required autoComplete="username" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
-          <input type="password" required autoComplete="current-password" placeholder="Contraseña" value={password} onChange={e=>setPassword(e.target.value)} />
+          <input type="password" required autoComplete="current-password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
           {error && <div style={{color:"var(--cat-anp,#f0605d)", fontSize:12.5}}>{error}</div>}
-          <button type="submit" className="btn" disabled={loading} style={{marginTop:4}}>{loading?"Ingresando…":"Ingresar"}</button>
+          <button type="submit" className="btn" disabled={loading} style={{marginTop:4}}>{loading?"Ingresando...":"Ingresar"}</button>
         </div>
       </form>
     </div>
@@ -287,13 +352,13 @@ function LoginForm({onSignedIn}){
 }
 
 function AuthGate(){
-  const [session, setSession] = useState(undefined); // undefined=cargando, null=sin sesión, obj=logueado
+  const [session, setSession] = useState(undefined); // undefined=cargando, null=sin sesion, obj=logueado
   useEffect(()=>{
     supabaseClient.auth.getSession().then(({data})=> setSession(data.session||null));
     const {data:sub} = supabaseClient.auth.onAuthStateChange((_event, sess)=> setSession(sess||null));
     return ()=> sub.subscription.unsubscribe();
   }, []);
-  if(session===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando…</div>;
+  if(session===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando...</div>;
   if(!session) return <LoginForm onSignedIn={setSession} />;
   return <App userEmail={session.user.email} onSignOut={()=>supabaseClient.auth.signOut()} />;
 }
@@ -600,6 +665,7 @@ function mergeAusentismoRecords(existingRecords, newRecords){
     order.push(key);
   });
   let nuevos=0, modificados=0, sinCambios=0;
+  const changedRows = [];
   validNew.forEach(r=>{
     const key = (r.legajo||"").toUpperCase()+"|"+r.dateKey;
     if(map.has(key)){
@@ -609,15 +675,16 @@ function mergeAusentismoRecords(existingRecords, newRecords){
       AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
       const changed = AUS_UPDATE_CMP_FIELDS.some(f=>(prev[f]||"")!==(mergedRow[f]||""));
       map.set(key, mergedRow);
-      if(changed) modificados++; else sinCambios++;
+      if(changed){ modificados++; changedRows.push(mergedRow); } else sinCambios++;
     } else {
       map.set(key, r);
       order.push(key);
       nuevos++;
+      changedRows.push(r);
     }
   });
   const merged = order.map(k=>map.get(k)).concat(invalidExisting).concat(invalidNew);
-  return {merged, nuevos, modificados, sinCambios, nuevosInvalidos: invalidNew.length};
+  return {merged, nuevos, modificados, sinCambios, nuevosInvalidos: invalidNew.length, changedRows};
 }
 
 function buildCategoryRows(records, categories){
@@ -1238,6 +1305,7 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [errAudit, setErrAudit] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
 
   function onFile(file){
     setError(null);
@@ -1284,7 +1352,15 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
       fecha: new Date(), archivo: fileName, encontrados: preview.totalEncontrados,
       nuevos: preview.nuevos, modificados: preview.modificados, errores: preview.errores.length
     }, ...h]);
+    const rowsToSync = preview.records.map(plantelRecordToRow);
+    const doneFileName = fileName;
     setStage("idle"); setRawRows(null); setMapping({}); setFileName("");
+    if(rowsToSync.length){
+      setSyncStatus({done:0, total:rowsToSync.length});
+      upsertInBatches(PLANTEL_TABLE, rowsToSync, "legajo", (done,total)=>setSyncStatus({done,total}))
+        .then(()=> setSyncStatus(null))
+        .catch(err=>{ setSyncStatus(null); setError("No se pudo guardar el plantel (\""+doneFileName+"\") en el servidor: " + (err && err.message ? err.message : String(err))); });
+    }
   }
   function cancelar(){ setStage("idle"); setRawRows(null); setMapping({}); setFileName(""); setError(null); }
 
@@ -1303,6 +1379,7 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
             <span className="hint">Acepta .xlsx o .csv. Se reconocen encabezados como "Legajo", "Fecha de Alta"/"Fecha cálculo vacaciones"/"Fecha de Ingreso", "Fecha de Baja"/"Fecha de egreso", "Unidad de Negocio", "Sector", etc.</span>
           </div>
         )}
+        {syncStatus && <p className="hint">Guardando en el servidor… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}</p>}
         {error && <div className="warn-banner">{error}</div>}
       </div>
 
@@ -1564,7 +1641,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
         if(r.presidencia && !presIncluded.has(r.presidencia)) return;
         const k = name+"::"+r.legajo;
         if(!byLegajo.has(k)){
-          const p = plantelByLegajo.get(r.legajo.toUpperCase());
+          const p = plantelByLegajo.get((r.legajo||"").toUpperCase());
           byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, sindicato:r.sindicato||"", estado:(p&&p.estado)||"", count:0});
         }
         byLegajo.get(k).count++;
@@ -1584,7 +1661,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
       <div className="card table-card">
         <h3>Ranking de empleados</h3>
         <p className="caption">Suma filas cuyo Id Motivo y Agrupador cuadro presidencia estén tildados arriba — independiente del resto de filtros de ausentismo.</p>
-        <div className="filter-row" style={{display:"flex", gap:14, flexWrap:"wrap", alignItems:"center"}}>
+        <div className="filter-row">
           {hasUnidad && (
             <select value={unitFilter} onChange={e=>setUnitFilter(e.target.value)}>
               <option value="__all">Todas las unidades</option>
@@ -1592,7 +1669,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
             </select>
           )}
           {hasPlantel && (
-            <label className="motivo-check">
+            <label className="motivo-check" style={{cursor:"pointer"}}>
               <input type="checkbox" checked={soloVigentes} onChange={e=>setSoloVigentes(e.target.checked)} />
               Solo empleados vigentes
             </label>
@@ -1601,7 +1678,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
         </div>
         <div className="overflow-x">
           <table>
-            <thead><tr><th>Legajo</th><th>Empleado</th>{hasUnidad && <th>Unidad</th>}<th>Sindicato</th><th>Estado</th><th className="num">Filas incluidas</th></tr></thead>
+            <thead><tr><th>Legajo</th><th>Empleado</th>{hasUnidad && <th>Unidad</th>}<th>Sindicato</th>{hasPlantel && <th>Estado</th>}<th className="num">Filas incluidas</th></tr></thead>
             <tbody>
               {!employees.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
               {employees.map(e=>(
@@ -1610,7 +1687,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
                   <td>{e.nombre}</td>
                   {hasUnidad && <td>{e.unidad}</td>}
                   <td>{e.sindicato||"—"}</td>
-                  <td>{e.estado||"—"}</td>
+                  {hasPlantel && <td>{e.estado||"—"}</td>}
                   <td className="num">{fmt(e.count)}</td>
                 </tr>
               ))}
@@ -1976,7 +2053,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   }, [casesFull, search, tipoFilter]);
 
   function saveCase(caseObj){
-    setSaveStatus("Guardando…");
+    setSaveStatus("Guardando...");
     supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
       id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
       tipo: caseObj.tipo||"", notificar: caseObj.notificar||"", opinion_medica: caseObj.opinionMedica||"",
@@ -2035,7 +2112,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   return (
     <div className="tabpanel cronicos-tab">
       {!dbReady && (
-        <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Crónicos…</p></div>
+        <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
       <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label}))} included={motivoIncluded} onChange={persistMotivos} columns={4} />
 
@@ -2220,8 +2297,55 @@ function App({userEmail, onSignOut}){
   const [cuatriSel, setCuatriSel] = useState("");
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
   const [ausUpdateHistorial, setAusUpdateHistorial] = useState([]);
+  const [cloudLoading, setCloudLoading] = useState(true);
+  const [cloudError, setCloudError] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
 
   const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
+
+  function applyParsedRecords(records, fileNameLabel, hasMotivo){
+    const next = buildParsedAggregates(records, fileNameLabel, hasMotivo);
+    const motivoDefaultExcluded = new Set(next.motivoUniverse.filter(m=>isDefaultExcludedMotivoKey(m.key)).map(m=>m.key));
+    const rankingIdDefault = new Set(next.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key));
+    const rankingPresDefault = new Set(next.presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)));
+    let defaultYear=null, defaultMonth=null;
+    if(next.monthKeys.length){
+      const lastKey = next.monthKeys[next.monthKeys.length-1];
+      const [y,m] = lastKey.split("-");
+      defaultYear = parseInt(y,10); defaultMonth = parseInt(m,10);
+    }
+    setParsed(next);
+    setSel(defaultYear && defaultMonth ? {year:defaultYear, month:defaultMonth} : null);
+    setFileName(next.fileName);
+    setExcludedMotivos(motivoDefaultExcluded);
+    setRankingIdIncluded(rankingIdDefault);
+    setRankingPresIncluded(rankingPresDefault);
+  }
+
+  useEffect(()=>{
+    let cancelled = false;
+    (async ()=>{
+      setCloudLoading(true);
+      setCloudError(null);
+      try{
+        const [plantelRows, ausRows] = await Promise.all([fetchAllRows(PLANTEL_TABLE), fetchAllRows(AUSENTISMO_TABLE)]);
+        if(cancelled) return;
+        if(plantelRows.length){
+          setPlantel(plantelRows.map(plantelRowToRecord));
+          setPlantelUpdatedAt(new Date());
+        }
+        if(ausRows.length){
+          const records = ausRows.map(ausRowToRecord);
+          const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
+          applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+        }
+      }catch(err){
+        if(!cancelled) setCloudError("No se pudieron cargar los datos guardados en el servidor: " + (err && err.message ? err.message : String(err)));
+      }
+      if(!cancelled) setCloudLoading(false);
+    })();
+    return ()=>{ cancelled = true; };
+  }, []);
 
   const handleFile = useCallback((file) => {
     setLoading(true);
@@ -2241,35 +2365,23 @@ function App({userEmail, onSignOut}){
           setParsed(null);
           return;
         }
-        const next = buildParsedAggregates(parsedRows.records, file.name, parsedRows.hasMotivoCol);
-        const motivoDefaultExcluded = new Set(next.motivoUniverse.filter(m=>isDefaultExcludedMotivoKey(m.key)).map(m=>m.key));
-        const rankingIdDefault = new Set(next.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key));
-        const rankingPresDefault = new Set(next.presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)));
-
-        let defaultYear=null, defaultMonth=null;
-        if(next.monthKeys.length){
-          const lastKey = next.monthKeys[next.monthKeys.length-1];
-          const [y,m] = lastKey.split("-");
-          defaultYear = parseInt(y,10);
-          defaultMonth = parseInt(m,10);
-        }
-
-        setParsed(next);
-        setSel(defaultYear && defaultMonth ? {year:defaultYear, month:defaultMonth} : null);
-        setFileName(file.name);
+        applyParsedRecords(parsedRows.records, file.name, parsedRows.hasMotivoCol);
         setActiveTab("resumen");
         setObjetivo(3);
         setFiltersState({mes:null, departamento:null, gerencia:null, sector:null});
         setEmpresaIncluded(null);
-        setExcludedMotivos(motivoDefaultExcluded);
-        setRankingIdIncluded(rankingIdDefault);
-        setRankingPresIncluded(rankingPresDefault);
         setAusUpdatePreview(null);
+        setLoading(false);
+        const validRows = parsedRows.records.filter(r=>r.valid).map(ausRecordToRow);
+        setSyncStatus({label:"Guardando en el servidor", done:0, total:validRows.length});
+        upsertInBatches(AUSENTISMO_TABLE, validRows, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor", done, total}))
+          .then(()=> setSyncStatus(null))
+          .catch(err=>{ setSyncStatus(null); setCloudError("No se pudo guardar en el servidor: " + (err && err.message ? err.message : String(err))); });
       }catch(err){
         setError("No se pudo leer el archivo: " + (err && err.message ? err.message : String(err)));
         setParsed(null);
+        setLoading(false);
       }
-      setLoading(false);
     };
     reader.onerror = () => { setError("No se pudo leer el archivo."); setLoading(false); };
     reader.readAsArrayBuffer(file);
@@ -2292,13 +2404,13 @@ function App({userEmail, onSignOut}){
           setLoading(false);
           return;
         }
-        const {merged, nuevos, modificados, sinCambios, nuevosInvalidos} = mergeAusentismoRecords(parsed.records, parsedRows.records);
+        const {merged, nuevos, modificados, sinCambios, nuevosInvalidos, changedRows} = mergeAusentismoRecords(parsed.records, parsedRows.records);
         const hasMotivo = parsed.hasMotivo || parsedRows.hasMotivoCol;
         const nextParsed = buildParsedAggregates(merged, file.name, hasMotivo);
         setAusUpdatePreview({
           fileName: file.name,
           encontrados: parsedRows.records.length,
-          nuevos, modificados, sinCambios, nuevosInvalidos,
+          nuevos, modificados, sinCambios, nuevosInvalidos, changedRows,
           nextParsed
         });
       }catch(err){
@@ -2334,7 +2446,14 @@ function App({userEmail, onSignOut}){
       fecha: new Date(), archivo: ausUpdatePreview.fileName, encontrados: ausUpdatePreview.encontrados,
       nuevos: ausUpdatePreview.nuevos, modificados: ausUpdatePreview.modificados, sinCambios: ausUpdatePreview.sinCambios
     }, ...h]);
+    const changedRows = (ausUpdatePreview.changedRows||[]).map(ausRecordToRow);
     setAusUpdatePreview(null);
+    if(changedRows.length){
+      setSyncStatus({label:"Guardando cambios en el servidor", done:0, total:changedRows.length});
+      upsertInBatches(AUSENTISMO_TABLE, changedRows, "id", (done,total)=>setSyncStatus({label:"Guardando cambios en el servidor", done, total}))
+        .then(()=> setSyncStatus(null))
+        .catch(err=>{ setSyncStatus(null); setCloudError("No se pudo guardar la actualización en el servidor: " + (err && err.message ? err.message : String(err))); });
+    }
   }
   function cancelAusUpdate(){ setAusUpdatePreview(null); }
 
@@ -2590,7 +2709,7 @@ function App({userEmail, onSignOut}){
         </div>
         <div className="hint" style={{display:"flex", alignItems:"center", gap:8}}>
           {userEmail}
-          <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesión</button>
+          <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
         </div>
         {parsed && (
           <div className="objetivo-box">
@@ -2601,14 +2720,27 @@ function App({userEmail, onSignOut}){
         )}
       </div>
 
-      {!parsed && !error && (
+      {cloudError && <div className="warn-banner no-print">{cloudError}</div>}
+      {syncStatus && (
+        <div className="chip ok no-print" style={{alignSelf:"flex-start"}}>
+          <span className="dot"></span>{syncStatus.label}… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}
+        </div>
+      )}
+
+      {cloudLoading && (
+        <div className="upload-card">
+          <div className="hint">Cargando datos guardados en el servidor…</div>
+        </div>
+      )}
+
+      {!cloudLoading && !parsed && !error && (
         <div className="upload-card">
           <div className="upload-icon">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2Z"/></svg>
           </div>
           <div>
             <div style={{fontWeight:700, fontSize:15}}>Subir archivo .xlsx</div>
-            <div className="hint" style={{marginTop:4}}>Exportación de asistencia, hoja "Sheet1"</div>
+            <div className="hint" style={{marginTop:4}}>Exportación de asistencia, hoja "Sheet1" — se guarda en el servidor, no hace falta volver a subirlo la próxima vez.</div>
           </div>
           <label className="btn" htmlFor="fileInput">{loading ? "Leyendo…" : "Elegir archivo"}</label>
           <input id="fileInput" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
