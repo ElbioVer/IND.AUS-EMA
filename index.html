@@ -276,11 +276,26 @@ async function fetchAllRows(table){
   return out;
 }
 async function upsertInBatches(table, rows, onConflict, onProgress){
+  const failedRanges = [];
   for(let i=0;i<rows.length;i+=SYNC_BATCH_SIZE){
     const batch = rows.slice(i, i+SYNC_BATCH_SIZE);
-    const {error} = await supabaseClient.from(table).upsert(batch, {onConflict});
-    if(error) throw error;
+    let ok = false, lastErr = null;
+    for(let attempt=0; attempt<3 && !ok; attempt++){
+      if(attempt>0) await new Promise(res=>setTimeout(res, 800*attempt));
+      const {error} = await supabaseClient.from(table).upsert(batch, {onConflict});
+      if(!error){ ok = true; } else { lastErr = error; }
+    }
+    if(!ok) failedRanges.push({from:i, to:Math.min(i+SYNC_BATCH_SIZE, rows.length), error:lastErr});
+    // sigue con el resto de las tandas aunque ésta haya fallado, para no perder todo lo que viene después
     if(onProgress) onProgress(Math.min(i+SYNC_BATCH_SIZE, rows.length), rows.length);
+  }
+  if(failedRanges.length){
+    const totalFailed = failedRanges.reduce((a,r)=>a+(r.to-r.from),0);
+    const msg = totalFailed+" de "+rows.length+" filas no se pudieron guardar en el servidor (tras reintentar). "+
+      "El resto sí se guardó. Volvé a subir el mismo archivo para reintentar solo lo que falta — no duplica nada.";
+    const err = new Error(msg);
+    err.failedRanges = failedRanges;
+    throw err;
   }
 }
 function tsToISODate(ts){ const d = new Date(ts); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
@@ -2137,6 +2152,7 @@ function casoRowToManual(row){
   return {
     tipo: row.tipo||"", notificar: row.notificar||"", opinionMedica: row.opinion_medica||"",
     tactoEmpleado: row.tacto_empleado||"", posibleAlta: row.posible_alta||"", accion: row.accion||"",
+    inicioManualTs: row.inicio_manual ? isoDateToTs(row.inicio_manual) : null,
     observaciones: Array.isArray(row.observaciones) ? row.observaciones : []
   };
 }
@@ -2183,8 +2199,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
 
   const casesFull = useMemo(()=> cases.map(c=>{
     const manual = casesManual.get(c.id) || {};
-    return {...c,
-      tipo: cronicoTipoAuto(c),
+    const inicioManualTs = manual.inicioManualTs!=null ? manual.inicioManualTs : null;
+    const withInicio = {...c, inicioAutoTs: c.inicioTs, inicioManualTs, inicioTs: inicioManualTs!=null ? inicioManualTs : c.inicioTs};
+    return {...withInicio,
+      tipo: cronicoTipoAuto(withInicio),
       notificar: manual.notificar || "",
       opinionMedica: manual.opinionMedica || "",
       tactoEmpleado: manual.tactoEmpleado || "",
@@ -2226,6 +2244,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
       tipo: caseObj.tipo||"", notificar: caseObj.notificar||"", opinion_medica: caseObj.opinionMedica||"",
       tacto_empleado: caseObj.tactoEmpleado||"", posible_alta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
+      inicio_manual: caseObj.inicioManualTs!=null ? tsToISODate(caseObj.inicioManualTs) : null,
       observaciones: caseObj.observaciones||[], updated_at: new Date().toISOString()
     }).then(({error})=>{
       if(error){ setSaveStatus("Error al guardar: "+error.message); return; }
@@ -2233,7 +2252,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       setCasesManual(prev=>{
         const next = new Map(prev);
         next.set(caseObj.id, {tipo:caseObj.tipo||"", notificar:caseObj.notificar||"", opinionMedica:caseObj.opinionMedica||"",
-          tactoEmpleado:caseObj.tactoEmpleado||"", posibleAlta:caseObj.posibleAlta||"", accion:caseObj.accion||"", observaciones:caseObj.observaciones||[]});
+          tactoEmpleado:caseObj.tactoEmpleado||"", posibleAlta:caseObj.posibleAlta||"", accion:caseObj.accion||"",
+          inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
+          observaciones:caseObj.observaciones||[]});
         return next;
       });
     });
@@ -2320,7 +2341,16 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.gerencia||"—"}</td>
                       <td>{c.codpla||"—"}</td>
                       <td>{c.tipo}</td>
-                      <td>{fmtDateFromTs(c.inicioTs)}</td>
+                      <td style={{whiteSpace:"nowrap"}}>
+                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={!dbReady}
+                          onBlur={e=>{ const v=e.target.value; if(v) commitField(c,"inicioManualTs", isoDateToTs(v)); }}
+                          style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
+                        {c.inicioManualTs!=null && (
+                          <div className="hint" style={{cursor:"pointer", marginTop:2}} onClick={()=>commitField(c,"inicioManualTs", null)}>
+                            editado a mano · restablecer
+                          </div>
+                        )}
+                      </td>
                       <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
