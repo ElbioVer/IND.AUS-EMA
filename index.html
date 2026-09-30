@@ -2587,6 +2587,7 @@ function App({userEmail, onSignOut}){
         setAusUpdatePreview(null);
         setLoading(false);
         const validRows = parsedRows.records.filter(r=>r.valid).map(ausRecordToRow);
+        setCloudError(null);
         setSyncStatus({label:"Guardando en el servidor", done:0, total:validRows.length});
         upsertInBatches(AUSENTISMO_TABLE, validRows, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor", done, total}))
           .then(()=> setSyncStatus(null))
@@ -2663,6 +2664,7 @@ function App({userEmail, onSignOut}){
     const changedRows = (ausUpdatePreview.changedRows||[]).map(ausRecordToRow);
     setAusUpdatePreview(null);
     if(changedRows.length){
+      setCloudError(null);
       setSyncStatus({label:"Guardando cambios en el servidor", done:0, total:changedRows.length});
       upsertInBatches(AUSENTISMO_TABLE, changedRows, "id", (done,total)=>setSyncStatus({label:"Guardando cambios en el servidor", done, total}))
         .then(()=> setSyncStatus(null))
