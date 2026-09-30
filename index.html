@@ -1056,10 +1056,83 @@ function calcEdad(birthTs){
   return age;
 }
 
+/* ===================== feriados argentina (para no cortar rachas de crónicos) ===================== */
+// Cubre feriados nacionales fijos + móviles calculados por ley (Pascua, tercer lunes de agosto, etc.).
+// No incluye "feriados puente" decretados año a año sin regla fija — si hace falta, se pueden sumar
+// fechas puntuales a mano en EXTRA_FERIADOS más abajo.
+const EXTRA_FERIADOS = new Set([
+  // "2026-05-22", // ejemplo: agregar acá un feriado puente puntual como "YYYY-MM-DD"
+]);
+function easterSundayUTC(year){
+  const a = year % 19, b = Math.floor(year/100), c = year % 100;
+  const d = Math.floor(b/4), e = b % 4, f = Math.floor((b+8)/25);
+  const g = Math.floor((b-f+1)/3), h = (19*a+b-d-g+15) % 30;
+  const i = Math.floor(c/4), k = c % 4, l = (32+2*e+2*i-h-k) % 7;
+  const m = Math.floor((a+11*h+22*l)/451);
+  const month = Math.floor((h+l-7*m+114)/31);
+  const day = ((h+l-7*m+114) % 31) + 1;
+  return Date.UTC(year, month-1, day);
+}
+function movableToMondayUTC(year, month, day){
+  const ts = Date.UTC(year, month-1, day);
+  const dow = new Date(ts).getUTCDay(); // 0=domingo..6=sabado
+  let offsetDays;
+  if(dow===1) offsetDays = 0;
+  else if(dow>=2 && dow<=4) offsetDays = -(dow-1);
+  else offsetDays = (8-dow)%7;
+  return ts + offsetDays*86400000;
+}
+function tsToYmd(ts){ const d = new Date(ts); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+const feriadosCache = new Map();
+function computeArgFeriados(year){
+  if(feriadosCache.has(year)) return feriadosCache.get(year);
+  const set = new Set();
+  const addFixed = (m,d)=> set.add(tsToYmd(Date.UTC(year,m-1,d)));
+  addFixed(1,1); addFixed(5,1); addFixed(5,25); addFixed(6,20); addFixed(7,9);
+  addFixed(12,8); addFixed(12,25); addFixed(4,2); addFixed(6,17);
+  const easter = easterSundayUTC(year);
+  set.add(tsToYmd(easter - 48*86400000)); // lunes de carnaval
+  set.add(tsToYmd(easter - 47*86400000)); // martes de carnaval
+  set.add(tsToYmd(easter - 2*86400000));  // viernes santo
+  // San Martín: tercer lunes de agosto
+  let mondays = 0;
+  for(let day=1; day<=31; day++){
+    const ts = Date.UTC(year,7,day);
+    if(new Date(ts).getUTCMonth()!==7) break;
+    if(new Date(ts).getUTCDay()===1){ mondays++; if(mondays===3){ set.add(tsToYmd(ts)); break; } }
+  }
+  set.add(tsToYmd(movableToMondayUTC(year,10,12))); // diversidad cultural
+  set.add(tsToYmd(movableToMondayUTC(year,11,20))); // soberanía nacional
+  feriadosCache.set(year, set);
+  return set;
+}
+function isArgFeriado(ts){
+  if(EXTRA_FERIADOS.has(tsToYmd(ts))) return true;
+  return computeArgFeriados(new Date(ts).getUTCFullYear()).has(tsToYmd(ts));
+}
+function isNonWorkingGapDay(ts){
+  const dow = new Date(ts).getUTCDay();
+  if(dow===0 || dow===6) return true;
+  return isArgFeriado(ts);
+}
+function gapIsBridgeable(prevTs, curTs){
+  for(let t=prevTs+86400000; t<curTs; t+=86400000){
+    if(!isNonWorkingGapDay(t)) return false;
+  }
+  return true;
+}
+
 /* ===================== crónicos ===================== */
 const CRONICO_TIPOS = ["", "ACTUAL", "CRONICO", "RES PTO", "PROC BAJA"];
 function sanitizeIdSeg(s){ const c = (s||"").toString().toUpperCase().replace(/[^A-Z0-9_\-.~:@+]/g,""); return c || "X"; }
 function cronicoCaseId(legajo, motivoKey, anio){ return sanitizeIdSeg(legajo)+"-"+sanitizeIdSeg(motivoKey)+"-"+sanitizeIdSeg(anio); }
+function cronicoTipoAuto(c){
+  const mk = (c.codpla||"").toUpperCase();
+  if(mk==="RP") return "RES PTO";
+  if(mk==="PRD") return "PROC BAJA";
+  if(cronicoDias(c.inicioTs) > 10) return "CRONICO";
+  return "ACTUAL";
+}
 function cronicoDias(inicioTs){
   const now = new Date();
   const todayTs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1067,15 +1140,13 @@ function cronicoDias(inicioTs){
 }
 function buildCronicoCases(records, plantel, motivoIncluded){
   if(!motivoIncluded || !motivoIncluded.size) return [];
-  const groups = new Map();
+  const byLegajo = new Map();
   records.forEach(r=>{
     if(!r.valid || !r.legajo) return;
     if(r.cat!=="AP" && r.cat!=="ANP") return;
-    const mk = motivoKeyOf(r);
-    if(!motivoIncluded.has(mk)) return;
-    const key = r.legajo.toUpperCase()+"|"+mk+"|"+r.anio;
-    if(!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
+    const k = r.legajo.toUpperCase();
+    if(!byLegajo.has(k)) byLegajo.set(k, []);
+    byLegajo.get(k).push(r);
   });
   const plantelByLegajo = new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p]));
   const lastRecordByLegajo = new Map();
@@ -1085,34 +1156,65 @@ function buildCronicoCases(records, plantel, motivoIncluded){
     const prev = lastRecordByLegajo.get(k);
     if(!prev || r.ts>prev.ts) lastRecordByLegajo.set(k, r);
   });
+
   const cases = [];
-  groups.forEach(rows=>{
-    rows.sort((a,b)=>a.ts-b.ts);
-    const first = rows[0], last = rows[rows.length-1];
-    const mk = motivoKeyOf(first);
-    const legU = first.legajo.toUpperCase();
+  byLegajo.forEach((rowsIn, legU)=>{
+    const rows = rowsIn.slice().sort((a,b)=>a.ts-b.ts);
+    // Arma "rachas" continuas: toleran huecos de fin de semana/feriado (sin corte) y días
+    // marcados "CA — Con aviso" (no cortan ni cambian el motivo de la racha, en cualquier sentido).
+    // Cualquier otro cambio de motivo, o un hueco que incluya un día hábil sin registrar, corta la racha.
+    const streaks = [];
+    let streakStart=null, streakMotivoKey=null, streakRows=[], prevTs=null;
+    rows.forEach(r=>{
+      const mk = motivoKeyOf(r);
+      const isCA = mk==="CA";
+      if(streakStart===null){
+        streakStart=r.ts; streakMotivoKey=mk; streakRows=[r]; prevTs=r.ts;
+        return;
+      }
+      const contiguous = r.ts===prevTs || gapIsBridgeable(prevTs, r.ts);
+      const sameMotivo = isCA || streakMotivoKey==="CA" || mk===streakMotivoKey;
+      if(contiguous && sameMotivo){
+        streakRows.push(r);
+        if(!isCA) streakMotivoKey = mk;
+        prevTs = r.ts;
+      } else {
+        streaks.push({start:streakStart, motivoKey:streakMotivoKey, rows:streakRows});
+        streakStart=r.ts; streakMotivoKey=mk; streakRows=[r]; prevTs=r.ts;
+      }
+    });
+    if(streakStart!==null) streaks.push({start:streakStart, motivoKey:streakMotivoKey, rows:streakRows});
+
+    // sólo la racha más reciente puede ser un caso activo
+    const lastStreak = streaks[streaks.length-1];
+    if(!lastStreak) return;
+    if(!motivoIncluded.has(lastStreak.motivoKey)) return;
+
+    const first = lastStreak.rows[0], last = lastStreak.rows[lastStreak.rows.length-1];
     const p = plantelByLegajo.get(legU);
     // sólo casos que siguen vigentes: el último registro cargado de ese legajo (de todo el archivo)
-    // todavía está bajo el mismo motivo — si ya volvió a "P" o cambió de motivo, el caso se cerró.
+    // todavía es parte de esta racha — si ya volvió a "P" o cambió de motivo, el caso se cerró.
     const lastRec = lastRecordByLegajo.get(legU);
-    const continua = lastRec && (lastRec.cat==="AP"||lastRec.cat==="ANP") && motivoKeyOf(lastRec)===mk;
+    const continua = lastRec && (lastRec.cat==="AP"||lastRec.cat==="ANP") && lastRec.ts===last.ts;
     if(!continua) return;
     // sólo empleados activos: con plantel, sin fecha de baja; sin plantel, que su último registro no sea CE/BAJA.
     const activo = p ? (p.bajaTs==null) : (lastRec.cat!=="CE" && lastRec.cat!=="BAJA");
     if(!activo) return;
+    // para mostrar el motivo/diagnóstico, preferir una fila real (no CA) dentro de la racha
+    const motivoRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA") || last;
     cases.push({
-      id: cronicoCaseId(first.legajo, mk, first.anio),
+      id: cronicoCaseId(first.legajo, lastStreak.motivoKey, first.anio),
       legajo: first.legajo,
       anio: first.anio,
       nombre: last.nombre || first.nombre || (p ? p.nombre : "") || "",
       grupo: last.departamento || first.departamento || "",
       sindicato: last.sindicato || first.sindicato || "",
       gerencia: last.gerencia || first.gerencia || "",
-      codpla: (last.idMotivo || first.idMotivo || "").toUpperCase(),
-      motivoLabel: motivoLabelOf(last.idMotivo ? last : first),
+      codpla: (motivoRow.idMotivo || first.idMotivo || "").toUpperCase(),
+      motivoLabel: motivoLabelOf(motivoRow),
       inicioTs: first.ts,
       ultimaTs: last.ts,
-      filas: rows.length,
+      filas: lastStreak.rows.length,
       fechaIngresoTs: p ? p.altaTs : null
     });
   });
@@ -2082,7 +2184,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const casesFull = useMemo(()=> cases.map(c=>{
     const manual = casesManual.get(c.id) || {};
     return {...c,
-      tipo: manual.tipo || "",
+      tipo: cronicoTipoAuto(c),
       notificar: manual.notificar || "",
       opinionMedica: manual.opinionMedica || "",
       tactoEmpleado: manual.tactoEmpleado || "",
@@ -2136,8 +2238,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       });
     });
   }
-
-  function setTipoInline(caseObj, value){ saveCase({...caseObj, tipo:value}); }
 
   function commitField(caseObj, field, value){
     saveCase({...caseObj, [field]: value});
@@ -2219,11 +2319,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.sindicato||"—"}</td>
                       <td>{c.gerencia||"—"}</td>
                       <td>{c.codpla||"—"}</td>
-                      <td>
-                        <select value={c.tipo} onChange={e=>setTipoInline(c, e.target.value)} disabled={!dbReady}>
-                          {CRONICO_TIPOS.map(t=>(<option key={t} value={t}>{t||"(sin definir)"}</option>))}
-                        </select>
-                      </td>
+                      <td>{c.tipo}</td>
                       <td>{fmtDateFromTs(c.inicioTs)}</td>
                       <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
                       <td>{c.motivoLabel||"—"}</td>
