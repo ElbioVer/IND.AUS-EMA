@@ -189,6 +189,8 @@ svg.chart{width:100%;height:auto;display:block;overflow:visible;margin-top:8px;}
 .cronicos-tab input[type=text],.cronicos-tab textarea{border:1px solid var(--border);background:var(--plane);color:var(--ink);border-radius:8px;padding:8px 10px;font-size:13.5px;font-family:inherit;width:100%;}
 .cronicos-tab textarea{resize:vertical;}
 .cronicos-tab .field{margin-bottom:10px;}
+.cronico-row-warn td{background:color-mix(in srgb, var(--warning) 20%, var(--surface));}
+.cronico-row-alert td{background:color-mix(in srgb, var(--critical) 20%, var(--surface));}
 .cronicos-tab td input[type=text]{min-width:110px;padding:5px 7px;font-size:12.5px;}
 .login-form input{border:1px solid var(--border);background:var(--plane);color:var(--ink);border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit;width:100%;}
 .sim-result{display:flex;flex-direction:column;gap:14px;justify-content:center;}
@@ -795,6 +797,15 @@ function buildUnitsMap(rows){
   });
   return map;
 }
+function buildGroupMap(rows, field){
+  const map = new Map();
+  rows.forEach(r=>{
+    const key = r[field] || "(Sin "+field+")";
+    if(!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  });
+  return map;
+}
 function unitStats(rows, excludedMotivos){
   const exMot = excludedMotivos || new Set();
   const dotSet = new Set(), daySet = new Set();
@@ -1059,7 +1070,12 @@ const COMPOSITION_CATS = [
   {key:"ausC", label:"Ausencia (contabilizada)", color:"var(--critical)"},
   {key:"ausX", label:"Ausencia (excluida)", color:"var(--muted)"}
 ];
-function CompositionChart({units}){
+const AP_ANP_CATS = [
+  {key:"ap", label:"AP (Ausente pago)", color:"var(--cat-ap)"},
+  {key:"anp", label:"ANP (Ausente no pago)", color:"var(--cat-anp)"}
+];
+function CompositionChart({units, cats}){
+  const CATS = cats || COMPOSITION_CATS;
   if(!units.length) return <div className="hint">Sin datos para mostrar con estos filtros.</div>;
   const chartW=640, rowH=34, topPad=8;
   const H = topPad*2+rowH*units.length;
@@ -1069,10 +1085,10 @@ function CompositionChart({units}){
       <svg className="chart" viewBox={"0 0 "+chartW+" "+H}>
         {units.map((u,i)=>{
           const y = topPad+i*rowH;
-          const total = (u.ausC||0)+(u.ausX||0) || 1;
+          const total = CATS.reduce((a,cat)=>a+(u[cat.key]||0),0) || 1;
           let x = barX0;
           const segs = [];
-          COMPOSITION_CATS.forEach(cat=>{
+          CATS.forEach(cat=>{
             const v = u[cat.key]||0;
             const w = Math.max(0, barW*v/total - 2);
             if(w>0){
@@ -1089,7 +1105,7 @@ function CompositionChart({units}){
         })}
       </svg>
       <div className="legend">
-        {COMPOSITION_CATS.map(c=>(<div key={c.key} className="item"><span className="swatch" style={{background:c.color}}></span>{c.label}</div>))}
+        {CATS.map(c=>(<div key={c.key} className="item"><span className="swatch" style={{background:c.color}}></span>{c.label}</div>))}
       </div>
     </React.Fragment>
   );
@@ -1211,6 +1227,17 @@ function cronicoTipoAuto(c){
   if(mk==="PRD") return "PROC BAJA";
   if(cronicoDias(c.inicioTs) > 10) return "CRONICO";
   return "ACTUAL";
+}
+// Estado de alerta de la fila según la fecha de "Notificar Res. Puesto" (c.notificar, "YYYY-MM-DD"):
+// "alert" (rojo) el día de la notificación o después; "warn" (naranja) durante la semana previa; si no, null.
+function cronicoNotificarStatus(c){
+  const ts = isoDateToTs(c.notificar);
+  if(ts==null) return null;
+  const now = new Date();
+  const todayTs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  if(todayTs >= ts) return "alert";
+  if(todayTs >= ts - 7*86400000) return "warn";
+  return null;
 }
 function cronicoDias(inicioTs){
   const now = new Date();
@@ -1748,6 +1775,106 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
     </div>
   );
 }
+function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, scopeMonthKeys}){
+  const gerencias = parsed.gerencias || [];
+  const [gerenciaSel, setGerenciaSel] = useState(gerencias[0] || "");
+  useEffect(()=>{ if((!gerenciaSel || !gerencias.includes(gerenciaSel)) && gerencias.length) setGerenciaSel(gerencias[0]); }, [gerencias.join("|")]);
+  const [audit, setAudit] = useState(null);
+
+  const baseRecords = useMemo(()=>{
+    if(!gerenciaSel) return [];
+    return parsed.records.filter(r=> r.valid
+      && r.gerencia===gerenciaSel
+      && (!mesFilter || (r.monthKey && mesFilter.has(r.monthKey)))
+      && (!empresaIncluded || !r.empresa || empresaIncluded.has(r.empresa)));
+  }, [parsed, gerenciaSel, mesFilter, empresaIncluded]);
+
+  const deptUnitsMap = useMemo(()=> buildGroupMap(baseRecords, "departamento"), [baseRecords]);
+
+  const plantelDept = useMemo(()=>{
+    if(!plantel || !plantel.length || !gerenciaSel) return [];
+    return plantel.filter(p=> p.gerencia===gerenciaSel && (!empresaIncluded || !p.empresa || empresaIncluded.has(p.empresa)));
+  }, [plantel, gerenciaSel, empresaIncluded]);
+  const plantelActive = plantelDept.length>0;
+
+  const deptRanking = useMemo(()=>{
+    const base = Array.from(deptUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
+    if(plantelActive){
+      base.forEach(u=>{
+        const employees = plantelDept.filter(p=> (p.departamento||"(Sin departamento)")===u.name);
+        const st = plantelScopeStats(employees, scopeMonthKeys);
+        u.jornalesDotacion = st.jornalesDotacion;
+        u.dotacionEquivalente = st.dotacionEquivalente;
+        u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
+      });
+    }
+    return base.sort((a,b)=>b.pct-a.pct);
+  }, [deptUnitsMap, excludedMotivos, plantelActive, plantelDept, scopeMonthKeys]);
+
+  const totalDotacion = plantelActive ? deptRanking.reduce((a,u)=>a+(u.dotacionEquivalente||0),0) : new Set(baseRecords.map(r=>r.legajo.toUpperCase())).size;
+  const totalJornales = plantelActive ? deptRanking.reduce((a,u)=>a+(u.jornalesDotacion||0),0) : 0;
+  const totalAusencias = deptRanking.reduce((a,u)=>a+u.ausencias,0);
+  const totalBase = deptRanking.reduce((a,u)=>a+u.base,0);
+  const totalPct = plantelActive ? (totalJornales>0 ? totalAusencias/totalJornales*100 : 0) : (totalBase>0 ? totalAusencias/totalBase*100 : 0);
+
+  function openAudit(title, rows){ setAudit({title, rows}); }
+
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field">
+          <label>Gerencia</label>
+          <select value={gerenciaSel} onChange={e=>setGerenciaSel(e.target.value)}>
+            {gerencias.map(g=>(<option key={g} value={g}>{g}</option>))}
+          </select>
+        </div>
+      </div>
+      {!gerencias.length && <div className="hint">No hay gerencias detectadas en el archivo.</div>}
+      {gerenciaSel && (
+        <React.Fragment>
+          <div className="card chart-card">
+            <h3>Ranking de departamentos — {gerenciaSel}</h3>
+            <p className="desc">Ausentismo (AP+ANP ÷ {plantelActive ? "jornales de dotación del plantel" : "filas activas"}) por departamento, dentro de {gerenciaSel}. La línea punteada marca el objetivo.</p>
+            <RankingChart units={deptRanking} objetivo={objetivo} />
+          </div>
+          <div className="card table-card">
+            <h3>Cumplimiento del objetivo — {gerenciaSel}</h3>
+            <div className="caption">Hacé clic en Dotación o Ausencias para ver y copiar el detalle de esas filas.</div>
+            <div className="overflow-x">
+              <table>
+                <thead><tr><th>Departamento</th><th className="num">{plantelActive ? "Dotación equiv." : "Dotación"}</th><th className="num">Jornales</th><th className="num">Ausencias</th><th className="num">Ausentismo</th><th>Estado</th></tr></thead>
+                <tbody>
+                  {!deptRanking.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin datos para esta gerencia con los filtros actuales.</td></tr>}
+                  {deptRanking.map(u=>(
+                    <tr key={u.name}>
+                      <td>{u.name}</td>
+                      <td className="num"><CellLink onClick={()=>openAudit('Dotación — '+u.name, deptUnitsMap.get(u.name)||[])}>{fmt(plantelActive ? u.dotacionEquivalente : u.dotacion)}</CellLink></td>
+                      <td className="num">{fmt(plantelActive ? u.jornalesDotacion : 0)}</td>
+                      <td className="num"><CellLink onClick={()=>openAudit('Ausencias — '+u.name, (deptUnitsMap.get(u.name)||[]).filter(r=>isCountedCat(r.cat) && !excludedMotivos.has(motivoKeyOf(r))))}>{fmt(u.ausencias)}</CellLink></td>
+                      <td className="num">{fmtPct(u.pct,1)}</td>
+                      <td><SemChip pct={u.pct} objetivo={objetivo} /></td>
+                    </tr>
+                  ))}
+                  {deptRanking.length>0 && (
+                    <tr className="total-row">
+                      <td>Total</td>
+                      <td className="num">{fmt(totalDotacion)}</td>
+                      <td className="num">{fmt(totalJornales)}</td>
+                      <td className="num">{fmt(totalAusencias)}</td>
+                      <td className="num">{fmtPct(totalPct,1)}</td>
+                      <td><SemChip pct={totalPct} objetivo={objetivo} /></td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </React.Fragment>
+      )}
+      {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} />}
+    </div>
+  );
+}
 function EvolucionTab({evoMonths, evoSeries, objetivo}){
   return (
     <div className="tabpanel">
@@ -1762,13 +1889,18 @@ function EvolucionTab({evoMonths, evoSeries, objetivo}){
     </div>
   );
 }
-function TiposTab({compositionData, motivoEntries, hasMotivo}){
+function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo}){
   return (
     <div className="tabpanel">
       <div className="card chart-card">
         <h3>Composición de ausencias por unidad</h3>
         <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos excluidos abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
         <CompositionChart units={compositionData} />
+      </div>
+      <div className="card chart-card">
+        <h3>AP vs ANP por unidad</h3>
+        <p className="desc">Ausente pago vs. ausente no pago, entre las ausencias contabilizadas (no excluidas por motivo) de cada unidad.</p>
+        <CompositionChart units={apAnpData} cats={AP_ANP_CATS} />
       </div>
       {hasMotivo && (
         <div className="card chart-card">
@@ -2395,9 +2527,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
               </tr></thead>
               <tbody>
                 {!sorted.length && <tr><td colSpan="17" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
-                {sorted.map(c=>(
+                {sorted.map(c=>{
+                  const notifStatus = cronicoNotificarStatus(c);
+                  return (
                   <React.Fragment key={c.id}>
-                    <tr>
+                    <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
                       <td>{c.legajo}</td>
                       <td>{c.nombre||"—"}</td>
                       <td>{c.grupo||"—"}</td>
@@ -2418,7 +2552,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
-                      <td><input type="text" defaultValue={c.notificar} onBlur={e=>commitField(c,"notificar",e.target.value)} disabled={!dbReady} /></td>
+                      <td>
+                        <input type="date" defaultValue={c.notificar||""} disabled={!dbReady}
+                          onChange={e=>commitField(c,"notificar", e.target.value||"")}
+                          style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
+                      </td>
                       <td><input type="text" defaultValue={c.opinionMedica} onBlur={e=>commitField(c,"opinionMedica",e.target.value)} disabled={!dbReady} /></td>
                       <td><input type="text" defaultValue={c.tactoEmpleado} onBlur={e=>commitField(c,"tactoEmpleado",e.target.value)} disabled={!dbReady} /></td>
                       <td><input type="text" defaultValue={c.posibleAlta} onBlur={e=>commitField(c,"posibleAlta",e.target.value)} disabled={!dbReady} /></td>
@@ -2450,7 +2588,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       </tr>
                     )}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2831,6 +2970,7 @@ function App({userEmail, onSignOut}){
     return base.sort((a,b)=> unitOrderIndex(a.name)-unitOrderIndex(b.name) || b.pct-a.pct);
   }, [scopeUnitsMap, excludedMotivos, plantelActive, scopePlantel, scopeMonthKeys]);
   const compositionData = useMemo(() => rankingUnits.map(u=>({name:u.name, ausC:u.ausencias, ausX:u.excluded})), [rankingUnits]);
+  const apAnpData = useMemo(() => rankingUnits.map(u=>({name:u.name, ap:u.apContado, anp:u.anpContado})), [rankingUnits]);
   const motivoEntries = useMemo(() => {
     if(!parsed || !parsed.hasMotivo) return [];
     const map = new Map();
@@ -2948,6 +3088,7 @@ function App({userEmail, onSignOut}){
 
   const TABS = [
     {key:"resumen", label:"Resumen"},
+    {key:"resumen_gerencia", label:"Resumen por Gerencia"},
     {key:"evolucion", label:"Evolución mensual"},
     {key:"tipos", label:"Tipos de ausencia"},
     {key:"cronicos", label:"Crónicos"},
@@ -3157,8 +3298,9 @@ function App({userEmail, onSignOut}){
           </nav>
 
           {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} />}
+          {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
-          {activeTab==="tipos" && <TiposTab compositionData={compositionData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
+          {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
           {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
           {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
           {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} />}
