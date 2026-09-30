@@ -2557,7 +2557,6 @@ function App({userEmail, onSignOut}){
   const plantelActive = plantel.length>0;
   const [cuatriSel, setCuatriSel] = useState("");
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
-  const [ausUpdateHistorial, setAusUpdateHistorial] = useState([]);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [cloudError, setCloudError] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
@@ -2757,10 +2756,6 @@ function App({userEmail, onSignOut}){
     });
     setParsed(next);
     setFileName(next.fileName);
-    setAusUpdateHistorial(h => [{
-      fecha: new Date(), archivo: ausUpdatePreview.fileName, encontrados: ausUpdatePreview.encontrados,
-      nuevos: ausUpdatePreview.nuevos, modificados: ausUpdatePreview.modificados, sinCambios: ausUpdatePreview.sinCambios
-    }, ...h]);
     const changedRows = (ausUpdatePreview.changedRows||[]).map(ausRecordToRow);
     setAusUpdatePreview(null);
     if(changedRows.length){
@@ -2784,49 +2779,6 @@ function App({userEmail, onSignOut}){
     e.target.value = "";
   };
 
-  /* ---- Verificación (Bloque A/B) — sin filtros, sobre el archivo completo ---- */
-  const blockA = useMemo(() => {
-    if(!parsed) return null;
-    const {rows, total} = buildCategoryRows(parsed.records, parsed.categories);
-    const cantP = rows.find(r=>r.key==="P")?.n || 0;
-    return {rows, total, cantP};
-  }, [parsed]);
-  const availableYears = useMemo(() => {
-    if(!parsed) return [];
-    const ys = new Set();
-    parsed.monthKeys.forEach(k => ys.add(parseInt(k.split("-")[0],10)));
-    return Array.from(ys).sort((a,b)=>a-b);
-  }, [parsed]);
-  const monthRecords = useMemo(() => {
-    if(!parsed || !sel) return [];
-    return parsed.records.filter(r => r.valid && r.anio===sel.year && r.mes===sel.month);
-  }, [parsed, sel]);
-  const blockB = useMemo(() => {
-    if(!parsed) return null;
-    const {rows, total} = buildCategoryRows(monthRecords, parsed.categories);
-    const cantP = rows.find(r=>r.key==="P")?.n || 0;
-    const legajos = new Set();
-    monthRecords.forEach(r => { if(r.legajo!=="") legajos.add(r.legajo.toUpperCase()); });
-    return {rows, total, cantP, empleados: legajos.size};
-  }, [monthRecords, parsed]);
-  const monthKeyStr = sel ? sel.year+"-"+pad2(sel.month) : null;
-  const filasMesDetectadas = monthKeyStr && parsed ? (parsed.monthMap.get(monthKeyStr)||0) : 0;
-  const controlFilasOk = blockB ? (filasMesDetectadas === blockB.total) : false;
-  const controlInvalidOk = parsed ? parsed.invalidCount === 0 : false;
-  const todoOk = controlFilasOk && controlInvalidOk;
-  const isRefFile = parsed && parsed.totalRows === REF_ROWS;
-  const refMismatches = useMemo(() => {
-    if(!isRefFile || !parsed) return [];
-    const bad = [];
-    Object.keys(REF_MONTHS).forEach(mo => {
-      const key = "2026-"+pad2(parseInt(mo,10));
-      const got = parsed.monthMap.get(key) || 0;
-      if(got !== REF_MONTHS[mo]) bad.push(mo);
-    });
-    return bad;
-  }, [isRefFile, parsed]);
-  const desde = sel ? fmtDate(1, sel.month, sel.year) : "—";
-  const hasta = sel ? fmtDate(daysInMonth(sel.month, sel.year), sel.month, sel.year) : "—";
   const rangoDesde = parsed && parsed.minTs!=null ? new Date(parsed.minTs) : null;
   const rangoHasta = parsed && parsed.maxTs!=null ? new Date(parsed.maxTs) : null;
 
@@ -2998,12 +2950,10 @@ function App({userEmail, onSignOut}){
     {key:"resumen", label:"Resumen"},
     {key:"evolucion", label:"Evolución mensual"},
     {key:"tipos", label:"Tipos de ausencia"},
+    {key:"cronicos", label:"Crónicos"},
     {key:"ranking", label:"Ranking"},
     {key:"detalle_empleados", label:"Detalle Empleados"},
-    {key:"simulador", label:"Simulador"},
-    {key:"plantel", label:"Gestión de Plantel"},
-    {key:"cronicos", label:"Crónicos"},
-    {key:"verificacion", label:"Verificación"}
+    {key:"plantel", label:"Gestión de Plantel"}
   ];
   const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
 
@@ -3109,8 +3059,8 @@ function App({userEmail, onSignOut}){
 
           <div className="filters-bar no-print">
             <MultiSelect label="Mes" options={mesOptions} selected={FILTERS.mes} onChange={v=>setFilterDim("mes",v)} allLabel="Todos los meses" />
-            <MultiSelect label="Departamento" options={deptOptions} selected={FILTERS.departamento} onChange={v=>setFilterDim("departamento",v)} allLabel="Todos" />
             <MultiSelect label="Gerencia" options={gerOptions} selected={FILTERS.gerencia} onChange={v=>setFilterDim("gerencia",v)} allLabel="Todos" />
+            <MultiSelect label="Departamento" options={deptOptions} selected={FILTERS.departamento} onChange={v=>setFilterDim("departamento",v)} allLabel="Todos" />
             <MultiSelect label="Sector" options={secOptions} selected={FILTERS.sector} onChange={v=>setFilterDim("sector",v)} allLabel="Todos" />
           </div>
 
@@ -3211,132 +3161,8 @@ function App({userEmail, onSignOut}){
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
           {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
           {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
-          {activeTab==="simulador" && <SimuladorTab rankingUnits={rankingUnits} objetivo={objetivo} />}
           {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} />}
           {activeTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} />}
-
-          {activeTab==="verificacion" && (
-            <div className="tabpanel">
-              <p className="hint">Esta pestaña es la verificación fila-por-fila sobre el archivo completo, sin los filtros de arriba — sirve para confirmar que los totales cargados coinciden con tu Excel.</p>
-              {ausUpdateHistorial.length>0 && (
-                <div className="card table-card">
-                  <h3>Historial de actualizaciones del archivo de ausentismo (esta sesión)</h3>
-                  <div className="overflow-x">
-                    <table>
-                      <thead><tr><th>Fecha y hora</th><th>Archivo</th><th className="num">Encontradas</th><th className="num">Nuevas</th><th className="num">Modificadas</th><th className="num">Sin cambios</th></tr></thead>
-                      <tbody>
-                        {ausUpdateHistorial.map((h,i)=>(
-                          <tr key={i}>
-                            <td>{h.fecha.toLocaleString("es-AR")}</td>
-                            <td>{h.archivo}</td>
-                            <td className="num">{fmt(h.encontrados)}</td>
-                            <td className="num">{fmt(h.nuevos)}</td>
-                            <td className="num">{fmt(h.modificados)}</td>
-                            <td className="num">{fmt(h.sinCambios)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-              <DefaultMotivoRefTable />
-              <div className="kpi-grid">
-                <KpiTile label="Empleados únicos (total)" value={parsed.empleadosTotal} />
-                <KpiTile label='Cantidad de "P" (total)' value={blockA.cantP} />
-                <KpiTile label="Empleados únicos (mes)" value={blockB ? blockB.empleados : 0} month />
-                <KpiTile label='Cantidad de "P" (mes)' value={blockB ? blockB.cantP : 0} month />
-              </div>
-
-              <div className="card controls">
-                <div className="field">
-                  <label>Mes</label>
-                  <select value={sel ? sel.month : ""} onChange={e => setSel(s => ({year: s ? s.year : availableYears[availableYears.length-1], month: parseInt(e.target.value,10)}))}>
-                    {MESES.map((m,i) => <option key={i+1} value={i+1}>{m}</option>)}
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Año</label>
-                  <select value={sel ? sel.year : ""} onChange={e => setSel(s => ({year: parseInt(e.target.value,10), month: s ? s.month : 1}))}>
-                    {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
-                  </select>
-                </div>
-                <div className="range-readout">
-                  <span className="lbl">Desde</span>
-                  <span className="val">{desde}</span>
-                </div>
-                <div className="range-readout">
-                  <span className="lbl">Hasta</span>
-                  <span className="val">{hasta}</span>
-                </div>
-                <div className="spacer" style={{flex:1}}></div>
-                <div className={"pill " + (todoOk ? "ok" : "bad")}>{todoOk ? "¿Todo OK? — OK" : "¿Todo OK? — ERROR"}</div>
-              </div>
-
-              <div className="status-row">
-                <div className={"chip " + (controlFilasOk ? "ok" : "bad")}>
-                  <span className="dot"></span>
-                  Filas del mes: {fmt(filasMesDetectadas)} {controlFilasOk ? "✅ coincide con el total de la tabla" : "❌ no coincide con el total de la tabla ("+fmt(blockB?blockB.total:0)+")"}
-                </div>
-                <div className={"chip " + (controlInvalidOk ? "ok" : "bad")}>
-                  <span className="dot"></span>
-                  Entradas con formato inválido (todo el archivo): {fmt(parsed.invalidCount)} {controlInvalidOk ? "✅" : "❌ debería ser 0"}
-                </div>
-              </div>
-
-              <div className="tables-grid">
-                <CategoryTable
-                  title="Bloque A — Totales generales"
-                  caption="Todas las filas del archivo"
-                  rows={blockA.rows}
-                  total={blockA.total}
-                />
-                <CategoryTable
-                  title={"Bloque B — " + (sel ? MESES[sel.month-1]+" "+sel.year : "sin datos")}
-                  caption={sel ? "Filtrado por Entrada, desde "+desde+" hasta "+hasta : "No hay meses detectados"}
-                  rows={blockB ? blockB.rows : []}
-                  total={blockB ? blockB.total : 0}
-                />
-              </div>
-
-              <div className="card footer-card">
-                <h3>Autovalidación — Filas por mes</h3>
-                {isRefFile && refMismatches.length > 0 && (
-                  <div className="warn-banner">Fechas mal interpretadas: los meses {refMismatches.map(m=>MESES[m-1]).join(", ")} no coinciden con los valores esperados del archivo de referencia.</div>
-                )}
-                {isRefFile && refMismatches.length === 0 && (
-                  <div className="hint">Archivo de referencia detectado ({fmt(REF_ROWS)} filas) — los 9 meses de 2026 coinciden exactamente con los valores esperados.</div>
-                )}
-                <div className="overflow-x">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Mes</th>
-                        <th className="num">Filas detectadas</th>
-                        {isRefFile && <th className="num">Esperado</th>}
-                        {isRefFile && <th className="status">Estado</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {parsed.monthKeys.map(key => {
-                        const [y,m] = key.split("-").map(x=>parseInt(x,10));
-                        const n = parsed.monthMap.get(key) || 0;
-                        const ref = (isRefFile && y===2026 && REF_MONTHS[m]!=null) ? REF_MONTHS[m] : null;
-                        return (
-                          <tr key={key}>
-                            <td>{MESES[m-1]} {y}</td>
-                            <td className="num">{fmt(n)}</td>
-                            {isRefFile && <td className="num">{ref!=null ? fmt(ref) : "—"}</td>}
-                            {isRefFile && <td className="status">{ref!=null ? (ref===n ? "✅" : "❌") : "—"}</td>}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
         </React.Fragment>
       )}
     </div>
