@@ -264,16 +264,63 @@ const PLANTEL_TABLE = "plantel_empleados";
 const SYNC_PAGE_SIZE = 1000;
 const SYNC_BATCH_SIZE = 1000;
 
-async function fetchAllRows(table){
+// Trae solo las filas nuevas/modificadas desde "sinceIso" (updated_at > sinceIso).
+// Sin sinceIso, trae todo — se usa una sola vez, la primera vez que se abre en un navegador.
+async function fetchRowsSince(table, sinceIso){
   let from = 0, out = [];
   while(true){
-    const {data, error} = await supabaseClient.from(table).select("*").range(from, from+SYNC_PAGE_SIZE-1);
+    let q = supabaseClient.from(table).select("*");
+    if(sinceIso) q = q.gt("updated_at", sinceIso);
+    q = q.order("updated_at", {ascending:true}).range(from, from+SYNC_PAGE_SIZE-1);
+    const {data, error} = await q;
     if(error) throw error;
     out = out.concat(data);
     if(!data.length || data.length < SYNC_PAGE_SIZE) break;
     from += SYNC_PAGE_SIZE;
   }
   return out;
+}
+function maxUpdatedAt(rows, startFrom){
+  return rows.reduce((a,r)=> (r.updated_at && r.updated_at>a ? r.updated_at : a), startFrom||"1970-01-01T00:00:00Z");
+}
+function mergeRawRowsById(existingRows, newRows, idField){
+  const map = new Map(existingRows.map(r=>[r[idField], r]));
+  newRows.forEach(r=> map.set(r[idField], r));
+  return Array.from(map.values());
+}
+
+/* ===================== caché local (IndexedDB) — evita re-descargar todo en cada visita ===================== */
+const IDB_NAME = "radar_ausentismo_cache";
+const IDB_STORE = "kv";
+function idbOpen(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+async function idbGet(key){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error);
+    });
+  }catch(e){ return undefined; } // sin IndexedDB (privado/bloqueado): sigue andando sin caché
+}
+async function idbSet(key, value){
+  try{
+    const db = await idbOpen();
+    await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = ()=> resolve();
+      tx.onerror = ()=> reject(tx.error);
+    });
+  }catch(e){ /* caché best-effort, no rompe nada si falla */ }
 }
 async function upsertWithRetry(table, batch, onConflict, attempts){
   let lastErr = null;
@@ -2542,8 +2589,14 @@ function App({userEmail, onSignOut}){
       setCloudLoading(true);
       setCloudError(null);
       try{
-        const [plantelRows, ausRows] = await Promise.all([fetchAllRows(PLANTEL_TABLE), fetchAllRows(AUSENTISMO_TABLE)]);
+        // 1) primero, lo que ya quedó guardado en este navegador de la vez pasada — se ve al instante, sin red.
+        const [cachedAusRows, cachedAusSync, cachedPlantelRows, cachedPlantelSync] = await Promise.all([
+          idbGet("ausentismo_rows"), idbGet("ausentismo_lastSync"), idbGet("plantel_rows"), idbGet("plantel_lastSync")
+        ]);
         if(cancelled) return;
+        let ausRows = cachedAusRows || [];
+        let plantelRows = cachedPlantelRows || [];
+        let prevAggregate = null;
         if(plantelRows.length){
           setPlantel(plantelRows.map(plantelRowToRecord));
           setPlantelUpdatedAt(new Date());
@@ -2551,7 +2604,54 @@ function App({userEmail, onSignOut}){
         if(ausRows.length){
           const records = ausRows.map(ausRowToRecord);
           const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
+          prevAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
           applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+        }
+        setCloudLoading(false);
+
+        // 2) después, en segundo plano, solo lo nuevo/modificado desde la última vez (no vuelve a bajar todo).
+        const [newPlantelRows, newAusRows] = await Promise.all([
+          fetchRowsSince(PLANTEL_TABLE, cachedPlantelSync),
+          fetchRowsSince(AUSENTISMO_TABLE, cachedAusSync)
+        ]);
+        if(cancelled) return;
+
+        if(newPlantelRows.length){
+          plantelRows = mergeRawRowsById(plantelRows, newPlantelRows, "legajo");
+          setPlantel(plantelRows.map(plantelRowToRecord));
+          setPlantelUpdatedAt(new Date());
+          idbSet("plantel_rows", plantelRows);
+          idbSet("plantel_lastSync", maxUpdatedAt(newPlantelRows, cachedPlantelSync));
+        }
+        if(newAusRows.length){
+          ausRows = mergeRawRowsById(ausRows, newAusRows, "id");
+          const records = ausRows.map(ausRowToRecord);
+          const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
+          const nextAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
+          if(prevAggregate){
+            // ya había datos en caché: solo sumar lo nuevo, sin resetear filtros/selecciones que el usuario ya haya tocado
+            setExcludedMotivos(prev => {
+              const out = new Set(prev);
+              nextAggregate.motivoUniverse.forEach(m=>{ if(!prevAggregate.motivoUniverse.some(om=>om.key===m.key) && isDefaultExcludedMotivoKey(m.key)) out.add(m.key); });
+              return out;
+            });
+            setRankingIdIncluded(prev => {
+              const out = new Set(prev);
+              nextAggregate.idMotivoUniverse.forEach(m=>{ if(!prevAggregate.idMotivoUniverse.some(om=>om.key===m.key) && isDefaultIncludedMotivoCode(m.key)) out.add(m.key); });
+              return out;
+            });
+            setRankingPresIncluded(prev => {
+              const out = new Set(prev);
+              nextAggregate.presidenciaUniverse.forEach(v=>{ if(!prevAggregate.presidenciaUniverse.includes(v) && RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)) out.add(v); });
+              return out;
+            });
+            setParsed(nextAggregate);
+            setFileName(nextAggregate.fileName);
+          } else {
+            applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+          }
+          idbSet("ausentismo_rows", ausRows);
+          idbSet("ausentismo_lastSync", maxUpdatedAt(newAusRows, cachedAusSync));
         }
       }catch(err){
         if(!cancelled) setCloudError("No se pudieron cargar los datos guardados en el servidor: " + (err && err.message ? err.message : String(err)));
