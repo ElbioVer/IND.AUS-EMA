@@ -1775,7 +1775,7 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
     </div>
   );
 }
-function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, scopeMonthKeys}){
+function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, setExcludedMotivos, scopeMonthKeys}){
   const gerencias = parsed.gerencias || [];
   const [gerenciaSel, setGerenciaSel] = useState(gerencias[0] || "");
   useEffect(()=>{ if((!gerenciaSel || !gerencias.includes(gerenciaSel)) && gerencias.length) setGerenciaSel(gerencias[0]); }, [gerencias.join("|")]);
@@ -1788,6 +1788,20 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
       && (!mesFilter || (r.monthKey && mesFilter.has(r.monthKey)))
       && (!empresaIncluded || !r.empresa || empresaIncluded.has(r.empresa)));
   }, [parsed, gerenciaSel, mesFilter, empresaIncluded]);
+
+  const motivoUniverseLocal = useMemo(() => {
+    if(!parsed.hasMotivo) return [];
+    const counts = new Map();
+    baseRecords.forEach(r => {
+      if(!isCountedCat(r.cat)) return;
+      const k = motivoKeyOf(r);
+      counts.set(k, (counts.get(k)||0)+1);
+    });
+    return parsed.motivoUniverse.map(m => ({...m, count: counts.get(m.key)||0}));
+  }, [parsed, baseRecords]);
+  function auditMotivo(m){
+    openAudit('Ausencias — '+m.label, baseRecords.filter(r=>isCountedCat(r.cat) && motivoKeyOf(r)===m.key));
+  }
 
   const deptUnitsMap = useMemo(()=> buildGroupMap(baseRecords, "departamento"), [baseRecords]);
 
@@ -1871,6 +1885,7 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
           </div>
         </React.Fragment>
       )}
+      <MotivoChecklist motivoUniverse={motivoUniverseLocal} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />
       {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} />}
     </div>
   );
@@ -3298,7 +3313,7 @@ function App({userEmail, onSignOut}){
           </nav>
 
           {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} />}
-          {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
+          {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
           {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
