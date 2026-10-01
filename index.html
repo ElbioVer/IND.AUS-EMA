@@ -2169,7 +2169,10 @@ function DetalleEmpleadosTab({parsed, plantel}){
       .card{border:1px solid #ccc;border-radius:10px;padding:16px 18px;margin-bottom:16px;break-inside:avoid;}
       .card h3{margin:0 0 8px;font-size:14.5px;}
       .desc,.caption{color:#555;font-size:12px;margin:0 0 8px;}
-      .ficha-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 20px;}
+      .print-row{display:flex;gap:16px;align-items:stretch;break-inside:avoid;}
+      .print-row>.card{flex:1;margin-bottom:0;min-width:0;}
+      .print-page-break{page-break-before:always;break-before:page;}
+      .ficha-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 16px;}
       .lbl{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:700;}
       .val{display:block;font-size:14px;font-weight:600;margin-top:2px;color:#000;}
       table{width:100%;border-collapse:collapse;font-size:12.5px;}
@@ -2235,32 +2238,34 @@ function DetalleEmpleadosTab({parsed, plantel}){
         </div>
       )}
 
-      {ficha && (
-        <div className="card table-card de-print-block">
-          <h3>Ficha del empleado</h3>
-          <div className="ficha-grid">
-            <div><span className="lbl">Legajo</span><span className="val">{ficha.legajo}</span></div>
-            <div><span className="lbl">Nombre</span><span className="val">{ficha.nombre || "—"}</span></div>
-            <div><span className="lbl">Unidad de Negocio</span><span className="val">{ficha.unidad || "—"}</span></div>
-            <div><span className="lbl">Sector</span><span className="val">{ficha.sector || "—"}</span></div>
-            <div><span className="lbl">Puesto</span><span className="val">{ficha.puesto || "—"}</span></div>
-            <div><span className="lbl">Jefe directo</span><span className="val">{ficha.jefe || "—"}</span></div>
-            <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
-            <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
+      <div className="print-row de-print-block">
+        {ficha && (
+          <div className="card table-card">
+            <h3>Ficha del empleado</h3>
+            <div className="ficha-grid">
+              <div><span className="lbl">Legajo</span><span className="val">{ficha.legajo}</span></div>
+              <div><span className="lbl">Nombre</span><span className="val">{ficha.nombre || "—"}</span></div>
+              <div><span className="lbl">Unidad de Negocio</span><span className="val">{ficha.unidad || "—"}</span></div>
+              <div><span className="lbl">Sector</span><span className="val">{ficha.sector || "—"}</span></div>
+              <div><span className="lbl">Puesto</span><span className="val">{ficha.puesto || "—"}</span></div>
+              <div><span className="lbl">Jefe directo</span><span className="val">{ficha.jefe || "—"}</span></div>
+              <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
+              <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="card chart-card de-print-block">
-        <h3>Días por categoría</h3>
-        <p className="desc">Cantidad de filas del período elegido — no depende del filtro de Id Motivo de abajo.</p>
-        <EmployeeBarChart items={[
-          {label:"Presentes", value:cardVals.presentes, color:"#3CC84A"},
-          {label:"Vacaciones", value:cardVals.vac, color:"#2FB38A"},
-          {label:"Ausente Pago", value:cardVals.ap, color:"#F5A62B"},
-          {label:"Ausente No Pago", value:cardVals.anp, color:"#F0605D"},
-          {label:"Sanciones", value:cardVals.sanciones, color:"#E8508C"}
-        ]} />
+        <div className="card chart-card">
+          <h3>Días por categoría</h3>
+          <p className="desc">Cantidad de filas del período elegido — no depende del filtro de Id Motivo de abajo.</p>
+          <EmployeeBarChart items={[
+            {label:"Presentes", value:cardVals.presentes, color:"#3CC84A"},
+            {label:"Vacaciones", value:cardVals.vac, color:"#2FB38A"},
+            {label:"Ausente Pago", value:cardVals.ap, color:"#F5A62B"},
+            {label:"Ausente No Pago", value:cardVals.anp, color:"#F0605D"},
+            {label:"Sanciones", value:cardVals.sanciones, color:"#E8508C"}
+          ]} />
+        </div>
       </div>
 
       <div className="card table-card no-print">
@@ -2283,7 +2288,7 @@ function DetalleEmpleadosTab({parsed, plantel}){
         </div>
       </div>
 
-      <div className="card table-card de-print-block">
+      <div className="card table-card de-print-block print-page-break">
         <h3>{ausenciaRows.length ? ("DETALLE DE AUSENCIAS (" + fmt(ausenciaRows.length) + " días)") : "Sin ausencias en el período"}</h3>
         {ausenciaRows.length>0 && (
           <div className="overflow-x">
