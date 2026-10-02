@@ -1,5 +1,15 @@
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Indicador de Ausentismo / Presentismo</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0c2e80">
+<meta name="application-name" content="Ausentismo EMA">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Ausentismo EMA">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="icon" type="image/png" sizes="48x48" href="favicon-48.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
@@ -3334,4 +3344,9 @@ function App({userEmail, onSignOut}){
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<AuthGate />);
+
+if("serviceWorker" in navigator && (location.protocol==="https:" || location.hostname==="localhost")){
+  const registerSW = ()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); };
+  if(document.readyState==="complete") registerSW(); else window.addEventListener("load", registerSW);
+}
 </script>
