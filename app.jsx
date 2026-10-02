@@ -598,22 +598,30 @@ function unitStats(rows, excludedMotivos){
   return {dotacion:dotSet.size, presentes, ausencias, excluded, vac, franco, ap, anp, apContado, anpContado, baja, ce, base, total, dias:daySet.size, pct};
 }
 /* ---- plantel: días activos / jornales de dotación ---- */
-function activeDaysInMonth(altaTs, bajaTs, year, month){
-  const first = Date.UTC(year, month-1, 1);
+// cutoffTs = último día con datos cargados: el mes en curso se cuenta solo hasta esa fecha (no el mes completo).
+function monthLastTs(year, month, cutoffTs){
   const last = Date.UTC(year, month-1, daysInMonth(month, year));
+  return cutoffTs!=null && cutoffTs<last ? cutoffTs : last;
+}
+function activeDaysInMonth(altaTs, bajaTs, year, month, cutoffTs){
+  const first = Date.UTC(year, month-1, 1);
+  const last = monthLastTs(year, month, cutoffTs);
   const start = Math.max(altaTs, first);
   const end = bajaTs!=null ? Math.min(bajaTs, last) : last;
   if(end < start) return 0;
   return Math.round((end-start)/86400000) + 1;
 }
 function monthKeyParts(mk){ const [y,m] = mk.split("-"); return {year:+y, month:+m}; }
-function plantelScopeStats(employees, monthKeys){
+function plantelScopeStats(employees, monthKeys, cutoffTs){
   let jornalesDotacion = 0, diasPeriodo = 0, empleadosConsiderados = 0;
   const months = (monthKeys||[]).map(monthKeyParts);
-  months.forEach(({year,month}) => { diasPeriodo += daysInMonth(month, year); });
+  months.forEach(({year,month}) => {
+    const first = Date.UTC(year, month-1, 1), last = monthLastTs(year, month, cutoffTs);
+    if(last >= first) diasPeriodo += Math.round((last-first)/86400000) + 1;
+  });
   employees.forEach(p => {
     let dias = 0;
-    months.forEach(({year,month}) => { dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month); });
+    months.forEach(({year,month}) => { dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month, cutoffTs); });
     if(dias>0) empleadosConsiderados++;
     jornalesDotacion += dias;
   });
@@ -683,6 +691,46 @@ function KTile({label, value}){
     <div className="ktile">
       <span className="kt-label">{label}</span>
       <span className="kt-value">{value}</span>
+    </div>
+  );
+}
+// incidencia de AP, ANP y Vacaciones sobre el mismo denominador que la tasa de ausentismo
+function incidenciaStats(agg, plantelStats){
+  const denom = plantelStats && plantelStats.jornalesDotacion>0 ? plantelStats.jornalesDotacion : agg.base;
+  const pc = v => denom>0 ? v/denom*100 : 0;
+  return {pctAp: pc(agg.apContado), pctAnp: pc(agg.anpContado), pctVac: pc(agg.vac)};
+}
+function KpiGroups({plantelActive, dotacion, plantelStats, agg}){
+  const inc = incidenciaStats(agg, plantelActive ? plantelStats : null);
+  return (
+    <div className="kgroups no-print">
+      <div className="kgroup">
+        <div className="kgroup-head">Distribución Empleados</div>
+        <div className="kgroup-tiles">
+          <KTile label={plantelActive ? "Dotación equiv." : "Dotación"} value={fmt(dotacion)} />
+          <KTile label="Jornales" value={fmt(plantelActive && plantelStats ? plantelStats.jornalesDotacion : 0)} />
+        </div>
+      </div>
+      <div className="kgroup xwide">
+        <div className="kgroup-head">Ausentismo</div>
+        <div className="kgroup-tiles">
+          <KTile label="Tasa de ausentismo" value={fmtPct(agg.pct,2)} />
+          <KTile label="Total ausentes" value={fmt(agg.ausencias)} />
+        </div>
+        <div className="kgroup-tiles kt-detail">
+          <KTile label="AP" value={fmt(agg.apContado)} />
+          <KTile label="% AP" value={fmtPct(inc.pctAp,2)} />
+          <KTile label="ANP" value={fmt(agg.anpContado)} />
+          <KTile label="% ANP" value={fmtPct(inc.pctAnp,2)} />
+        </div>
+      </div>
+      <div className="kgroup">
+        <div className="kgroup-head">Tasa de Vacaciones</div>
+        <div className="kgroup-tiles">
+          <KTile label="Vacaciones" value={fmt(agg.vac)} />
+          <KTile label="% s/ jornales" value={fmtPct(inc.pctVac,2)} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -1467,7 +1515,7 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
 }
 
 /* ===================== tabs ===================== */
-function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal}){
+function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs}){
   const [audit, setAudit] = useState(null);
   function openAudit(title, rows, cols, rowToArr){ setAudit({title, rows, cols, rowToArr}); }
   function auditAusencias(u){ openAudit('Ausencias contabilizadas — '+u.name, (scopeUnitsMap.get(u.name)||[]).filter(r=>isCountedCat(r.cat) && !excludedMotivos.has(motivoKeyOf(r)))); }
@@ -1475,7 +1523,7 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
     if(plantelActive){
       const roster = (scopePlantel||[]).filter(p => (p.unidad||"(Sin unidad)")===u.name).map(p => {
         let dias = 0;
-        scopeMonthKeys.forEach(mk => { const {year,month} = monthKeyParts(mk); dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month); });
+        scopeMonthKeys.forEach(mk => { const {year,month} = monthKeyParts(mk); dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month, cutoffTs); });
         return {...p, _diasActivos: dias};
       });
       openAudit('Dotación (plantel) — '+u.name, roster, AUDIT_COLS_PLANTEL, auditPlantelRowArr);
@@ -1588,14 +1636,14 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
     if(plantelActive){
       base.forEach(u=>{
         const employees = plantelDept.filter(p=> (p.departamento||"(Sin departamento)")===u.name);
-        const st = plantelScopeStats(employees, scopeMonthKeys);
+        const st = plantelScopeStats(employees, scopeMonthKeys, parsed.maxTs);
         u.jornalesDotacion = st.jornalesDotacion;
         u.dotacionEquivalente = st.dotacionEquivalente;
         u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
       });
     }
     return base.sort((a,b)=>b.pct-a.pct);
-  }, [deptUnitsMap, excludedMotivos, plantelActive, plantelDept, scopeMonthKeys]);
+  }, [deptUnitsMap, excludedMotivos, plantelActive, plantelDept, scopeMonthKeys, parsed.maxTs]);
 
   const totalDotacion = plantelActive ? deptRanking.reduce((a,u)=>a+(u.dotacionEquivalente||0),0) : new Set(baseRecords.map(r=>r.legajo.toUpperCase())).size;
   const totalJornales = plantelActive ? deptRanking.reduce((a,u)=>a+(u.jornalesDotacion||0),0) : 0;
@@ -2750,17 +2798,18 @@ function App({userEmail, onSignOut}){
     return scopeMonthKeys.length + " meses (" + scopeMonthKeys.map(monthLabel).join(", ") + ")";
   }, [scopeMonthKeys]);
   const scopePlantel = useMemo(() => plantel.filter(p => passesPlantelFilters(p, FILTERS, empresaIncluded)), [plantel, FILTERS, empresaIncluded]);
+  const cutoffTs = parsed ? parsed.maxTs : null; // último día con datos: el mes en curso cuenta solo hasta ahí
   const globalPlantelStats = useMemo(() => {
     if(!plantelActive) return null;
-    return plantelScopeStats(scopePlantel, scopeMonthKeys);
-  }, [plantelActive, scopePlantel, scopeMonthKeys]);
+    return plantelScopeStats(scopePlantel, scopeMonthKeys, cutoffTs);
+  }, [plantelActive, scopePlantel, scopeMonthKeys, cutoffTs]);
 
   const rankingUnits = useMemo(() => {
     const base = Array.from(scopeUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
     if(plantelActive){
       base.forEach(u=>{
         const employees = scopePlantel.filter(p => (p.unidad||"(Sin unidad)")===u.name);
-        const st = plantelScopeStats(employees, scopeMonthKeys);
+        const st = plantelScopeStats(employees, scopeMonthKeys, cutoffTs);
         u.jornalesDotacion = st.jornalesDotacion;
         u.dotacionEquivalente = st.dotacionEquivalente;
         u.empleadosConsiderados = st.empleadosConsiderados;
@@ -2768,7 +2817,7 @@ function App({userEmail, onSignOut}){
       });
     }
     return base.sort((a,b)=> unitOrderIndex(a.name)-unitOrderIndex(b.name) || b.pct-a.pct);
-  }, [scopeUnitsMap, excludedMotivos, plantelActive, scopePlantel, scopeMonthKeys]);
+  }, [scopeUnitsMap, excludedMotivos, plantelActive, scopePlantel, scopeMonthKeys, cutoffTs]);
   const compositionData = useMemo(() => rankingUnits.map(u=>({name:u.name, ausC:u.ausencias, ausX:u.excluded})), [rankingUnits]);
   const apAnpData = useMemo(() => rankingUnits.map(u=>({name:u.name, ap:u.apContado, anp:u.anpContado})), [rankingUnits]);
   const motivoEntries = useMemo(() => {
@@ -2804,12 +2853,12 @@ function App({userEmail, onSignOut}){
       const pts = evoMonths.map(mk => {
         const st = unitStats(byMonth.get(mk)||[], excludedMotivos);
         if(!plantelActive) return st.pct;
-        const pStats = plantelScopeStats(employees, [mk]);
+        const pStats = plantelScopeStats(employees, [mk], cutoffTs);
         return pStats.jornalesDotacion>0 ? st.ausencias/pStats.jornalesDotacion*100 : 0;
       });
       return {name, color: SERIES_COLOR[i % SERIES_COLOR.length], pts};
     });
-  }, [evoUnitsMap, evoMonths, excludedMotivos, plantelActive, scopePlantel]);
+  }, [evoUnitsMap, evoMonths, excludedMotivos, plantelActive, scopePlantel, cutoffTs]);
 
   const scopeAgg = useMemo(() => {
     const totals = {presentes:0, ausencias:0, excluded:0, vac:0, franco:0, ap:0, anp:0, apContado:0, anpContado:0, baja:0, ce:0};
@@ -2848,21 +2897,21 @@ function App({userEmail, onSignOut}){
   }, [parsed, cuatriMonths]);
   const cuatriPlantelStats = useMemo(() => {
     if(!plantelActive) return null;
-    return plantelScopeStats(plantel, cuatriMonthKeys);
-  }, [plantelActive, plantel, cuatriMonthKeys]);
+    return plantelScopeStats(plantel, cuatriMonthKeys, cutoffTs);
+  }, [plantelActive, plantel, cuatriMonthKeys, cutoffTs]);
   const cuatriRankingUnits = useMemo(() => {
     const base = Array.from(cuatriUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
     if(plantelActive){
       base.forEach(u=>{
         const employees = plantel.filter(p => (p.unidad||"(Sin unidad)")===u.name);
-        const st = plantelScopeStats(employees, cuatriMonthKeys);
+        const st = plantelScopeStats(employees, cuatriMonthKeys, cutoffTs);
         u.jornalesDotacion = st.jornalesDotacion;
         u.dotacionEquivalente = st.dotacionEquivalente;
         u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
       });
     }
     return base.sort((a,b)=> unitOrderIndex(a.name)-unitOrderIndex(b.name) || b.pct-a.pct);
-  }, [cuatriUnitsMap, excludedMotivos, plantelActive, plantel, cuatriMonthKeys]);
+  }, [cuatriUnitsMap, excludedMotivos, plantelActive, plantel, cuatriMonthKeys, cutoffTs]);
   const cuatriScopeAgg = useMemo(() => {
     const totals = {presentes:0, ausencias:0, excluded:0, vac:0, franco:0, ap:0, anp:0, apContado:0, anpContado:0, baja:0, ce:0};
     cuatriRankingUnits.forEach(u=>{
@@ -3010,37 +3059,7 @@ function App({userEmail, onSignOut}){
             <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
           </div>
 
-          <div className="kgroups no-print">
-            <div className="kgroup">
-              <div className="kgroup-head">Distribución Empleados</div>
-              <div className="kgroup-tiles">
-                <KTile label={plantelActive ? "Dotación equiv." : "Dotación"} value={fmt(dotacionDisplay)} />
-                <KTile label="Jornales" value={fmt(plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0)} />
-              </div>
-            </div>
-            <div className="kgroup">
-              <div className="kgroup-head">Rotación</div>
-              <div className="kgroup-tiles">
-                <KTile label="Bajas" value={fmt(scopeAgg.baja)} />
-                <KTile label="Cesantes" value={fmt(scopeAgg.ce)} />
-              </div>
-            </div>
-            <div className="kgroup">
-              <div className="kgroup-head">Ausentismo</div>
-              <div className="kgroup-tiles">
-                <KTile label="Tasa de Ausentismo" value={fmtPct(scopeAgg.pct,1)} />
-                <KTile label="Ausentes (AP+ANP)" value={fmt(scopeAgg.ausencias)} />
-              </div>
-            </div>
-            <div className="kgroup wide">
-              <div className="kgroup-head">Cuadro de Presentismo</div>
-              <div className="kgroup-tiles">
-                <KTile label="AP" value={fmt(scopeAgg.apContado)} />
-                <KTile label="ANP" value={fmt(scopeAgg.anpContado)} />
-                <KTile label="V" value={fmt(scopeAgg.vac)} />
-              </div>
-            </div>
-          </div>
+          <KpiGroups plantelActive={plantelActive} dotacion={dotacionDisplay} plantelStats={globalPlantelStats} agg={scopeAgg} />
           <p className="kgroup-caption no-print">
             Objetivo <b>{fmtPct(objetivo,1)}</b> · {plantelActive ? "Dotación equivalente (plantel) en el alcance actual" : "Empleados únicos en el alcance actual"}: <b>{fmt(dotacionDisplay)}</b> · <b>{unidadesFuera} / {rankingUnits.length}</b> unidades fuera de objetivo
             {" "}<SemChip pct={scopeAgg.pct} objetivo={objetivo} />
@@ -3055,38 +3074,8 @@ function App({userEmail, onSignOut}){
               </select>
             </div>
           </div>
-          <p className="hint no-print" style={{marginTop:-8}}>Esta fila de tarjetas depende únicamente del filtro de Cuatrimestre — no se ve afectada por Mes, Departamento, Gerencia, Sector ni Empresa.</p>
-          <div className="kgroups no-print">
-            <div className="kgroup">
-              <div className="kgroup-head">Distribución Empleados</div>
-              <div className="kgroup-tiles">
-                <KTile label={plantelActive ? "Dotación equiv." : "Dotación"} value={fmt(cuatriDotacionDisplay)} />
-                <KTile label="Jornales" value={fmt(plantelActive && cuatriPlantelStats ? cuatriPlantelStats.jornalesDotacion : 0)} />
-              </div>
-            </div>
-            <div className="kgroup">
-              <div className="kgroup-head">Rotación</div>
-              <div className="kgroup-tiles">
-                <KTile label="Bajas" value={fmt(cuatriScopeAgg.baja)} />
-                <KTile label="Cesantes" value={fmt(cuatriScopeAgg.ce)} />
-              </div>
-            </div>
-            <div className="kgroup">
-              <div className="kgroup-head">Ausentismo</div>
-              <div className="kgroup-tiles">
-                <KTile label="Tasa de Ausentismo" value={fmtPct(cuatriScopeAgg.pct,1)} />
-                <KTile label="Ausentes (AP+ANP)" value={fmt(cuatriScopeAgg.ausencias)} />
-              </div>
-            </div>
-            <div className="kgroup wide">
-              <div className="kgroup-head">Cuadro de Presentismo</div>
-              <div className="kgroup-tiles">
-                <KTile label="AP" value={fmt(cuatriScopeAgg.apContado)} />
-                <KTile label="ANP" value={fmt(cuatriScopeAgg.anpContado)} />
-                <KTile label="V" value={fmt(cuatriScopeAgg.vac)} />
-              </div>
-            </div>
-          </div>
+          <p className="hint no-print" style={{marginTop:-8}}>Esta fila de tarjetas depende únicamente del filtro de Cuatrimestre — no se ve afectada por Mes, Departamento, Gerencia, Sector ni Empresa. El período en curso se calcula sobre los días transcurridos (hasta el último día cargado), no sobre el cuatrimestre completo.</p>
+          <KpiGroups plantelActive={plantelActive} dotacion={cuatriDotacionDisplay} plantelStats={cuatriPlantelStats} agg={cuatriScopeAgg} />
           <p className="kgroup-caption no-print">
             Cuatrimestre: <b>{(CUATRI_OPTIONS.find(c=>c.value===cuatriSel)||CUATRI_OPTIONS[0]).label}</b> · {plantelActive ? "Dotación equivalente (plantel)" : "Empleados únicos"}: <b>{fmt(cuatriDotacionDisplay)}</b> · <b>{cuatriUnidadesFuera} / {cuatriRankingUnits.length}</b> unidades fuera de objetivo
             {" "}<SemChip pct={cuatriScopeAgg.pct} objetivo={objetivo} />
@@ -3098,7 +3087,7 @@ function App({userEmail, onSignOut}){
             ))}
           </nav>
 
-          {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} />}
+          {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} />}
           {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
