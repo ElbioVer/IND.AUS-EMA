@@ -471,8 +471,10 @@ function buildParsedAggregates(records, fileName, hasMotivo){
   records.forEach(r => {
     if(!r.valid || !isCountedCat(r.cat)) return;
     const k = motivoKeyOf(r);
-    if(!motivoUniverseMap.has(k)) motivoUniverseMap.set(k, {key:k, label: motivoLabelOf(r), count:0});
-    motivoUniverseMap.get(k).count++;
+    if(!motivoUniverseMap.has(k)) motivoUniverseMap.set(k, {key:k, label: motivoLabelOf(r), count:0, ap:0, anp:0});
+    const mu = motivoUniverseMap.get(k);
+    mu.count++;
+    if(r.cat==="AP") mu.ap++; else mu.anp++;
   });
   const motivoUniverse = Array.from(motivoUniverseMap.values()).sort((a,b)=>b.count-a.count);
 
@@ -1234,16 +1236,37 @@ function CellLink({onClick, children}){
   return <button type="button" className="cell-link" onClick={onClick}>{children}</button>;
 }
 
+// Los motivos tildados son los que CUENTAN como ausentismo. Internamente se sigue guardando el conjunto de
+// motivos NO incluidos ("excluded"), por eso tildar = sacarlo de ese conjunto.
 function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
   if(!motivoUniverse.length) return null;
+  const isAp = m => (m.ap||0) >= (m.anp||0); // categoría predominante del motivo
+  const presets = [
+    {label:"Todos", title:"Cuentan todos los motivos", excludedKeys: []},
+    {label:"Ninguno", title:"No cuenta ningún motivo", excludedKeys: motivoUniverse.map(m=>m.key)},
+    {label:"AP", title:"Solo los motivos de Ausente Pago", excludedKeys: motivoUniverse.filter(m=>!isAp(m)).map(m=>m.key)},
+    {label:"ANP", title:"Solo los motivos de Ausente No Pago", excludedKeys: motivoUniverse.filter(m=>isAp(m)).map(m=>m.key)},
+    {label:"Por defecto", title:"Selección recomendada de la tabla fija de motivos", excludedKeys: motivoUniverse.filter(m=>isDefaultExcludedMotivoKey(m.key)).map(m=>m.key)}
+  ];
+  const sameAs = keys => keys.length===excluded.size && keys.every(k=>excluded.has(k));
+  const incluidos = motivoUniverse.filter(m=>!excluded.has(m.key)).length;
   return (
     <div className="card motivo-settings">
-      <h3>Motivos de Ausencia (AP/ANP) excluidos del cálculo</h3>
-      <p className="hint">Aunque el Agrupador los marque AP/ANP, estos motivos no cuentan como ausentismo (bajas, suspensiones, licencias especiales, etc.). Tildá o destildá según tu criterio — se recalcula todo al instante, en todas las pestañas. Hacé clic en la cantidad para ver y copiar el detalle.</p>
+      <h3>Motivos de Ausencia (AP/ANP) incluidos en el cálculo</h3>
+      <p className="hint">Tildá los motivos que querés que cuenten como ausentismo. Aunque el Agrupador los marque AP/ANP, los que dejes sin tildar no cuentan (bajas, suspensiones, licencias especiales, etc.). Se recalcula todo al instante, en todas las pestañas. La selección rápida AP / ANP elige los motivos según su categoría predominante. Hacé clic en la cantidad para ver y copiar el detalle.</p>
+      <div className="msel-menu-actions" style={{marginBottom:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+        <span className="hint" style={{margin:0}}>Selección rápida:</span>
+        {presets.map(p=>(
+          <button key={p.label} type="button" title={p.title} className="btn secondary"
+            style={sameAs(p.excludedKeys) ? {padding:"5px 12px", fontSize:12.5, background:"var(--accent)", color:"var(--accent-ink)", borderColor:"var(--accent)"} : {padding:"5px 12px", fontSize:12.5}}
+            onClick={()=>onChange(new Set(p.excludedKeys))}>{p.label}</button>
+        ))}
+        <span className="hint" style={{margin:0}}>{incluidos} de {motivoUniverse.length} motivos incluidos</span>
+      </div>
       <div className="motivo-checklist">
         {motivoUniverse.map(m=>(
           <label key={m.key} className="motivo-check">
-            <input type="checkbox" checked={excluded.has(m.key)} onChange={()=>{
+            <input type="checkbox" checked={!excluded.has(m.key)} onChange={()=>{
               const next = new Set(excluded);
               if(next.has(m.key)) next.delete(m.key); else next.add(m.key);
               onChange(next);
@@ -1260,7 +1283,7 @@ function DefaultMotivoRefTable(){
   return (
     <div className="card table-card">
       <h3>Tabla fija — Motivos de Ausencia por defecto</h3>
-      <p className="caption">Referencia fija usada como preselección en "Motivos de Ausencia excluidos" (Resumen) y en "Id Motivo a incluir" (Ranking). Se puede editar libremente en esas pestañas — esta tabla no cambia.</p>
+      <p className="caption">Referencia fija usada como preselección en "Motivos de Ausencia incluidos" (Resumen) y en "Id Motivo a incluir" (Ranking). Se puede editar libremente en esas pestañas — esta tabla no cambia.</p>
       <div className="overflow-x">
         <table>
           <thead><tr><th>Código</th><th>Motivo</th><th>Incluir</th></tr></thead>
@@ -1758,7 +1781,7 @@ function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo}){
     <div className="tabpanel">
       <div className="card chart-card">
         <h3>Composición de ausencias por unidad</h3>
-        <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos excluidos abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
+        <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos sin tildar abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
         <CompositionChart units={compositionData} />
       </div>
       <div className="card chart-card">
@@ -3189,7 +3212,7 @@ function App({userEmail, onSignOut}){
           <p className="kgroup-caption no-print">
             Objetivo <b>{fmtPct(objetivo,1)}</b> · {plantelActive ? "Dotación equivalente (plantel) en el alcance actual" : "Empleados únicos en el alcance actual"}: <b>{fmt(dotacionDisplay)}</b> · <b>{unidadesFuera} / {rankingUnits.length}</b> unidades fuera de objetivo
             {" "}<SemChip pct={scopeAgg.pct} objetivo={objetivo} />
-            {" "}· {plantelActive ? "Desvío = (AP+ANP) / Jornales de dotación del plantel (ver Gestión de Plantel)" : "Excluye CE + BAJA y los motivos excluidos (ver Resumen) del denominador"}
+            {" "}· {plantelActive ? "Desvío = (AP+ANP) / Jornales de dotación del plantel (ver Gestión de Plantel)" : "Excluye CE + BAJA y los motivos sin tildar (ver Resumen) del denominador"}
           </p>
 
           <div className="filters-bar no-print">
