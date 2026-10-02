@@ -10,6 +10,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="icon" type="image/png" sizes="48x48" href="favicon-48.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script>
+window.__installEvt = null;
+window.addEventListener("beforeinstallprompt", function(e){ e.preventDefault(); window.__installEvt = e; window.dispatchEvent(new Event("installready")); });
+window.addEventListener("appinstalled", function(){ window.__installEvt = null; window.dispatchEvent(new Event("installready")); });
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
@@ -437,10 +442,34 @@ function LoginForm({onSignedIn}){
           <input type="password" required autoComplete="current-password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
           {error && <div style={{color:"var(--cat-anp,#f0605d)", fontSize:12.5}}>{error}</div>}
           <button type="submit" className="btn" disabled={loading} style={{marginTop:4}}>{loading?"Ingresando...":"Ingresar"}</button>
+          <InstallButton />
         </div>
       </form>
     </div>
   );
+}
+
+function InstallButton({style}){
+  const [evt, setEvt] = useState(window.__installEvt);
+  useEffect(()=>{
+    const h = ()=> setEvt(window.__installEvt);
+    window.addEventListener("installready", h);
+    return ()=> window.removeEventListener("installready", h);
+  }, []);
+  const standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone===true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(standalone || (!evt && !isIOS)) return null;
+  async function onClick(){
+    if(evt){
+      evt.prompt();
+      try{ await evt.userChoice; }catch(e){}
+      window.__installEvt = null;
+      setEvt(null);
+    } else {
+      alert("En iPhone/iPad: tocá el botón Compartir de Safari y elegí \"Añadir a pantalla de inicio\".");
+    }
+  }
+  return <button type="button" className="btn secondary no-print" style={style} onClick={onClick}>Instalar app</button>;
 }
 
 function AuthGate(){
@@ -3157,6 +3186,7 @@ function App({userEmail, onSignOut}){
         </div>
         <div className="hint" style={{display:"flex", alignItems:"center", gap:8}}>
           {userEmail}
+          <InstallButton />
           <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
         </div>
         {parsed && (
