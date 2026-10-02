@@ -1,4 +1,4 @@
-# Indicador de Ausentismo / Presentismo
+# Radar de Ausentismo
 
 Aplicación web de EMA Servicios para seguir el **ausentismo y presentismo del personal** por Unidad de Negocio, Gerencia, Departamento y Sector. Funciona desde cualquier PC o celular, se puede instalar como app (PWA) y los datos quedan guardados en el servidor: no hace falta volver a cargar los archivos en cada visita.
 
@@ -52,6 +52,7 @@ Una sola página HTML (React, SheetJS y Supabase vía CDN), publicada en GitHub 
 | `index.html` | La aplicación completa |
 | `manifest.webmanifest`, `sw.js` | Instalación como app y caché |
 | `icon-*.png`, `apple-touch-icon.png`, `favicon-48.png` | Íconos |
+| `og-image.jpg` | Imagen de vista previa al compartir el link (WhatsApp, etc.) |
 
 Para publicar un cambio: subir los archivos modificados al repositorio (*Add file → Upload files → Commit*). Los usuarios reciben la versión nueva al volver a abrir la app.
 

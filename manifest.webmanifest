@@ -1,7 +1,7 @@
 {
-  "name": "Indicador de Ausentismo / Presentismo",
-  "short_name": "Ausentismo EMA",
-  "description": "Radar de ausentismo y presentismo por unidad de negocio - EMA Servicios",
+  "name": "Radar de Ausentismo",
+  "short_name": "Radar Ausentismo",
+  "description": "Ausentismo y presentismo por unidad de negocio - EMA Servicios",
   "id": "./",
   "start_url": "./",
   "scope": "./",
