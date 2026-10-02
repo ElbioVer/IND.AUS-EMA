@@ -1450,6 +1450,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
   const existingByLegajo = new Map(existingPlantel.map(p=>[p.legajo, p]));
   const seen = new Set();
   const records = [];
+  const changedRecords = [];
   const errors = [];
   let nuevos = 0, modificados = 0, sinCambios = 0;
   const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre"];
@@ -1492,10 +1493,10 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
     };
     seen.add(legajoKey);
     const prev = existingByLegajo.get(legajo);
-    if(!prev) nuevos++;
+    if(!prev){ nuevos++; changedRecords.push(rec); }
     else {
       const changed = prev.altaTs!==rec.altaTs || prev.bajaTs!==rec.bajaTs || prev.nacimientoTs!==rec.nacimientoTs || FIELD_KEYS.some(k=>(prev[k]||"")!==(rec[k]||""));
-      if(changed) modificados++; else sinCambios++;
+      if(changed){ modificados++; changedRecords.push(rec); } else sinCambios++;
     }
     records.push(rec);
   });
@@ -1504,7 +1505,8 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
     totalEncontrados: dataRows.length,
     nuevos, modificados, sinCambios, noIncluidos,
     errores: errors,
-    records
+    records,
+    changedRecords
   };
 }
 function PlantelUploadForm({onFile, label, loading}){
@@ -1571,7 +1573,8 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
       fecha: new Date(), archivo: fileName, encontrados: preview.totalEncontrados,
       nuevos: preview.nuevos, modificados: preview.modificados, errores: preview.errores.length
     }, ...h]);
-    const rowsToSync = preview.records.map(plantelRecordToRow);
+    // solo se suben los legajos nuevos o modificados: los que no cambiaron no se re-envían ni obligan a los demás usuarios a re-bajarlos.
+    const rowsToSync = preview.changedRecords.map(plantelRecordToRow);
     const doneFileName = fileName;
     setStage("idle"); setRawRows(null); setMapping({}); setFileName("");
     if(rowsToSync.length){
@@ -2711,6 +2714,8 @@ function App({userEmail, onSignOut}){
   const [fileName, setFileName] = useState(null);
   const [error, setError] = useState(null);
   const [parsed, setParsed] = useState(null);
+  const parsedRef = useRef(null);
+  parsedRef.current = parsed;
   const [sel, setSel] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -2848,6 +2853,11 @@ function App({userEmail, onSignOut}){
           setParsed(null);
           return;
         }
+        // si ya hay datos cargados, solo se sube lo nuevo o modificado (no las ~200.000 filas enteras):
+        // ahorra datos de subida y evita que todos los usuarios tengan que volver a bajar toda la base.
+        const prevRecords = parsedRef.current ? parsedRef.current.records : null;
+        const validRecords = parsedRows.records.filter(r=>r.valid);
+        const recordsToUpload = prevRecords ? mergeAusentismoRecords(prevRecords, validRecords).changedRows : validRecords;
         applyParsedRecords(parsedRows.records, file.name, parsedRows.hasMotivoCol);
         setActiveTab("resumen");
         setObjetivo(3);
@@ -2855,7 +2865,7 @@ function App({userEmail, onSignOut}){
         setEmpresaIncluded(null);
         setAusUpdatePreview(null);
         setLoading(false);
-        const validRows = parsedRows.records.filter(r=>r.valid).map(ausRecordToRow);
+        const validRows = recordsToUpload.map(ausRecordToRow);
         setCloudError(null);
         setSyncStatus({label:"Guardando en el servidor", done:0, total:validRows.length});
         upsertInBatches(AUSENTISMO_TABLE, validRows, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor", done, total}))
