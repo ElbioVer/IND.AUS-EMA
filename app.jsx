@@ -1,5 +1,22 @@
 const {useState,useMemo,useCallback,useEffect,useRef} = React;
 
+/* Estado que sobrevive al cambiar de pestaña (las pestañas se desmontan al salir de ellas). */
+const KEPT_UI_STATE = new Map();
+function useKeptState(key, initial){
+  const [value, setValue] = useState(() => KEPT_UI_STATE.has(key) ? KEPT_UI_STATE.get(key) : (typeof initial==="function" ? initial() : initial));
+  const set = useCallback(val => {
+    setValue(prev => {
+      const next = typeof val==="function" ? val(prev) : val;
+      KEPT_UI_STATE.set(key, next);
+      return next;
+    });
+  }, [key]);
+  return [value, set];
+}
+function escHtml(s){
+  return String(s==null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
 /* ===================== supabase (login + guardado de cronicos) ===================== */
 const SUPABASE_URL = "https://rfavfuibywwaytlgpcqp.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_SiBV5y1l6xs2bLr8HvCl6A_Syc89Xkn";
@@ -1061,6 +1078,17 @@ function cronicoDias(inicioTs){
   const todayTs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
   return Math.round((todayTs-inicioTs)/86400000) + 1;
 }
+// agrupa los días de una racha en tramos consecutivos con la misma categoría y motivo (para la historia clínica)
+function groupStreakTramos(rows){
+  const tramos = [];
+  rows.forEach(r=>{
+    const label = motivoLabelOf(r), cat = r.cat;
+    const last = tramos[tramos.length-1];
+    if(last && last.label===label && last.cat===cat){ last.hastaTs = r.ts; last.dias++; }
+    else tramos.push({desdeTs:r.ts, hastaTs:r.ts, label, cat, dias:1});
+  });
+  return tramos;
+}
 function buildCronicoCases(records, plantel, motivoIncluded){
   if(!motivoIncluded || !motivoIncluded.size) return [];
   const byLegajo = new Map();
@@ -1138,7 +1166,8 @@ function buildCronicoCases(records, plantel, motivoIncluded){
       inicioTs: first.ts,
       ultimaTs: last.ts,
       filas: lastStreak.rows.length,
-      fechaIngresoTs: p ? p.altaTs : null
+      fechaIngresoTs: p ? p.altaTs : null,
+      tramos: groupStreakTramos(lastStreak.rows)
     });
   });
   return cases.sort((a,b)=> b.inicioTs-a.inicioTs);
@@ -1919,13 +1948,20 @@ function DetalleEmpleadosTab({parsed, plantel}){
     return Array.from(ys).sort((a,b)=>a-b);
   }, [parsed]);
 
-  const [legajoSel, setLegajoSel] = useState(employeeOptions[0] ? employeeOptions[0].value : "");
-  const [periodoVal, setPeriodoVal] = useState("todos");
-  const [customMonths, setCustomMonths] = useState(new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
-  const [anioSel, setAnioSel] = useState(availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
-  const [idMotivoIncluded, setIdMotivoIncluded] = useState(new Set(parsed.idMotivoUniverse.map(m=>m.key)));
+  const [legajoSel, setLegajoSel] = useKeptState("de.legajo", () => employeeOptions[0] ? employeeOptions[0].value : "");
+  const [periodoVal, setPeriodoVal] = useKeptState("de.periodo", "todos");
+  const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
+  const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
+  const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
+  const [idMotivoIncluded, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.map(m=>m.key)));
 
-  useEffect(()=>{ if(!legajoSel && employeeOptions.length) setLegajoSel(employeeOptions[0].value); }, [employeeOptions]);
+  // si lo guardado ya no existe en los datos actuales (otro archivo, otro año), vuelve al primero disponible
+  useEffect(()=>{
+    if(employeeOptions.length && !employeeOptions.some(o=>o.value===legajoSel)) setLegajoSel(employeeOptions[0].value);
+  }, [employeeOptions, legajoSel]);
+  useEffect(()=>{
+    if(availableYearsAll.length && !availableYearsAll.includes(anioSel)) setAnioSel(availableYearsAll[availableYearsAll.length-1]);
+  }, [availableYearsAll, anioSel]);
 
   const periodoMonths = periodoVal==="personalizado" ? Array.from(customMonths) : ((PERIODO_OPTIONS.find(p=>p.value===periodoVal)||{}).months || []);
   const periodoLabel = useMemo(()=>{
@@ -2197,13 +2233,14 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const [dbReady, setDbReady] = useState(false);
   const [motivoIncluded, setMotivoIncluded] = useState(new Set());
   const [casesManual, setCasesManual] = useState(new Map());
+  const manualRef = useRef(new Map());
   const [expandedId, setExpandedId] = useState(null);
   const [obsDrafts, setObsDrafts] = useState({});
-  const [search, setSearch] = useState("");
-  const [tipoFilter, setTipoFilter] = useState("__all");
+  const [search, setSearch] = useKeptState("cron.search", "");
+  const [tipoFilter, setTipoFilter] = useKeptState("cron.tipo", "__all");
   const [saveStatus, setSaveStatus] = useState("");
-  const [sortKey, setSortKey] = useState("dias");
-  const [sortDir, setSortDir] = useState("desc");
+  const [sortKey, setSortKey] = useKeptState("cron.sortKey", "dias");
+  const [sortDir, setSortDir] = useKeptState("cron.sortDir", "desc");
   const scrollRef = useRef(null);
 
   useEffect(()=>{
@@ -2219,6 +2256,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       if(casos){
         const m = new Map();
         casos.forEach(row=> m.set(row.id, casoRowToManual(row)));
+        manualRef.current = m;
         setCasesManual(m);
       }
       setDbReady(true);
@@ -2275,38 +2313,46 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
     setSortDir(col && col.sortType==="num" ? "desc" : "asc");
   }
 
-  function saveCase(caseObj){
+  // Cada guardado parte del último valor conocido del caso (no del que tenía la fila al dibujarse),
+  // así dos guardados seguidos (ej. escribir Opinión médica y enseguida tocar "+") no se pisan entre sí.
+  function saveCase(caseObj, patch){
+    const prev = manualRef.current.get(caseObj.id) || {};
+    const base = {
+      notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
+      posibleAlta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
+      inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
+      observaciones: Array.isArray(caseObj.observaciones) ? caseObj.observaciones : [],
+      ...prev
+    };
+    const m = {...base, ...patch, tipo: caseObj.tipo||""};
+    const nextMap = new Map(manualRef.current);
+    nextMap.set(caseObj.id, m);
+    manualRef.current = nextMap;
+    setCasesManual(nextMap);
     setSaveStatus("Guardando...");
     supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
       id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
-      tipo: caseObj.tipo||"", notificar: caseObj.notificar||"", opinion_medica: caseObj.opinionMedica||"",
-      tacto_empleado: caseObj.tactoEmpleado||"", posible_alta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
-      inicio_manual: caseObj.inicioManualTs!=null ? tsToISODate(caseObj.inicioManualTs) : null,
-      observaciones: caseObj.observaciones||[], updated_at: new Date().toISOString()
+      tipo: m.tipo, notificar: m.notificar||"", opinion_medica: m.opinionMedica||"",
+      tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"", accion: m.accion||"",
+      inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
+      observaciones: m.observaciones||[], updated_at: new Date().toISOString()
     }).then(({error})=>{
       if(error){ setSaveStatus("Error al guardar: "+error.message); return; }
       setSaveStatus("Guardado");
-      setCasesManual(prev=>{
-        const next = new Map(prev);
-        next.set(caseObj.id, {tipo:caseObj.tipo||"", notificar:caseObj.notificar||"", opinionMedica:caseObj.opinionMedica||"",
-          tactoEmpleado:caseObj.tactoEmpleado||"", posibleAlta:caseObj.posibleAlta||"", accion:caseObj.accion||"",
-          inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
-          observaciones:caseObj.observaciones||[]});
-        return next;
-      });
     });
   }
 
   function commitField(caseObj, field, value){
-    saveCase({...caseObj, [field]: value});
+    saveCase(caseObj, {[field]: value});
   }
 
   function addObservacion(caseObj){
     const texto = (obsDrafts[caseObj.id]||"").trim();
     if(!texto) return;
     const entry = {ts: Date.now(), texto};
-    const nextObs = [...(caseObj.observaciones||[]), entry];
-    saveCase({...caseObj, observaciones: nextObs});
+    const latest = manualRef.current.get(caseObj.id);
+    const currentObs = latest && Array.isArray(latest.observaciones) ? latest.observaciones : (caseObj.observaciones||[]);
+    saveCase(caseObj, {observaciones: [...currentObs, entry]});
     setObsDrafts(prev=>({...prev, [caseObj.id]:""}));
   }
 
@@ -2319,9 +2365,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       thead th{text-align:left;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 5px 6px;border-bottom:1px solid #ccc;}
       tbody td{padding:5px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
     `;
+    const e = escHtml;
     const rows = sorted.map(c=>{
       const ultimaObs = c.observaciones.length ? c.observaciones[c.observaciones.length-1].texto : "";
-      return "<tr><td>"+c.legajo+"</td><td>"+(c.nombre||"—")+"</td><td>"+(c.grupo||"—")+"</td><td>"+(c.sindicato||"—")+"</td><td>"+(c.gerencia||"—")+"</td><td>"+(c.codpla||"—")+"</td><td>"+(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+(c.notificar||"—")+"</td><td>"+(c.opinionMedica||"—")+"</td><td>"+(c.tactoEmpleado||"—")+"</td><td>"+(c.posibleAlta||"—")+"</td><td>"+(c.accion||"—")+"</td><td>"+(ultimaObs||"—")+"</td></tr>";
+      return "<tr><td>"+e(c.legajo)+"</td><td>"+e(c.nombre||"—")+"</td><td>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td><td>"+e(c.accion||"—")+"</td><td>"+e(ultimaObs||"—")+"</td></tr>";
     }).join("");
     const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
       "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo/Diagnóstico</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Última observación</th></tr></thead><tbody>"+rows+"</tbody></table>";
@@ -2331,6 +2378,83 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
     win.document.close();
     win.focus();
     setTimeout(()=>{ win.print(); }, 300);
+  }
+
+  // lo que está escrito ahora en la fila (aunque todavía no haya terminado de guardarse en el servidor)
+  function liveValue(c, field){
+    const el = Array.from(document.querySelectorAll("input[data-case]")).find(x=>x.getAttribute("data-case")===c.id && x.getAttribute("data-field")===field);
+    return el ? el.value : null;
+  }
+
+  function printHistoria(list){
+    if(!list.length) return;
+    if(list.length>5 && !window.confirm("Se van a imprimir "+list.length+" historias clínicas (una por hoja). ¿Continuar?")) return;
+    const e = escHtml;
+    const logoUrl = new URL("icon-192.png", location.href).href;
+    const emitido = new Date().toLocaleString("es-AR");
+    const css = `
+      @page{size:A4;margin:14mm;}
+      *{box-sizing:border-box;}
+      body{font-family:Arial,"Segoe UI",sans-serif;color:#111;font-size:12px;margin:0;}
+      .hc{page-break-after:always;}
+      .hc:last-child{page-break-after:auto;}
+      .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0c2e80;padding-bottom:10px;margin-bottom:12px;}
+      .kicker{font-size:10px;letter-spacing:.14em;font-weight:700;color:#2a78d6;}
+      h1{margin:2px 0 2px;font-size:22px;color:#0c2e80;}
+      .sub{color:#555;font-size:11.5px;}
+      .head img{width:64px;height:64px;}
+      h2{font-size:12.5px;color:#0c2e80;margin:14px 0 6px;padding-bottom:3px;border-bottom:1px solid #bfd3f2;text-transform:uppercase;letter-spacing:.04em;}
+      table{width:100%;border-collapse:collapse;}
+      tr{break-inside:avoid;}
+      .kv td{padding:4px 6px;border-bottom:1px solid #eee;vertical-align:top;}
+      .kv td.k{width:20%;color:#555;font-weight:700;font-size:11px;}
+      .kv td.v{width:30%;}
+      .grid th{text-align:left;font-size:10.5px;color:#555;text-transform:uppercase;padding:4px 6px;border-bottom:1px solid #999;}
+      .grid td{padding:4px 6px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
+      .box{border:1px solid #cfd8e8;border-radius:6px;padding:8px 10px;min-height:34px;white-space:pre-wrap;margin:0;}
+      .none{color:#777;font-style:italic;}
+      .foot{margin-top:18px;font-size:10px;color:#777;border-top:1px solid #ddd;padding-top:6px;}
+      .firmas{display:flex;gap:40px;margin-top:40px;}
+      .firmas div{flex:1;border-top:1px solid #333;padding-top:4px;text-align:center;font-size:10.5px;color:#444;}
+    `;
+    const kv = (a,b) =>"<tr><td class='k'>"+a[0]+"</td><td class='v'>"+a[1]+"</td><td class='k'>"+(b?b[0]:"")+"</td><td class='v'>"+(b?b[1]:"")+"</td></tr>";
+    const pages = list.map(c0=>{
+      const pick = f => { const v = liveValue(c0, f); return v!=null ? v : (c0[f]||""); };
+      const inicioLive = liveValue(c0, "inicio");
+      const inicioTs = inicioLive ? isoDateToTs(inicioLive) : c0.inicioTs;
+      const notif = pick("notificar");
+      const notifTxt = notif ? (isoDateToTs(notif)!=null ? fmtDateFromTs(isoDateToTs(notif)) : notif) : "—";
+      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = pick("posibleAlta"), accion = pick("accion");
+      const box = t => t ? "<p class='box'>"+e(t)+"</p>" : "<p class='box none'>Sin datos cargados.</p>";
+      const tramos = (c0.tramos||[]).map(t=>"<tr><td>"+fmtDateFromTs(t.desdeTs)+"</td><td>"+fmtDateFromTs(t.hastaTs)+"</td><td>"+t.dias+"</td><td>"+e(CAT_LABEL[t.cat]||t.cat)+"</td><td>"+e(t.label)+"</td></tr>").join("");
+      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<tr><td style='white-space:nowrap'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td></tr>").join("");
+      return "<section class='hc'>"+
+        "<div class='head'><div><div class='kicker'>HISTORIA CLÍNICA LABORAL</div><h1>"+e(c0.nombre||"Sin nombre")+"</h1><div class='sub'>Legajo "+e(c0.legajo)+" · Seguimiento de ausentismo</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
+        "<h2>Datos del empleado</h2><table class='kv'>"+
+          kv(["Legajo",e(c0.legajo)],["Nombre",e(c0.nombre||"—")])+
+          kv(["Gerencia",e(c0.gerencia||"—")],["Grupo",e(c0.grupo||"—")])+
+          kv(["Sindicato",e(c0.sindicato||"—")],["Fecha de ingreso",c0.fechaIngresoTs!=null?fmtDateFromTs(c0.fechaIngresoTs):"—"])+
+        "</table>"+
+        "<h2>Caso</h2><table class='kv'>"+
+          kv(["Tipo",e(c0.tipo||"—")],["Motivo / diagnóstico",e(c0.motivoLabel||"—")])+
+          kv(["Inicio de la ausencia",fmtDateFromTs(inicioTs)],["Días de ausencia",String(cronicoDias(inicioTs))])+
+          kv(["Notificar res. de puesto",e(notifTxt)],["Posible alta",e(alta||"—")])+
+        "</table>"+
+        "<h2>Opinión médica</h2>"+box(opinion)+
+        "<h2>Táctico empleado</h2>"+box(tacto)+
+        "<h2>Acción</h2>"+box(accion)+
+        "<h2>Tramos de ausencia</h2>"+(tramos ? "<table class='grid'><thead><tr><th>Desde</th><th>Hasta</th><th>Días</th><th>Categoría</th><th>Motivo</th></tr></thead><tbody>"+tramos+"</tbody></table>" : "<p class='box none'>Sin datos.</p>")+
+        "<h2>Evolución / Observaciones</h2>"+(obs ? "<table class='grid'><thead><tr><th style='width:26%'>Fecha y hora</th><th>Movimiento</th></tr></thead><tbody>"+obs+"</tbody></table>" : "<p class='box none'>Sin movimientos registrados.</p>")+
+        "<div class='firmas'><div>Firma del profesional</div><div>Firma del empleado</div></div>"+
+        "<div class='foot'>Documento confidencial: contiene información de salud del empleado. Emitido el "+e(emitido)+".</div>"+
+      "</section>";
+    }).join("");
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Historia clínica</title><style>'+css+'</style></head><body>'+pages+'</body></html>');
+    win.document.close();
+    win.focus();
+    setTimeout(()=>{ win.print(); }, 700);
   }
 
   return (
@@ -2354,6 +2478,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
               {CRONICO_TIPOS.filter(Boolean).map(t=>(<option key={t} value={t}>{t}</option>))}
             </select>
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
+            <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
             <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
           </div>
           <TopScrollSync targetRef={scrollRef} />
@@ -2381,7 +2506,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.codpla||"—"}</td>
                       <td>{c.tipo}</td>
                       <td style={{whiteSpace:"nowrap"}}>
-                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={!dbReady}
+                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={!dbReady}
                           onBlur={e=>{ const v=e.target.value; if(v) commitField(c,"inicioManualTs", isoDateToTs(v)); }}
                           style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
                         {c.inicioManualTs!=null && (
@@ -2394,14 +2519,14 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
                       <td>
-                        <input type="date" defaultValue={c.notificar||""} disabled={!dbReady}
+                        <input type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={!dbReady}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
                           style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
                       </td>
-                      <td><input type="text" defaultValue={c.opinionMedica} onBlur={e=>commitField(c,"opinionMedica",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" defaultValue={c.tactoEmpleado} onBlur={e=>commitField(c,"tactoEmpleado",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" defaultValue={c.posibleAlta} onBlur={e=>commitField(c,"posibleAlta",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" defaultValue={c.accion} onBlur={e=>commitField(c,"accion",e.target.value)} disabled={!dbReady} /></td>
+                      <td><input type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>commitField(c,"opinionMedica",e.target.value)} disabled={!dbReady} /></td>
+                      <td><input type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>commitField(c,"tactoEmpleado",e.target.value)} disabled={!dbReady} /></td>
+                      <td><input type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} onBlur={e=>commitField(c,"posibleAlta",e.target.value)} disabled={!dbReady} /></td>
+                      <td><input type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>commitField(c,"accion",e.target.value)} disabled={!dbReady} /></td>
                       <td style={{minWidth:220}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
@@ -2410,8 +2535,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                         )}
                         <div style={{display:"flex", gap:4}}>
                           <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts[c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,[c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addObservacion(c); }} disabled={!dbReady} />
-                          <button type="button" className="btn secondary" onClick={()=>addObservacion(c)} disabled={!dbReady}>+</button>
+                          <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addObservacion(c)} disabled={!dbReady}>+</button>
                         </div>
+                        <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
                       </td>
                     </tr>
                     {expandedId===c.id && (
