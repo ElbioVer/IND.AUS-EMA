@@ -137,6 +137,7 @@ function ausRecordToRow(r){
     departamento: r.departamento||"", empresa: r.empresa||"", nombre: r.nombre||"",
     id_motivo: r.idMotivo||"", motivo: r.motivo||"", estado: r.estado||"", razon: r.razon||"",
     puesto: r.puesto||"", jefe: r.jefe||"", presidencia: r.presidencia||"", sindicato: r.sindicato||"",
+    tipo_contrat: r.tipoContrat||"",
     updated_at: new Date().toISOString()
   };
 }
@@ -147,7 +148,7 @@ function ausRowToRecord(row){
   return {legajo:row.legajo||"", agrup:row.agrup||"", cat:row.agrup||"F", unidad:row.unidad||"", sector:row.sector||"",
     gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", nombre:row.nombre||"",
     idMotivo:row.id_motivo||"", motivo:row.motivo||"", estado:row.estado||"", razon:row.razon||"", puesto:row.puesto||"",
-    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"",
+    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"", tipoContrat:row.tipo_contrat||"",
     valid:true, dia:row.dia, mes:row.mes, anio:row.anio, ts, monthKey, dateKey};
 }
 function plantelRecordToRow(p){
@@ -157,13 +158,15 @@ function plantelRecordToRow(p){
     fecha_nacimiento: p.nacimientoTs!=null ? tsToISODate(p.nacimientoTs) : null,
     estado: p.estado||"", unidad: p.unidad||"", sector: p.sector||"", gerencia: p.gerencia||"",
     departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
+    puesto: p.puesto||"", jefe: p.jefe||"",
     updated_at: new Date().toISOString()
   };
 }
 function plantelRowToRecord(row){
   return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
     nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
-    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||""};
+    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||"",
+    puesto:row.puesto||"", jefe:row.jefe||""};
 }
 
 function LoginForm({onSignedIn}){
@@ -235,7 +238,13 @@ const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto"
 const MESES_CORTOS = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
 const REQUIRED_COLS = ["Legajo","Agrupador cuadro presentismo","Entrada"];
 const OPTIONAL_COLS = {unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", nombre:"Empleado", idMotivo:"Id Motivo", motivo:"Motivo",
-  estado:"Estado", razon:"Razon", puesto:"Puesto", jefe:"Jefe directo", presidencia:"Agrupador cuadro presidencia", sindicato:"Sindicato"};
+  estado:"Estado", razon:"Razon", puesto:"Puesto", jefe:"Jefe directo", presidencia:"Agrupador cuadro presidencia", sindicato:"Sindicato", tipoContrat:"Agrup. tipo contratacion"};
+
+/* ===================== Cuadro Diario (constantes editables) ===================== */
+// Empresa subcontratada -> unidad de negocio donde se cuenta en la columna Sub-Cont (se compara sin mayúsculas ni acentos).
+const EMPRESA_SERVICIO = {"VIETA FACUNDO":"Servicios Electricos","DELFINO CLAUDIO":"Servicios Electricos","REDELED":"Servicios Electricos"};
+// Etiqueta con que se muestra cada unidad en el Cuadro Diario.
+const CUADRO_UNIT_LABEL = {"Operaciones Comerciales":"AySA Medidores","Indirectos":"A Repartir"};
 
 /* ===================== plantel de activos ===================== */
 const PLANTEL_FIELD_ALIASES = {
@@ -250,12 +259,14 @@ const PLANTEL_FIELD_ALIASES = {
   gerencia: ["Gerencia"],
   departamento: ["Departamento"],
   empresa: ["Empresa"],
-  grupo: ["Grupo"]
+  grupo: ["Grupo"],
+  puesto: ["Puesto"],
+  jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"]
 };
 const PLANTEL_REQUIRED_FIELDS = ["legajo","fechaAlta"];
 const PLANTEL_FIELD_LABELS = {legajo:"Legajo", nombre:"Apellido y Nombre", fechaAlta:"Fecha de Alta", fechaBaja:"Fecha de Baja",
-  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo"};
-const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo"];
+  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)"};
+const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe"];
 function findColByAliases(headerRow, aliases){
   for(let a=0;a<aliases.length;a++){
     const idx = findColIndex(headerRow, aliases[a]);
@@ -407,6 +418,7 @@ function parseAusentismoRows(rows2d){
   const idxJefe = findColIndex(header, OPTIONAL_COLS.jefe);
   const idxPresidencia = findColIndex(header, OPTIONAL_COLS.presidencia);
   const idxSindicato = findColIndex(header, OPTIONAL_COLS.sindicato);
+  const idxTipoContrat = findColIndex(header, OPTIONAL_COLS.tipoContrat);
 
   const dataRows = rows2d.slice(1);
   const records = [];
@@ -432,18 +444,20 @@ function parseAusentismoRows(rows2d){
     const jefe = cellStr(row, idxJefe);
     const presidencia = cellStr(row, idxPresidencia).toUpperCase();
     const sindicato = cellStr(row, idxSindicato);
+    const tipoContrat = cellStr(row, idxTipoContrat);
     if(!d.valid){
       invalidCount++;
-      records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, valid:false});
+      records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, tipoContrat, valid:false});
       return;
     }
     const ts = Date.UTC(d.anio, d.mes-1, d.dia);
     const monthKey = d.anio+"-"+pad2(d.mes);
     const dateKey = monthKey+"-"+pad2(d.dia);
-    records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato,
+    records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, tipoContrat,
       valid:true, dia:d.dia, mes:d.mes, anio:d.anio, ts, monthKey, dateKey});
   });
-  return {error:null, records, invalidCount, hasMotivoCol: idxIdMotivo!==-1 || idxMotivo!==-1};
+  return {error:null, records, invalidCount, hasMotivoCol: idxIdMotivo!==-1 || idxMotivo!==-1,
+    missingTipoContrat: idxTipoContrat===-1 ? "Falta la columna '"+OPTIONAL_COLS.tipoContrat+"': el Cuadro Diario no podrá separar Propios / Contratados." : null};
 }
 
 function buildParsedAggregates(records, fileName, hasMotivo){
@@ -520,7 +534,7 @@ function buildParsedAggregates(records, fileName, hasMotivo){
   };
 }
 
-const AUS_UPDATE_CMP_FIELDS = ["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato"];
+const AUS_UPDATE_CMP_FIELDS = ["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato","tipoContrat"];
 function mergeAusentismoRecords(existingRecords, newRecords){
   const validExisting = existingRecords.filter(r=>r.valid);
   const invalidExisting = existingRecords.filter(r=>!r.valid);
@@ -1312,7 +1326,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
   const changedRecords = [];
   const errors = [];
   let nuevos = 0, modificados = 0, sinCambios = 0;
-  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre"];
+  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe"];
   dataRows.forEach((row, i) => {
     const excelRow = i + 2;
     const legajo = cellStr(row, mapping.legajo).trim();
@@ -1348,7 +1362,9 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
       gerencia: cellStr(row, mapping.gerencia),
       departamento: cellStr(row, mapping.departamento),
       empresa: cellStr(row, mapping.empresa),
-      grupo: cellStr(row, mapping.grupo)
+      grupo: cellStr(row, mapping.grupo),
+      puesto: cellStr(row, mapping.puesto),
+      jefe: cellStr(row, mapping.jefe)
     };
     seen.add(legajoKey);
     const prev = existingByLegajo.get(legajo);
@@ -1762,6 +1778,176 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
     </div>
   );
 }
+/* ===================== Cuadro Diario ===================== */
+const CUADRO_COLS = [
+  {key:"presProp",  label:"Presentes Propios",       cat:"P"},
+  {key:"presContr", label:"Presentes Contratados",   cat:"P"},
+  {key:"ap",        label:"Ausentes (Pagos)",        cat:"AP"},
+  {key:"anp",       label:"Ausentes (No Pagos)",     cat:"ANP"},
+  {key:"ce",        label:"Sin Tareas (No Pagos)",   cat:"CE"},
+  {key:"vac",       label:"Vacaciones",              cat:"V"},
+  {key:"total",     label:"Total Activos"},
+  {key:"sub",       label:"Sub-Cont"}
+];
+const CUADRO_ACTIVOS = ["presProp","presContr","ap","anp","ce","vac"];
+const CUADRO_AUDIT_COLS = ["Legajo","Nombre","Empresa","Tipo contratación","Estado","Id Motivo","Motivo"];
+function cuadroAuditRow(r){ return [r.legajo, r.nombre, r.empresa, r.tipoContrat||"", r.estado, r.idMotivo, r.motivo]; }
+function dateKeyToLabel(dk){ const p = (dk||"").split("-"); return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : (dk||""); }
+
+function CuadroDiarioTab({parsed}){
+  // Sin filtros globales (mes, gerencia, empresa, motivos): el cuadro es la foto de UN día completo.
+  const base = useMemo(()=> parsed.records.filter(r=>r.valid && r.cat!=="BAJA"), [parsed]);
+  const dateKeys = useMemo(()=> Array.from(new Set(base.map(r=>r.dateKey))).sort().reverse(), [base]);
+  const [fechaSel, setFechaSel] = useKeptState("cd.fecha", null);
+  const fecha = dateKeys.includes(fechaSel) ? fechaSel : (dateKeys[0] || "");
+  const [audit, setAudit] = useState(null);
+  const [copied, setCopied] = useState("idle");
+
+  const dayRecords = useMemo(()=> base.filter(r=>r.dateKey===fecha), [base, fecha]);
+
+  const model = useMemo(()=>{
+    const servicioMap = new Map(Object.keys(EMPRESA_SERVICIO).map(k=>[normTxt(k), EMPRESA_SERVICIO[k]]));
+    const cells = new Map(); // unidad -> {col: [registros]}
+    const unmapped = new Set();
+    let sinTipo = 0;
+    const cellOf = (unit, col) => {
+      if(!cells.has(unit)) cells.set(unit, {});
+      const o = cells.get(unit);
+      if(!o[col]) o[col] = [];
+      return o[col];
+    };
+    UNIT_ORDER.forEach(u=>cells.set(u, {}));
+    dayRecords.forEach(r=>{
+      if(!r.tipoContrat) sinTipo++;
+      const propio = normTxt(r.empresa)==="propios";
+      const eventual = normTxt(r.tipoContrat)==="eventual"; // vacío o cualquier otro valor se trata como Propios
+      if(propio){
+        const unit = r.unidad || "(Sin unidad)";
+        if(r.cat==="P") cellOf(unit, eventual ? "presContr" : "presProp").push(r);
+        else if(r.cat==="AP") cellOf(unit, "ap").push(r);
+        else if(r.cat==="ANP") cellOf(unit, "anp").push(r);
+        else if(r.cat==="CE") cellOf(unit, "ce").push(r);
+        else if(r.cat==="V") cellOf(unit, "vac").push(r);
+      } else if(r.cat==="P"){
+        const mapped = servicioMap.get(normTxt(r.empresa));
+        if(!mapped) unmapped.add(r.empresa || "(vacía)");
+        cellOf(mapped || r.unidad || "(Sin unidad)", "sub").push(r);
+      }
+    });
+    const extra = Array.from(cells.keys()).filter(u=>!UNIT_ORDER.includes(u)).sort();
+    const units = UNIT_ORDER.concat(extra);
+    const rows = units.map(u=>{
+      const c = cells.get(u) || {};
+      const get = k => c[k] || [];
+      const total = CUADRO_ACTIVOS.reduce((a,k)=>a.concat(get(k)), []);
+      return {unit:u, label:CUADRO_UNIT_LABEL[u]||u, recs:{presProp:get("presProp"), presContr:get("presContr"), ap:get("ap"), anp:get("anp"), ce:get("ce"), vac:get("vac"), total, sub:get("sub")}};
+    });
+    const totalRecs = {};
+    CUADRO_COLS.forEach(col=>{ totalRecs[col.key] = rows.reduce((a,row)=>a.concat(row.recs[col.key]), []); });
+    // Total Plantel Contratados: todos los propios con tipo "Eventual" (P+AP+ANP+CE+V), cualquiera sea su estado del día
+    const contratados = totalRecs.total.filter(r=>normTxt(r.tipoContrat)==="eventual");
+    return {rows, totalRecs, contratados, unmapped:Array.from(unmapped), sinTipo};
+  }, [dayRecords]);
+
+  const fechaLabel = dateKeyToLabel(fecha);
+  function openAudit(colLabel, unitLabel, recs){ setAudit({title: colLabel+" · "+unitLabel+" · "+fechaLabel, rows:recs}); }
+  function numCell(recs, colLabel, unitLabel){
+    return recs.length ? <CellLink onClick={()=>openAudit(colLabel, unitLabel, recs)}>{fmt(recs.length)}</CellLink> : "-";
+  }
+
+  async function copyTable(){
+    const lines = [["Unidad"].concat(CUADRO_COLS.map(c=>c.label)).join("\t")];
+    model.rows.forEach(row=> lines.push([row.label].concat(CUADRO_COLS.map(c=>row.recs[c.key].length)).join("\t")));
+    lines.push(["Total"].concat(CUADRO_COLS.map(c=>model.totalRecs[c.key].length)).join("\t"));
+    const text = lines.join("\n");
+    try{
+      await navigator.clipboard.writeText(text);
+      setCopied("ok");
+    }catch(e){
+      try{
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position="fixed"; ta.style.opacity="0";
+        document.body.appendChild(ta); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied("ok");
+      }catch(e2){ setCopied("err"); }
+    }
+    setTimeout(()=>setCopied("idle"), 2500);
+  }
+
+  const totalActivos = model.totalRecs.total.length;
+  const totalSub = model.totalRecs.sub.length;
+
+  return (
+    <div className="tabpanel">
+      <div className="print-header">
+        <h2>Cuadro Diario</h2>
+        <p className="sub">Fecha: {fechaLabel || "—"}</p>
+      </div>
+      <div className="card table-card">
+        <h3>Cuadro Diario</h3>
+        <div className="caption">Foto de un día completo, sin filtros globales. Hacé clic en un número para ver y copiar los registros que lo componen.</div>
+        <div className="filters-bar no-print">
+          <div className="field">
+            <label>Fecha</label>
+            <select value={fecha} onChange={e=>setFechaSel(e.target.value)}>
+              {dateKeys.map(dk=>(<option key={dk} value={dk}>{dateKeyToLabel(dk)}</option>))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Registros del día</label>
+            <span style={{fontWeight:700,fontSize:15,padding:"6px 0"}}>{fmt(dayRecords.length)}</span>
+          </div>
+          <button type="button" className="btn small" onClick={copyTable} disabled={!dayRecords.length}>
+            {copied==="ok" ? "Copiado ✓" : copied==="err" ? "No se pudo copiar" : "Copiar tabla"}
+          </button>
+        </div>
+
+        {!dayRecords.length && <div className="warn-banner">Sin datos para la fecha</div>}
+        {dayRecords.length>0 && model.sinTipo>0 && (
+          <div className="warn-banner">{fmt(model.sinTipo)} registro{model.sinTipo===1?"":"s"} de esta fecha sin "Agrup. tipo contratación": se tratan como Propios. Volvé a subir el archivo anual para completar el dato.</div>
+        )}
+        {model.unmapped.length>0 && (
+          <div className="warn-banner">Empresa sin mapear: {model.unmapped.join(", ")}</div>
+        )}
+
+        <div className="overflow-x">
+          <table>
+            <thead>
+              <tr>
+                <th>Unidad de negocio</th>
+                {CUADRO_COLS.map(c=>(
+                  <th key={c.key} className="num" style={c.cat ? {color:CAT_COLOR[c.cat], borderBottom:"3px solid "+CAT_COLOR[c.cat]} : undefined}>{c.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {model.rows.map(row=>(
+                <tr key={row.unit}>
+                  <td>{row.label}</td>
+                  {CUADRO_COLS.map(c=>(<td key={c.key} className="num">{numCell(row.recs[c.key], c.label, row.label)}</td>))}
+                </tr>
+              ))}
+              <tr className="total-row">
+                <td>Total</td>
+                {CUADRO_COLS.map(c=>(<td key={c.key} className="num">{numCell(model.totalRecs[c.key], c.label, "Total")}</td>))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="kpi-grid">
+          <KpiTile label="Total Plantel Propios" value={totalActivos} />
+          <KpiTile label="Total Plantel Contratados" value={model.contratados.length} />
+          <KpiTile label="Total Sub-Contratados" value={totalSub} />
+          <KpiTile label="Total General del día" value={totalActivos + totalSub} month />
+        </div>
+      </div>
+      {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} cols={CUADRO_AUDIT_COLS} rowToArr={cuadroAuditRow} />}
+    </div>
+  );
+}
 function EvolucionTab({evoMonths, evoSeries, objetivo}){
   return (
     <div className="tabpanel">
@@ -1999,6 +2185,12 @@ function DetalleEmpleadosTab({parsed, plantel}){
     if(!legajoSel) return null;
     return (plantel||[]).find(p => (p.legajo||"").toUpperCase()===legajoSel.toUpperCase()) || null;
   }, [plantel, legajoSel]);
+  // La ficha toma los datos vigentes del plantel (si el campo está vacío en el plantel, queda vacío: no se mezcla con datos viejos).
+  // Solo si el legajo no está en el plantel cae a lo que figura en las filas de ausentismo.
+  function fichaDato(campo){
+    if(plantelFicha) return plantelFicha[campo]||"";
+    return ficha ? (ficha[campo]||"") : "";
+  }
 
   const scopeE = useMemo(()=>{
     if(!legajoSel || anioSel==null) return [];
@@ -2124,11 +2316,11 @@ function DetalleEmpleadosTab({parsed, plantel}){
             <h3>Ficha del empleado</h3>
             <div className="ficha-grid">
               <div><span className="lbl">Legajo</span><span className="val">{ficha.legajo}</span></div>
-              <div><span className="lbl">Nombre</span><span className="val">{ficha.nombre || "—"}</span></div>
-              <div><span className="lbl">Unidad de Negocio</span><span className="val">{ficha.unidad || "—"}</span></div>
-              <div><span className="lbl">Sector</span><span className="val">{ficha.sector || "—"}</span></div>
-              <div><span className="lbl">Puesto</span><span className="val">{ficha.puesto || "—"}</span></div>
-              <div><span className="lbl">Jefe directo</span><span className="val">{ficha.jefe || "—"}</span></div>
+              <div><span className="lbl">Nombre</span><span className="val">{fichaDato("nombre") || "—"}</span></div>
+              <div><span className="lbl">Unidad de Negocio</span><span className="val">{fichaDato("unidad") || "—"}</span></div>
+              <div><span className="lbl">Sector</span><span className="val">{fichaDato("sector") || "—"}</span></div>
+              <div><span className="lbl">Puesto</span><span className="val">{fichaDato("puesto") || "—"}</span></div>
+              <div><span className="lbl">Jefe directo</span><span className="val">{fichaDato("jefe") || "—"}</span></div>
               <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
               <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
             </div>
@@ -2690,6 +2882,7 @@ function App({userEmail, onSignOut}){
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [cloudError, setCloudError] = useState(null);
+  const [uploadNotice, setUploadNotice] = useState(null); // aviso no bloqueante de la última carga (ej. columna opcional faltante)
   const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
 
   const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
@@ -2815,6 +3008,7 @@ function App({userEmail, onSignOut}){
         const validRecords = parsedRows.records.filter(r=>r.valid);
         const recordsToUpload = prevRecords ? mergeAusentismoRecords(prevRecords, validRecords).changedRows : validRecords;
         applyParsedRecords(parsedRows.records, file.name, parsedRows.hasMotivoCol);
+        setUploadNotice(parsedRows.missingTipoContrat);
         setActiveTab("resumen");
         setObjetivo(3);
         setFiltersState({mes:null, departamento:null, gerencia:null, sector:null});
@@ -2856,6 +3050,7 @@ function App({userEmail, onSignOut}){
         }
         const {merged, nuevos, modificados, sinCambios, nuevosInvalidos, changedRows} = mergeAusentismoRecords(parsed.records, parsedRows.records);
         const hasMotivo = parsed.hasMotivo || parsedRows.hasMotivoCol;
+        setUploadNotice(parsedRows.missingTipoContrat);
         const nextParsed = buildParsedAggregates(merged, file.name, hasMotivo);
         setAusUpdatePreview({
           fileName: file.name,
@@ -3087,6 +3282,7 @@ function App({userEmail, onSignOut}){
   const TABS = [
     {key:"resumen", label:"Resumen"},
     {key:"resumen_gerencia", label:"Resumen por Gerencia"},
+    {key:"cuadro_diario", label:"Cuadro Diario"},
     {key:"evolucion", label:"Evolución mensual"},
     {key:"tipos", label:"Tipos de ausencia"},
     {key:"cronicos", label:"Crónicos"},
@@ -3127,6 +3323,7 @@ function App({userEmail, onSignOut}){
       </div>
 
       {cloudError && <div className="warn-banner no-print">{cloudError}</div>}
+      {uploadNotice && <div className="warn-banner no-print">{uploadNotice}</div>}
       {syncStatus && (
         <div className="chip ok no-print" style={{alignSelf:"flex-start"}}>
           <span className="dot"></span>{syncStatus.label}… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}
@@ -3238,6 +3435,7 @@ function App({userEmail, onSignOut}){
 
           {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} />}
           {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
+          {activeTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
           {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
