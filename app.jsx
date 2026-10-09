@@ -500,12 +500,20 @@ function buildParsedAggregates(records, fileName, hasMotivo){
   records.forEach(r => {
     if(!r.idMotivo) return;
     const k = r.idMotivo.toUpperCase();
-    if(!idMotivoUniverseMap.has(k)) idMotivoUniverseMap.set(k, {key:k, label:k+" — "+(r.motivo||k)});
+    if(!idMotivoUniverseMap.has(k)) idMotivoUniverseMap.set(k, {key:k, label:k+" — "+(r.motivo||k), ap:0, anp:0});
+    // cuántas filas AP / ANP tiene cada Id Motivo: sirve para la selección rápida "AP" / "ANP" de los filtros
+    if(r.valid){ const m = idMotivoUniverseMap.get(k); if(r.cat==="AP") m.ap++; else if(r.cat==="ANP") m.anp++; }
   });
   const idMotivoUniverse = Array.from(idMotivoUniverseMap.values()).sort((a,b)=>a.key.localeCompare(b.key));
 
   const presidenciaUniverseSet = new Set();
-  records.forEach(r => { if(r.presidencia) presidenciaUniverseSet.add(r.presidencia); });
+  const presidenciaCats = {}; // valor -> {ap, anp}
+  records.forEach(r => {
+    if(!r.presidencia) return;
+    presidenciaUniverseSet.add(r.presidencia);
+    if(!presidenciaCats[r.presidencia]) presidenciaCats[r.presidencia] = {ap:0, anp:0};
+    if(r.valid){ if(r.cat==="AP") presidenciaCats[r.presidencia].ap++; else if(r.cat==="ANP") presidenciaCats[r.presidencia].anp++; }
+  });
   const presidenciaUniverse = Array.from(presidenciaUniverseSet).sort();
 
   const monthMap = new Map();
@@ -534,7 +542,7 @@ function buildParsedAggregates(records, fileName, hasMotivo){
     hasMotivo,
     motivoUniverse,
     idMotivoUniverse,
-    presidenciaUniverse
+    presidenciaUniverse, presidenciaCats
   };
 }
 
@@ -822,12 +830,38 @@ function MultiSelect({label, options, selected, onChange, allLabel}){
     </div>
   );
 }
+// Barra de "Selección rápida" de los cuadros de filtros: Todos · Ninguno · AP · ANP · Por defecto.
+// all: todas las claves; apKeys/anpKeys: claves de categoría predominante AP / ANP (si no se pasan, no se muestran esos botones);
+// defaultKeys: selección recomendada (si no se pasa, o es igual a "Todos", no se muestra); selected: Set de claves incluidas.
+function QuickSelectBar({all, apKeys, anpKeys, defaultKeys, selected, onChange}){
+  const sameAs = keys => keys.length===selected.size && keys.every(k=>selected.has(k));
+  const presets = [{label:"Todos", title:"Incluir todos", keys:all}, {label:"Ninguno", title:"No incluir ninguno", keys:[]}];
+  if(apKeys) presets.push({label:"AP", title:"Solo los de Ausente Pago", keys:apKeys});
+  if(anpKeys) presets.push({label:"ANP", title:"Solo los de Ausente No Pago", keys:anpKeys});
+  if(defaultKeys && !(defaultKeys.length===all.length)) presets.push({label:"Por defecto", title:"Selección recomendada", keys:defaultKeys});
+  return (
+    <div className="msel-menu-actions" style={{marginBottom:4, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+      <span className="hint" style={{margin:0}}>Selección rápida:</span>
+      {presets.map(p=>(
+        <button key={p.label} type="button" title={p.title} className="btn secondary"
+          style={sameAs(p.keys) ? {padding:"5px 12px", fontSize:12.5, background:"var(--accent)", color:"var(--accent-ink)", borderColor:"var(--accent)"} : {padding:"5px 12px", fontSize:12.5}}
+          onClick={()=>onChange(new Set(p.keys))}>{p.label}</button>
+      ))}
+      <span className="hint" style={{margin:0}}>{selected.size} de {all.length} incluidos</span>
+    </div>
+  );
+}
+// categoría predominante: AP si tiene más (o igual) días AP que ANP; ANP si tiene más ANP; sin ausencias no es ninguna
+const isApItem = it => (it.ap||0)>0 && (it.ap||0)>=(it.anp||0);
+const isAnpItem = it => (it.anp||0)>0 && (it.anp||0)>(it.ap||0);
+
 function EmpresaChecklist({options, included, onChange}){
   if(!options.length) return null;
   const inc = included || new Set(options);
   return (
     <div className="card motivo-settings">
       <h3>Empresa</h3>
+      <QuickSelectBar all={options} selected={inc} onChange={next=>onChange(next.size===options.length ? null : next)} />
       <p className="hint">Incluí o excluí legajos según la empresa que los emplea (propios, contratistas). Se aplica a toda la base. Tildada = incluida.</p>
       <div className="motivo-checklist">
         {options.map(name=>(
@@ -2184,23 +2218,27 @@ function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo}){
     </div>
   );
 }
-function ToggleList({title, items, included, onChange, columns}){
+// Cuadro de filtro SÍ/NO, compacto en columnas (2-3 según el ancho), con el mismo título y la misma "Selección rápida" que el resto.
+// items: {key, label, ap?, anp?}. defaultKeys (opcional): selección que activa el botón "Por defecto".
+function ToggleList({title, items, included, onChange, columns, defaultKeys}){
   if(!items.length) return null;
   function toggle(key){
     const next = new Set(included);
     if(next.has(key)) next.delete(key); else next.add(key);
     onChange(next);
   }
+  const hasCats = items.some(it=>it.ap!=null || it.anp!=null);
+  const n = columns || 3;
   return (
-    <div className="card toggle-list">
-      <div className="toggle-list-head">{title}</div>
-      <div className="toggle-list-actions">
-        <button type="button" onClick={()=>onChange(new Set(items.map(i=>i.key)))}>Marcar todos</button>
-        <button type="button" onClick={()=>onChange(new Set())}>Desmarcar todos</button>
-      </div>
-      <div className={"toggle-list-rows"+(columns?" toggle-list-cols":"")} style={columns?{columnCount:columns}:undefined}>
+    <div className="card motivo-settings">
+      <h3>{title}</h3>
+      <QuickSelectBar all={items.map(i=>i.key)}
+        apKeys={hasCats ? items.filter(isApItem).map(i=>i.key) : null}
+        anpKeys={hasCats ? items.filter(isAnpItem).map(i=>i.key) : null}
+        defaultKeys={defaultKeys} selected={included} onChange={onChange} />
+      <div className="toggle-list-rows toggle-list-cols" style={{columnCount:n, columnGap:28, maxHeight:"none", overflowY:"visible", borderTop:"1px solid var(--border)"}}>
         {items.map(it=>(
-          <div key={it.key} className="toggle-row" onClick={()=>toggle(it.key)}>
+          <div key={it.key} className="toggle-row" style={{padding:"5px 4px"}} onClick={()=>toggle(it.key)}>
             <span>{it.label}</span>
             <span className={"toggle-pill "+(included.has(it.key)?"yes":"no")}>{included.has(it.key)?"SÍ":"NO"}</span>
           </div>
@@ -2210,7 +2248,7 @@ function ToggleList({title, items, included, onChange, columns}){
   );
 }
 
-function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel}){
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel}){
   const [unitFilter, setUnitFilter] = useState("__all");
   const [soloVigentes, setSoloVigentes] = useState(true);
   const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
@@ -2228,7 +2266,9 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
         const k = name+"::"+r.legajo;
         if(!byLegajo.has(k)){
           const p = plantelByLegajo.get((r.legajo||"").toUpperCase());
-          byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, sindicato:r.sindicato||"", estado:(p&&p.estado)||"", count:0});
+          // Departamento - Sector: se toma del plantel (dato vigente) y, si el legajo no está, de las filas de ausentismo
+          const deptSector = [(p&&p.departamento)||r.departamento||"", (p&&p.sector)||r.sector||""].filter(Boolean).join(" - ");
+          byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, deptSector, sindicato:r.sindicato||"", estado:(p&&p.estado)||"", count:0});
         }
         byLegajo.get(k).count++;
       });
@@ -2238,15 +2278,17 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
     return list.sort((a,b)=>b.count-a.count).slice(0,20);
   }, [scopeUnitsMap, unitFilter, idIncluded, presIncluded, plantelByLegajo, hasPlantel, soloVigentes]);
   const empSort = useTableSort(employees, {
-    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"},
+    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"}, deptSector:{get:e=>e.deptSector, type:"text"},
     sindicato:{get:e=>e.sindicato, type:"text"}, estado:{get:e=>e.estado, type:"text"}, count:{get:e=>e.count, type:"num"}
   });
 
   return (
     <div className="tabpanel">
-      <div className="toggle-grid">
-        <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label}))} included={idIncluded} onChange={setIdIncluded} />
-        <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v}))} included={presIncluded} onChange={setPresIncluded} />
+      <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
+        <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={idIncluded} onChange={setIdIncluded}
+          defaultKeys={idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
+        <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
+          defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />
       </div>
       <div className="card table-card">
         <h3>Ranking de empleados</h3>
@@ -2272,17 +2314,19 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
               <SortTh k="legajo" label="Legajo" sort={empSort.sort} toggle={empSort.toggle} />
               <SortTh k="nombre" label="Empleado" sort={empSort.sort} toggle={empSort.toggle} />
               {hasUnidad && <SortTh k="unidad" label="Unidad" sort={empSort.sort} toggle={empSort.toggle} />}
+              <SortTh k="deptSector" label="Departamento - Sector" sort={empSort.sort} toggle={empSort.toggle} />
               <SortTh k="sindicato" label="Sindicato" sort={empSort.sort} toggle={empSort.toggle} />
               {hasPlantel && <SortTh k="estado" label="Estado" sort={empSort.sort} toggle={empSort.toggle} />}
               <SortTh k="count" label="Filas incluidas" className="num" sort={empSort.sort} toggle={empSort.toggle} />
             </tr></thead>
             <tbody>
-              {!employees.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
+              {!employees.length && <tr><td colSpan="7" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
               {empSort.sorted.map(e=>(
                 <tr key={e.unidad+"::"+e.legajo}>
                   <td>{e.legajo}</td>
                   <td>{e.nombre}</td>
                   {hasUnidad && <td>{e.unidad}</td>}
+                  <td>{e.deptSector || "—"}</td>
                   <td>{e.sindicato||"—"}</td>
                   {hasPlantel && <td>{e.estado||"—"}</td>}
                   <td className="num">{fmt(e.count)}</td>
@@ -2555,24 +2599,11 @@ function DetalleEmpleadosTab({parsed, plantel}){
         </div>
       </div>
 
-      <div className="card table-card no-print">
-        <h3>Filtro Id Motivo (solo para el detalle de abajo)</h3>
-        <div className="msel-menu-actions" style={{marginBottom:8}}>
-          <button type="button" onClick={()=>setIdMotivoIncluded(new Set(parsed.idMotivoUniverse.map(m=>m.key)))}>Marcar todos</button>
-          <button type="button" onClick={()=>setIdMotivoIncluded(new Set())}>Desmarcar todos</button>
-        </div>
-        <div className="motivo-checklist" style={{maxHeight:180, overflowY:"auto"}}>
-          {parsed.idMotivoUniverse.map(m=>(
-            <label key={m.key} className="motivo-check">
-              <input type="checkbox" checked={idMotivoIncluded.has(m.key)} onChange={()=>{
-                const next = new Set(idMotivoIncluded);
-                if(next.has(m.key)) next.delete(m.key); else next.add(m.key);
-                setIdMotivoIncluded(next);
-              }} />
-              {m.label}
-            </label>
-          ))}
-        </div>
+      <div className="no-print">
+        <ToggleList title="Filtro Id Motivo (solo para el detalle de abajo)"
+          items={parsed.idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))}
+          included={idMotivoIncluded} onChange={setIdMotivoIncluded}
+          defaultKeys={parsed.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
       </div>
 
       <div className="card table-card de-print-block print-page-break">
@@ -3055,7 +3086,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
-      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label}))} included={motivoIncluded} onChange={persistMotivos} columns={4} />
+      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos} />
 
       {!motivoIncluded.size ? (
         <div className="card table-card">
@@ -3841,7 +3872,7 @@ function App({userEmail, onSignOut}){
           {activeTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
           {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
-          {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
+          {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
           {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
           {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} />}
           {activeTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} />}
