@@ -25,6 +25,10 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
 /* ===================== guardado en Supabase: ausentismo + plantel ===================== */
 const AUSENTISMO_TABLE = "ausentismo_registros";
 const PLANTEL_TABLE = "plantel_empleados";
+// Espacio de la base de datos (plan Free de Supabase = 500 MB). Si se pasa a Pro, cambiar DB_LIMIT_MB (ej. 8192).
+const DB_LIMIT_MB = 500;
+const DB_WARN_PCT = 70;   // desde acá aparece una marca discreta arriba (ámbar)
+const DB_ALERT_PCT = 85;  // y desde acá se pone roja
 const SYNC_PAGE_SIZE = 1000;
 const SYNC_BATCH_SIZE = 1000;
 
@@ -1383,7 +1387,9 @@ function DefaultMotivoRefTable(){
 }
 
 /* ===================== gestión de plantel ===================== */
-function buildPlantelPreview(rows2d, mapping, existingPlantel){
+// cutoffTs: primer día del primer mes con datos de ausentismo. Los empleados con baja anterior a esa fecha no aportan
+// ningún día a la dotación ni a los jornales, así que no se cargan (se pueden subir los archivos completos sin recortarlos a mano).
+function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   const header = rows2d[0] || [];
   const dataRows = rows2d.slice(1);
   const existingByLegajo = new Map(existingPlantel.map(p=>[p.legajo, p]));
@@ -1391,7 +1397,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
   const records = [];
   const changedRecords = [];
   const errors = [];
-  let nuevos = 0, modificados = 0, sinCambios = 0;
+  let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
   const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe"];
   dataRows.forEach((row, i) => {
     const excelRow = i + 2;
@@ -1411,6 +1417,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
       if(!bajaParsed.valid){ errors.push({row:excelRow, legajo, problem:"Fecha de baja inválida"}); return; }
       bajaTs = Date.UTC(bajaParsed.anio, bajaParsed.mes-1, bajaParsed.dia);
       if(bajaTs < altaTs){ errors.push({row:excelRow, legajo, problem:"Fecha de baja anterior a la fecha de alta"}); return; }
+      if(cutoffTs!=null && bajaTs < cutoffTs){ seen.add(legajoKey); descartados++; return; }
     }
     const nacRaw = mapping.fechaNacimiento!==-1 ? row[mapping.fechaNacimiento] : "";
     const nacStr = String(nacRaw==null?"":nacRaw).trim();
@@ -1444,7 +1451,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel){
   const noIncluidos = existingPlantel.filter(p=>!seen.has(p.legajo.toUpperCase())).length;
   return {
     totalEncontrados: dataRows.length,
-    nuevos, modificados, sinCambios, noIncluidos,
+    nuevos, modificados, sinCambios, noIncluidos, descartados, cutoffTs,
     errores: errors,
     records,
     changedRecords
@@ -1459,7 +1466,74 @@ function PlantelUploadForm({onFile, label, loading}){
     </React.Fragment>
   );
 }
-function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel}){
+/* ---- estado del espacio de la base de datos (Supabase) ---- */
+const MB = 1048576;
+function dbUsagePct(usage){ return usage ? usage.db_bytes/MB/DB_LIMIT_MB*100 : 0; }
+function dbUsageLevel(pct){ return pct>=DB_ALERT_PCT ? "bad" : pct>=DB_WARN_PCT ? "warn" : "good"; }
+// Cantidad típica de filas de ausentismo que se agregan por mes (promedio de los meses completos ya cargados).
+function rowsPerMonthOf(parsed){
+  if(!parsed || !parsed.monthMap || !parsed.monthKeys.length) return 0;
+  const keys = parsed.monthKeys.length>2 ? parsed.monthKeys.slice(0,-1) : parsed.monthKeys; // el último mes puede estar incompleto
+  return keys.reduce((a,k)=>a+(parsed.monthMap.get(k)||0),0)/keys.length;
+}
+function DbUsageCard({usage, error, checking, onCheck, rowsPerMonth}){
+  const used = usage ? usage.db_bytes/MB : 0;
+  const pct = dbUsagePct(usage), level = dbUsageLevel(pct);
+  const color = level==="bad" ? "var(--critical)" : level==="warn" ? "var(--warning)" : "var(--good)";
+  const bytesPerRow = usage && usage.aus_filas>0 ? usage.aus_bytes/usage.aus_filas : 0;
+  const mbPerMonth = rowsPerMonth>0 && bytesPerRow>0 ? rowsPerMonth*bytesPerRow/MB : 0;
+  const monthsLeft = mbPerMonth>0 ? Math.max(0, (DB_LIMIT_MB-used)/mbPerMonth) : null;
+  const limitDate = monthsLeft!=null ? new Date(Date.now()+monthsLeft*30.4*86400000) : null;
+  const tables = usage ? [
+    {name:"Ausentismo (registros diarios)", filas:usage.aus_filas, bytes:usage.aus_bytes},
+    {name:"Plantel", filas:usage.plantel_filas, bytes:usage.plantel_bytes},
+    {name:"Crónicos (casos y observaciones)", filas:usage.cronicos_filas, bytes:usage.cronicos_bytes}
+  ] : [];
+  return (
+    <div className="card table-card">
+      <h3>Estado de la base de datos</h3>
+      {error && <div className="warn-banner">{error}</div>}
+      {usage && (
+        <React.Fragment>
+          <div style={{display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap"}}>
+            <b style={{fontSize:20, color}}>{fmt(used)} MB</b>
+            <span className="hint">de {fmt(DB_LIMIT_MB)} MB del plan · {fmtPct(pct,0)} usado</span>
+          </div>
+          <div style={{height:10, borderRadius:6, background:"var(--border)", overflow:"hidden"}} role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin="0" aria-valuemax="100">
+            <div style={{width:Math.min(100,pct)+"%", height:"100%", background:color}}></div>
+          </div>
+          <div className="overflow-x">
+            <table>
+              <thead><tr><th>Tabla</th><th className="num">Filas</th><th className="num">Tamaño</th></tr></thead>
+              <tbody>
+                {tables.map(t=>(<tr key={t.name}><td>{t.name}</td><td className="num">{fmt(t.filas)}</td><td className="num">{t.bytes/MB>=10 ? fmt(t.bytes/MB) : (t.bytes/MB).toLocaleString("es-AR",{maximumFractionDigits:1})} MB</td></tr>))}
+              </tbody>
+            </table>
+          </div>
+          {monthsLeft!=null && (
+            <p className="caption" style={{margin:0}}>
+              Ritmo estimado: ~{mbPerMonth.toLocaleString("es-AR",{maximumFractionDigits:1})} MB por mes (≈ {fmt(rowsPerMonth)} filas por mes × {(bytesPerRow/1024).toLocaleString("es-AR",{maximumFractionDigits:2})} KB por fila).
+              {level==="bad" || monthsLeft<=0
+                ? " Estás muy cerca del límite."
+                : " A este ritmo se llegaría al límite en ~"+fmt(Math.round(monthsLeft))+" meses (aprox. "+MESES[limitDate.getMonth()]+" "+limitDate.getFullYear()+")."}
+            </p>
+          )}
+          {level!=="good" && (
+            <p className="caption" style={{margin:0, color}}>
+              Conviene liberar espacio (archivar un año anterior y borrarlo de la base) o pasar al plan Pro antes de llegar al límite: al superarlo, la base queda en solo lectura y no se pueden guardar cargas nuevas.
+            </p>
+          )}
+        </React.Fragment>
+      )}
+      <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+        <button type="button" className="btn secondary small" onClick={onCheck} disabled={checking}>{checking ? "Verificando…" : "Verificar ahora"}</button>
+        <span className="hint">Se verifica sola al abrir la app y al terminar cada carga. Avisa con una marca arriba desde el {DB_WARN_PCT} %.</span>
+      </div>
+    </div>
+  );
+}
+
+function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs}){
   const [stage, setStage] = useState("idle");
   const [rawRows, setRawRows] = useState(null);
   const [fileName, setFileName] = useState("");
@@ -1517,8 +1591,11 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
 
   const preview = useMemo(() => {
     if(stage!=="preview" || !rawRows) return null;
-    return buildPlantelPreview(rawRows, mapping, plantel);
-  }, [stage, rawRows, mapping, plantel]);
+    // primer día del primer mes con datos de ausentismo cargados (si todavía no hay datos, no se descarta a nadie)
+    const dataStart = dataStartTs!=null ? new Date(dataStartTs) : null;
+    const cutoffTs = dataStart ? Date.UTC(dataStart.getUTCFullYear(), dataStart.getUTCMonth(), 1) : null;
+    return buildPlantelPreview(rawRows, mapping, plantel, cutoffTs);
+  }, [stage, rawRows, mapping, plantel, dataStartTs]);
 
   function confirmar(){
     if(!preview) return;
@@ -1594,6 +1671,7 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
             <KpiTile label="Registros modificados" value={preview.modificados} />
             <KpiTile label="Registros con errores" value={preview.errores.length} />
           </div>
+          {preview.descartados>0 && <p className="hint">Se descartaron <b>{fmt(preview.descartados)}</b> legajo(s) con baja anterior al <b>{fmtDateFromTs(preview.cutoffTs)}</b> (primer mes con datos de ausentismo): no aportan días a la dotación ni a los jornales, así que no se cargan ni ocupan espacio en la base.</p>}
           {preview.noIncluidos>0 && <p className="hint">Hay <b>{fmt(preview.noIncluidos)}</b> legajo(s) del plantel actual que no aparecen en este archivo — se conservan sin cambios (no se borran automáticamente).</p>}
           {preview.errores.length>0 && (
             <React.Fragment>
@@ -1661,6 +1739,8 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
           </div>
         </div>
       )}
+
+      <DbUsageCard usage={dbUsage} error={dbUsageError} checking={dbChecking} onCheck={onCheckDb} rowsPerMonth={dbRowsPerMonth} />
     </div>
   );
 }
@@ -3181,6 +3261,26 @@ function App({userEmail, onSignOut}){
   const [uploadNotice, setUploadNotice] = useState(null); // aviso no bloqueante de la última carga (ej. columna opcional faltante)
   const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
 
+  // espacio usado de la base de datos: se consulta al abrir y cada vez que termina una carga
+  const [dbUsage, setDbUsage] = useState(null);
+  const [dbUsageError, setDbUsageError] = useState(null);
+  const [dbChecking, setDbChecking] = useState(false);
+  const checkDb = useCallback(async ()=>{
+    setDbChecking(true);
+    try{
+      const {data, error} = await supabaseClient.rpc("estado_base");
+      if(error) throw error;
+      setDbUsage(data); setDbUsageError(null);
+    }catch(err){
+      setDbUsageError("No se pudo consultar el estado de la base" + (err && err.message ? " ("+err.message+")" : "") + ". ¿Ya corriste supabase-estado-base.sql en el SQL Editor de Supabase?");
+    }
+    setDbChecking(false);
+  }, []);
+  const syncActive = !!syncStatus;
+  useEffect(()=>{ if(!syncActive) checkDb(); }, [syncActive]);
+  const dbRowsPerMonth = useMemo(()=> rowsPerMonthOf(parsed), [parsed]);
+  const dbPct = dbUsagePct(dbUsage);
+
   const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
 
   function applyParsedRecords(records, fileNameLabel, hasMotivo){
@@ -3605,6 +3705,13 @@ function App({userEmail, onSignOut}){
           )}
         </div>
         <div className="hint" style={{display:"flex", alignItems:"center", gap:8}}>
+          {dbUsage && dbPct>=DB_WARN_PCT && (
+            <button type="button" className={"schip "+dbUsageLevel(dbPct)} style={{border:"none", cursor:"pointer", fontSize:11}}
+              title={"La base de datos usa "+fmt(dbUsage.db_bytes/MB)+" de "+fmt(DB_LIMIT_MB)+" MB. Tocá para ver el detalle."}
+              onClick={()=>setActiveTab("plantel")}>
+              <span className="dot"></span>Base de datos {fmt(dbPct)} %
+            </button>
+          )}
           {userEmail}
           <InstallButton />
           <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
@@ -3736,7 +3843,7 @@ function App({userEmail, onSignOut}){
           {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
           {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
           {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
-          {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} />}
+          {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} />}
           {activeTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} />}
         </React.Fragment>
       )}
