@@ -678,7 +678,9 @@ function SemChip({pct, objetivo}){
   return <span className={"schip "+sem.level}><span className="dot"></span>{sem.label}</span>;
 }
 
-function CategoryTable({title, caption, rows, total}){
+const CATEGORY_SORT_COLS = {label:{get:r=>r.label, type:"text"}, n:{get:r=>r.n, type:"num"}};
+function CategoryTable({title, caption, rows: rowsIn, total}){
+  const {sorted: rows, sort, toggle} = useTableSort(rowsIn, CATEGORY_SORT_COLS);
   return (
     <div className="card table-card">
       <h3>{title}</h3>
@@ -686,7 +688,7 @@ function CategoryTable({title, caption, rows, total}){
       <div className="overflow-x">
         <table>
           <thead>
-            <tr><th>Agrupador cuadro presentismo</th><th className="num">Cantidad</th></tr>
+            <tr><SortTh k="label" label="Agrupador cuadro presentismo" sort={sort} toggle={toggle} /><SortTh k="n" label="Cantidad" className="num" sort={sort} toggle={toggle} /></tr>
           </thead>
           <tbody>
             {rows.map(r => (
@@ -1195,13 +1197,70 @@ function auditPlantelRowArr(p){
     p.bajaTs!=null ? fmtDateFromTs(p.bajaTs) : "—",
     fmt(p._diasActivos||0)];
 }
+/* ---- orden de tablas: clic en el encabezado ordena (números y fechas de mayor a menor primero; texto de la A a la Z primero) ---- */
+// Convierte un valor mostrado ("1.234", "12,5%", "04/10/2026") en número para poder ordenarlo; null si es texto.
+function sortNumOf(v){
+  if(typeof v==="number") return isNaN(v) ? null : v;
+  const s = String(v==null?"":v).trim();
+  const d = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if(d) return (+d[3])*10000 + (+d[2])*100 + (+d[1]);
+  if(/^-?\d{1,3}(\.\d{3})+(,\d+)?%?$/.test(s) || /^-?\d+(,\d+)?%?$/.test(s) || /^-?\d+\.\d+%?$/.test(s)) return parseFloat(s.replace(/\./g,"").replace(",",".").replace("%",""));
+  return null;
+}
+function smartCompare(x, y){
+  const nx = sortNumOf(x), ny = sortNumOf(y);
+  if(nx!=null && ny!=null) return nx-ny;
+  return String(x==null?"":x).localeCompare(String(y==null?"":y), "es", {sensitivity:"base", numeric:true});
+}
+// cols: {clave: {get: fila=>valor, type:"num"|"text"}}. Devuelve las filas ordenadas, el estado y el alternador.
+function useTableSort(rows, cols, initial){
+  const [sort, setSort] = useState(initial||null);
+  let sorted = rows;
+  if(sort && cols[sort.key]){
+    const col = cols[sort.key], dir = sort.dir==="asc" ? 1 : -1;
+    sorted = rows.slice().sort((a,b)=>{
+      const va = col.get(a), vb = col.get(b);
+      return (col.type==="num" ? ((va||0)-(vb||0)) : smartCompare(va, vb)) * dir;
+    });
+  }
+  function toggle(key){
+    setSort(prev => (prev && prev.key===key)
+      ? {key, dir: prev.dir==="asc" ? "desc" : "asc"}
+      : {key, dir: (cols[key] && cols[key].type==="num") ? "desc" : "asc"});
+  }
+  return {sorted, sort, toggle};
+}
+function SortTh({label, k, sort, toggle, className, style}){
+  const active = !!sort && sort.key===k;
+  return (
+    <th className={className} title="Ordenar" aria-sort={active ? (sort.dir==="asc" ? "ascending" : "descending") : "none"}
+      style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap", ...style}} onClick={()=>toggle(k)}>
+      {label}{active ? (sort.dir==="asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
+}
+
 function AuditModal({title, rows, onClose, cols, rowToArr}){
   const columns = cols || AUDIT_COLS;
   const toArr = rowToArr || auditRowArr;
   const [copied, setCopied] = useState("idle");
+  const [sort, setSort] = useState(null); // {i: índice de columna, dir}
+  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows]);
+  const sortedPrepared = useMemo(()=>{
+    if(!sort) return prepared;
+    const dir = sort.dir==="asc" ? 1 : -1;
+    return prepared.slice().sort((p,q)=> smartCompare(p.a[sort.i], q.a[sort.i]) * dir);
+  }, [prepared, sort]);
+  function toggleSort(i){
+    setSort(prev=>{
+      if(prev && prev.i===i) return {i, dir: prev.dir==="asc" ? "desc" : "asc"};
+      const sample = prepared.find(p=>p.a[i]!=null && String(p.a[i]).trim()!=="" && String(p.a[i]).trim()!=="—");
+      return {i, dir: sample && sortNumOf(sample.a[i])!=null ? "desc" : "asc"};
+    });
+  }
   function toCsv(){
     const lines = [columns.join(";")];
-    rows.forEach(r => lines.push(toArr(r).map(v=>String(v==null?"":v).replace(/;/g,",")).join(";")));
+    sortedPrepared.forEach(p => lines.push(p.a.map(v=>String(v==null?"":v).replace(/;/g,",")).join(";")));
     return lines.join("\n");
   }
   async function handleCopy(){
@@ -1221,7 +1280,7 @@ function AuditModal({title, rows, onClose, cols, rowToArr}){
     }
     setTimeout(()=>setCopied("idle"), 2500);
   }
-  const preview = rows.slice(0,200);
+  const preview = sortedPrepared.slice(0,200);
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-panel" onClick={e=>e.stopPropagation()}>
@@ -1235,10 +1294,15 @@ function AuditModal({title, rows, onClose, cols, rowToArr}){
         </button>
         <div className="overflow-x modal-table-wrap">
           <table>
-            <thead><tr>{columns.map(c=><th key={c}>{c}</th>)}</tr></thead>
+            <thead><tr>{columns.map((c,i)=>(
+              <th key={c} title="Ordenar" aria-sort={sort && sort.i===i ? (sort.dir==="asc" ? "ascending" : "descending") : "none"}
+                style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>toggleSort(i)}>
+                {c}{sort && sort.i===i ? (sort.dir==="asc" ? " ▲" : " ▼") : ""}
+              </th>
+            ))}</tr></thead>
             <tbody>
               {!preview.length && <tr><td colSpan={columns.length} style={{textAlign:"center",color:"var(--muted)",padding:"14px 0"}}>Sin filas.</td></tr>}
-              {preview.map((r,i)=>(<tr key={i}>{toArr(r).map((v,j)=><td key={j}>{v}</td>)}</tr>))}
+              {preview.map((p,i)=>(<tr key={i}>{p.a.map((v,j)=><td key={j}>{v}</td>)}</tr>))}
             </tbody>
           </table>
         </div>
@@ -1293,16 +1357,18 @@ function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
   );
 }
 
+const MOTIVO_REF_SORT_COLS = {key:{get:m=>m.key, type:"text"}, label:{get:m=>m.refLabel, type:"text"}, incluir:{get:m=>m.incluir?1:0, type:"num"}};
 function DefaultMotivoRefTable(){
+  const {sorted, sort, toggle} = useTableSort(DEFAULT_MOTIVO_TABLE, MOTIVO_REF_SORT_COLS);
   return (
     <div className="card table-card">
       <h3>Tabla fija — Motivos de Ausencia por defecto</h3>
       <p className="caption">Referencia fija usada como preselección en "Motivos de Ausencia incluidos" (Resumen) y en "Id Motivo a incluir" (Ranking). Se puede editar libremente en esas pestañas — esta tabla no cambia.</p>
       <div className="overflow-x">
         <table>
-          <thead><tr><th>Código</th><th>Motivo</th><th>Incluir</th></tr></thead>
+          <thead><tr><SortTh k="key" label="Código" sort={sort} toggle={toggle} /><SortTh k="label" label="Motivo" sort={sort} toggle={toggle} /><SortTh k="incluir" label="Incluir" sort={sort} toggle={toggle} /></tr></thead>
           <tbody>
-            {DEFAULT_MOTIVO_TABLE.map(m=>(
+            {sorted.map(m=>(
               <tr key={m.key}>
                 <td>{m.key}</td>
                 <td>{m.refLabel}</td>
@@ -1402,6 +1468,22 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
   const [loading, setLoading] = useState(false);
   const [errAudit, setErrAudit] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null);
+
+  const indicadorRows = globalPlantelStats ? [
+    {name:"Empleados considerados", v:globalPlantelStats.empleadosConsiderados},
+    {name:"Días del período", v:globalPlantelStats.diasPeriodo},
+    {name:"Jornales de dotación", v:globalPlantelStats.jornalesDotacion},
+    {name:"Dotación equivalente", v:globalPlantelStats.dotacionEquivalente},
+    {name:"AP", v:globalPlantelStats.ap},
+    {name:"ANP", v:globalPlantelStats.anp},
+    {name:"AP + ANP", v:globalPlantelStats.ap+globalPlantelStats.anp}
+  ] : [];
+  const indSort = useTableSort(indicadorRows, {name:{get:r=>r.name, type:"text"}, v:{get:r=>r.v, type:"num"}});
+  const histSort = useTableSort(plantelHistorial, {
+    fecha:{get:h=>h.fecha.getTime(), type:"num"}, archivo:{get:h=>h.archivo, type:"text"},
+    encontrados:{get:h=>h.encontrados, type:"num"}, nuevos:{get:h=>h.nuevos, type:"num"},
+    modificados:{get:h=>h.modificados, type:"num"}, errores:{get:h=>h.errores, type:"num"}
+  });
 
   function onFile(file){
     setError(null);
@@ -1540,15 +1622,9 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
           <p className="caption">Alcance actual (mismos filtros que Resumen) · Período: {diasPeriodoLabel}</p>
           <div className="overflow-x">
             <table>
-              <thead><tr><th>Indicador</th><th className="num">Valor</th></tr></thead>
+              <thead><tr><SortTh k="name" label="Indicador" sort={indSort.sort} toggle={indSort.toggle} /><SortTh k="v" label="Valor" className="num" sort={indSort.sort} toggle={indSort.toggle} /></tr></thead>
               <tbody>
-                <tr><td>Empleados considerados</td><td className="num">{fmt(globalPlantelStats.empleadosConsiderados)}</td></tr>
-                <tr><td>Días del período</td><td className="num">{fmt(globalPlantelStats.diasPeriodo)}</td></tr>
-                <tr><td>Jornales de dotación</td><td className="num">{fmt(globalPlantelStats.jornalesDotacion)}</td></tr>
-                <tr><td>Dotación equivalente</td><td className="num">{fmt(globalPlantelStats.dotacionEquivalente)}</td></tr>
-                <tr><td>AP</td><td className="num">{fmt(globalPlantelStats.ap)}</td></tr>
-                <tr><td>ANP</td><td className="num">{fmt(globalPlantelStats.anp)}</td></tr>
-                <tr><td>AP + ANP</td><td className="num">{fmt(globalPlantelStats.ap+globalPlantelStats.anp)}</td></tr>
+                {indSort.sorted.map(r=>(<tr key={r.name}><td>{r.name}</td><td className="num">{fmt(r.v)}</td></tr>))}
                 <tr className="total-row"><td>Desvío</td><td className="num">{fmtPct(globalPlantelStats.pct,2)}</td></tr>
               </tbody>
             </table>
@@ -1561,9 +1637,16 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
           <h3>Historial de cargas (esta sesión)</h3>
           <div className="overflow-x">
             <table>
-              <thead><tr><th>Fecha y hora</th><th>Archivo</th><th className="num">Encontrados</th><th className="num">Nuevos</th><th className="num">Modificados</th><th className="num">Errores</th></tr></thead>
+              <thead><tr>
+                <SortTh k="fecha" label="Fecha y hora" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="archivo" label="Archivo" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="encontrados" label="Encontrados" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="nuevos" label="Nuevos" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="modificados" label="Modificados" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="errores" label="Errores" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+              </tr></thead>
               <tbody>
-                {plantelHistorial.map((h,i)=>(
+                {histSort.sorted.map((h,i)=>(
                   <tr key={i}>
                     <td>{h.fecha.toLocaleString("es-AR")}</td>
                     <td>{h.archivo}</td>
@@ -1585,6 +1668,14 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
 /* ===================== tabs ===================== */
 function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs}){
   const [audit, setAudit] = useState(null);
+  const unitSort = useTableSort(rankingUnits, {
+    name:{get:u=>u.name, type:"text"},
+    dot:{get:u=>plantelActive ? u.dotacionEquivalente : u.dotacion, type:"num"},
+    jor:{get:u=>plantelActive ? u.jornalesDotacion : 0, type:"num"},
+    aus:{get:u=>u.ausencias, type:"num"},
+    pct:{get:u=>u.pct, type:"num"},
+    est:{get:u=>u.pct, type:"num"}
+  });
   function openAudit(title, rows, cols, rowToArr){ setAudit({title, rows, cols, rowToArr}); }
   function auditAusencias(u){ openAudit('Ausencias contabilizadas — '+u.name, (scopeUnitsMap.get(u.name)||[]).filter(r=>isCountedCat(r.cat) && !excludedMotivos.has(motivoKeyOf(r)))); }
   function auditDotacion(u){
@@ -1633,9 +1724,16 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
         <div className="caption">Hacé clic en Dotación, Jornales o Ausencias para ver y copiar el detalle de esas filas.</div>
         <div className="overflow-x">
           <table>
-            <thead><tr><th>Unidad</th><th className="num">{plantelActive ? "Dotación equiv." : "Dotación"}</th><th className="num">Jornales</th><th className="num">Ausencias</th><th className="num">Ausentismo</th><th>Estado</th></tr></thead>
+            <thead><tr>
+              <SortTh k="name" label="Unidad" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="dot" label={plantelActive ? "Dotación equiv." : "Dotación"} className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="jor" label="Jornales" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="aus" label="Ausencias" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="pct" label="Ausentismo" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="est" label="Estado" sort={unitSort.sort} toggle={unitSort.toggle} />
+            </tr></thead>
             <tbody>
-              {rankingUnits.map(u=>(
+              {unitSort.sorted.map(u=>(
                 <tr key={u.name}>
                   <td>{u.name}</td>
                   <td className="num"><CellLink onClick={()=>auditDotacion(u)}>{fmt(plantelActive ? u.dotacionEquivalente : u.dotacion)}</CellLink></td>
@@ -1719,6 +1817,15 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
   const totalBase = deptRanking.reduce((a,u)=>a+u.base,0);
   const totalPct = plantelActive ? (totalJornales>0 ? totalAusencias/totalJornales*100 : 0) : (totalBase>0 ? totalAusencias/totalBase*100 : 0);
 
+  const deptSort = useTableSort(deptRanking, {
+    name:{get:u=>u.name, type:"text"},
+    dot:{get:u=>plantelActive ? u.dotacionEquivalente : u.dotacion, type:"num"},
+    jor:{get:u=>plantelActive ? u.jornalesDotacion : 0, type:"num"},
+    aus:{get:u=>u.ausencias, type:"num"},
+    pct:{get:u=>u.pct, type:"num"},
+    est:{get:u=>u.pct, type:"num"}
+  });
+
   function openAudit(title, rows){ setAudit({title, rows}); }
 
   return (
@@ -1744,10 +1851,17 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
             <div className="caption">Hacé clic en Dotación o Ausencias para ver y copiar el detalle de esas filas.</div>
             <div className="overflow-x">
               <table>
-                <thead><tr><th>Departamento</th><th className="num">{plantelActive ? "Dotación equiv." : "Dotación"}</th><th className="num">Jornales</th><th className="num">Ausencias</th><th className="num">Ausentismo</th><th>Estado</th></tr></thead>
+                <thead><tr>
+                  <SortTh k="name" label="Departamento" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="dot" label={plantelActive ? "Dotación equiv." : "Dotación"} className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="jor" label="Jornales" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="aus" label="Ausencias" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="pct" label="Ausentismo" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="est" label="Estado" sort={deptSort.sort} toggle={deptSort.toggle} />
+                </tr></thead>
                 <tbody>
                   {!deptRanking.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin datos para esta gerencia con los filtros actuales.</td></tr>}
-                  {deptRanking.map(u=>(
+                  {deptSort.sorted.map(u=>(
                     <tr key={u.name}>
                       <td>{u.name}</td>
                       <td className="num"><CellLink onClick={()=>openAudit('Dotación — '+u.name, deptUnitsMap.get(u.name)||[])}>{fmt(plantelActive ? u.dotacionEquivalente : u.dotacion)}</CellLink></td>
@@ -1790,6 +1904,8 @@ const CUADRO_COLS = [
   {key:"sub",       label:"Sub-Cont"}
 ];
 const CUADRO_ACTIVOS = ["presProp","presContr","ap","anp","ce","vac"];
+const CUADRO_SORT_COLS = {__unit:{get:row=>row.label, type:"text"}};
+CUADRO_COLS.forEach(c=>{ CUADRO_SORT_COLS[c.key] = {get:row=>row.recs[c.key].length, type:"num"}; });
 const CUADRO_AUDIT_COLS = ["Legajo","Nombre","Empresa","Tipo contratación","Estado","Id Motivo","Motivo"];
 function cuadroAuditRow(r){ return [r.legajo, r.nombre, r.empresa, r.tipoContrat||"", r.estado, r.idMotivo, r.motivo]; }
 function dateKeyToLabel(dk){ const p = (dk||"").split("-"); return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : (dk||""); }
@@ -1848,6 +1964,8 @@ function CuadroDiarioTab({parsed}){
     const contratados = totalRecs.total.filter(r=>normTxt(r.tipoContrat)==="eventual");
     return {rows, totalRecs, contratados, unmapped:Array.from(unmapped), sinTipo};
   }, [dayRecords]);
+
+  const rowSort = useTableSort(model.rows, CUADRO_SORT_COLS);
 
   const fechaLabel = dateKeyToLabel(fecha);
   function openAudit(colLabel, unitLabel, recs){ setAudit({title: colLabel+" · "+unitLabel+" · "+fechaLabel, rows:recs}); }
@@ -1916,14 +2034,15 @@ function CuadroDiarioTab({parsed}){
           <table>
             <thead>
               <tr>
-                <th>Unidad de negocio</th>
+                <SortTh k="__unit" label="Unidad de negocio" sort={rowSort.sort} toggle={rowSort.toggle} />
                 {CUADRO_COLS.map(c=>(
-                  <th key={c.key} className="num" style={c.cat ? {color:CAT_COLOR[c.cat], borderBottom:"3px solid "+CAT_COLOR[c.cat]} : undefined}>{c.label}</th>
+                  <SortTh key={c.key} k={c.key} label={c.label} className="num" sort={rowSort.sort} toggle={rowSort.toggle}
+                    style={c.cat ? {color:CAT_COLOR[c.cat], borderBottom:"3px solid "+CAT_COLOR[c.cat]} : undefined} />
                 ))}
               </tr>
             </thead>
             <tbody>
-              {model.rows.map(row=>(
+              {rowSort.sorted.map(row=>(
                 <tr key={row.unit}>
                   <td>{row.label}</td>
                   {CUADRO_COLS.map(c=>(<td key={c.key} className="num">{numCell(row.recs[c.key], c.label, row.label)}</td>))}
@@ -2038,6 +2157,10 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
     if(hasPlantel && soloVigentes) list = list.filter(e=>e.estado==="Vigente");
     return list.sort((a,b)=>b.count-a.count).slice(0,20);
   }, [scopeUnitsMap, unitFilter, idIncluded, presIncluded, plantelByLegajo, hasPlantel, soloVigentes]);
+  const empSort = useTableSort(employees, {
+    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"},
+    sindicato:{get:e=>e.sindicato, type:"text"}, estado:{get:e=>e.estado, type:"text"}, count:{get:e=>e.count, type:"num"}
+  });
 
   return (
     <div className="tabpanel">
@@ -2065,10 +2188,17 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
         </div>
         <div className="overflow-x">
           <table>
-            <thead><tr><th>Legajo</th><th>Empleado</th>{hasUnidad && <th>Unidad</th>}<th>Sindicato</th>{hasPlantel && <th>Estado</th>}<th className="num">Filas incluidas</th></tr></thead>
+            <thead><tr>
+              <SortTh k="legajo" label="Legajo" sort={empSort.sort} toggle={empSort.toggle} />
+              <SortTh k="nombre" label="Empleado" sort={empSort.sort} toggle={empSort.toggle} />
+              {hasUnidad && <SortTh k="unidad" label="Unidad" sort={empSort.sort} toggle={empSort.toggle} />}
+              <SortTh k="sindicato" label="Sindicato" sort={empSort.sort} toggle={empSort.toggle} />
+              {hasPlantel && <SortTh k="estado" label="Estado" sort={empSort.sort} toggle={empSort.toggle} />}
+              <SortTh k="count" label="Filas incluidas" className="num" sort={empSort.sort} toggle={empSort.toggle} />
+            </tr></thead>
             <tbody>
               {!employees.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
-              {employees.map(e=>(
+              {empSort.sorted.map(e=>(
                 <tr key={e.unidad+"::"+e.legajo}>
                   <td>{e.legajo}</td>
                   <td>{e.nombre}</td>
@@ -2226,6 +2356,11 @@ function DetalleEmpleadosTab({parsed, plantel}){
       default: return r.agrup || "(vacío)";
     }
   }
+  const ausSort = useTableSort(ausenciaRows, {
+    fecha:{get:r=>r.ts, type:"num"}, estado:{get:r=>r.estado, type:"text"}, idMotivo:{get:r=>r.idMotivo, type:"text"},
+    agrup:{get:r=>r.agrup||"(vacío)", type:"text"}, presidencia:{get:r=>r.presidencia||"", type:"text"},
+    tipo:{get:r=>tipoOf(r), type:"text"}, motivo:{get:r=>r.motivo, type:"text"}, razon:{get:r=>r.razon, type:"text"}
+  });
 
   function handlePrint(){
     const blocks = Array.from(document.querySelectorAll(".de-print-block"));
@@ -2365,9 +2500,18 @@ function DetalleEmpleadosTab({parsed, plantel}){
         {ausenciaRows.length>0 && (
           <div className="overflow-x">
             <table>
-              <thead><tr><th>Fecha</th><th>Estado</th><th>Id Motivo</th><th>Agrup. presentismo</th><th>Agrup. presidencia</th><th>Tipo</th><th>Motivo</th><th>Razón</th></tr></thead>
+              <thead><tr>
+                <SortTh k="fecha" label="Fecha" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="estado" label="Estado" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="idMotivo" label="Id Motivo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="agrup" label="Agrup. presentismo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="presidencia" label="Agrup. presidencia" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="tipo" label="Tipo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="motivo" label="Motivo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="razon" label="Razón" sort={ausSort.sort} toggle={ausSort.toggle} />
+              </tr></thead>
               <tbody>
-                {ausenciaRows.map((r,i)=>(
+                {ausSort.sorted.map((r,i)=>(
                   <tr key={i}>
                     <td>{fmtDate(r.dia,r.mes,r.anio)}</td>
                     <td>{r.estado}</td>
@@ -2417,6 +2561,43 @@ function TopScrollSync({targetRef}){
 /* ===================== crónicos (tab) ===================== */
 const CRONICOS_CASOS_TABLE = "cronicos_casos";
 const CRONICOS_CONFIG_TABLE = "cronicos_config";
+
+/* ---- fechas del campo "Posible alta": siempre DD/MM/AAAA, se corrige lo que se escriba mal ---- */
+const MESES_TXT = {ene:1,feb:2,mar:3,abr:4,may:5,jun:6,jul:7,ago:8,sep:9,set:9,oct:10,nov:11,dic:12};
+// Devuelve {ok:true, value:"DD/MM/AAAA" | ""} o {ok:false}. Acepta 15102026, 15/10/26, 15-10-2026, 15.10, 1510, 2026-10-15, "15 oct 2026", etc.
+function normalizarFechaDMA(raw, hoy){
+  const s = String(raw==null ? "" : raw).trim().toLowerCase();
+  if(!s) return {ok:true, value:""};
+  hoy = hoy || new Date();
+  const yearNow = hoy.getFullYear();
+  const fullYear = t => t.length===2 ? 2000 + (+t) : +t;
+  let d, m, y, mt;
+  if((mt = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/))){ y=+mt[1]; m=+mt[2]; d=+mt[3]; }
+  else if((mt = s.match(/^(\d{1,2})\s*[\/\-.\s]\s*(\d{1,2})(?:\s*[\/\-.\s]\s*(\d{2}|\d{4}))?$/))){ d=+mt[1]; m=+mt[2]; y = mt[3] ? fullYear(mt[3]) : yearNow; }
+  else if((mt = s.match(/^(\d{1,2})\s*(?:de\s+)?([a-záéíóú]{3,})\.?\s*(?:de\s+|del\s+)?(\d{2}|\d{4})?$/))){
+    const key = mt[2].normalize("NFD").replace(/[̀-ͯ]/g,"").slice(0,3);
+    if(!MESES_TXT[key]) return {ok:false};
+    d=+mt[1]; m=MESES_TXT[key]; y = mt[3] ? fullYear(mt[3]) : yearNow;
+  }
+  else if(/^\d{8}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=+s.slice(4); }
+  else if(/^\d{6}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=2000+(+s.slice(4)); }
+  else if(/^\d{4}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=yearNow; }
+  else return {ok:false};
+  if(!(m>=1 && m<=12) || !(y>=1900 && y<=2100) || !(d>=1 && d<=daysInMonth(m,y))) return {ok:false};
+  return {ok:true, value: pad2(d)+"/"+pad2(m)+"/"+y};
+}
+// mientras se escribe solo con números, va poniendo las barras: 15102026 -> 15/10/2026
+function formatDigitsDMA(v){
+  if(!/^\d+$/.test(v) || v.length>8) return v;
+  if(v.length<=2) return v;
+  if(v.length<=4) return v.slice(0,2)+"/"+v.slice(2);
+  return v.slice(0,2)+"/"+v.slice(2,4)+"/"+v.slice(4);
+}
+function dmaToTs(v){
+  const mt = String(v||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return mt ? Date.UTC(+mt[3], +mt[2]-1, +mt[1]) : 0;
+}
+function newObsId(){ return "o"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 const CRONICO_COLUMNS = [
   {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text"},
   {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text"},
@@ -2432,7 +2613,7 @@ const CRONICO_COLUMNS = [
   {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text"},
   {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text"},
   {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text"},
-  {key:"posibleAlta", label:"Posible alta", get:c=>c.posibleAlta||"", sortType:"text"},
+  {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num"},
   {key:"accion", label:"Acción", get:c=>c.accion||"", sortType:"text"},
   {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num"}
 ];
@@ -2441,8 +2622,57 @@ function casoRowToManual(row){
     tipo: row.tipo||"", notificar: row.notificar||"", opinionMedica: row.opinion_medica||"",
     tactoEmpleado: row.tacto_empleado||"", posibleAlta: row.posible_alta||"", accion: row.accion||"",
     inicioManualTs: row.inicio_manual ? isoDateToTs(row.inicio_manual) : null,
-    observaciones: Array.isArray(row.observaciones) ? row.observaciones : []
+    // las observaciones viejas no tenían id: se les da uno estable (a partir de su fecha) para poder editarlas o borrarlas
+    observaciones: Array.isArray(row.observaciones) ? row.observaciones.map(o=> o && o.id ? o : {...o, id:"o"+(o&&o.ts)}) : []
   };
+}
+// Historial de movimientos de un caso: ordenable, y cada observación se puede editar o eliminar (se ve igual para todos los usuarios).
+function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled}){
+  const {sorted, sort, toggle} = useTableSort(c.observaciones, {
+    fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
+  }, {key:"fecha", dir:"desc"});
+  return (
+    <table style={{width:"100%"}}>
+      <thead><tr>
+        <SortTh k="fecha" label="Fecha" sort={sort} toggle={toggle} />
+        <SortTh k="texto" label="Movimiento" sort={sort} toggle={toggle} />
+        <SortTh k="autor" label="Registró" sort={sort} toggle={toggle} />
+        <th></th>
+      </tr></thead>
+      <tbody>
+        {sorted.map(o=>{
+          const editing = editingObs && editingObs.caseId===c.id && editingObs.obsId===o.id;
+          return (
+            <tr key={o.id}>
+              <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>{new Date(o.ts).toLocaleString("es-AR")}</td>
+              <td style={{whiteSpace:"pre-wrap"}}>
+                {editing ? (
+                  <textarea value={editingObs.texto} autoFocus rows={2} style={{width:"100%"}}
+                    onChange={e=>setEditingObs({...editingObs, texto:e.target.value})}
+                    onKeyDown={e=>{ if(e.key==="Escape") setEditingObs(null); }} />
+                ) : o.texto}
+                {!editing && o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
+              </td>
+              <td style={{verticalAlign:"top"}}>{o.autor || "—"}</td>
+              <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
+                {editing ? (
+                  <React.Fragment>
+                    <button type="button" className="btn small" onClick={()=>onSaveEdit(c)} disabled={disabled}>Guardar</button>{" "}
+                    <button type="button" className="btn secondary small" onClick={()=>setEditingObs(null)}>Cancelar</button>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <button type="button" className="btn secondary small" onClick={()=>onStartEdit(c,o)} disabled={disabled}>Editar</button>{" "}
+                    <button type="button" className="btn secondary small" onClick={()=>onDelete(c,o)} disabled={disabled}>Eliminar</button>
+                  </React.Fragment>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
 }
 function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const [dbReady, setDbReady] = useState(false);
@@ -2457,27 +2687,45 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const [sortKey, setSortKey] = useKeptState("cron.sortKey", "dias");
   const [sortDir, setSortDir] = useKeptState("cron.sortDir", "desc");
   const scrollRef = useRef(null);
+  const aliveRef = useRef(true);
+  const saveQueueRef = useRef(new Map()); // id del caso -> cola de guardados (uno por vez, en orden)
+  const userRef = useRef("");              // email del usuario, para firmar los movimientos
+  const [editingObs, setEditingObs] = useState(null); // {caseId, obsId, texto}
 
+  // Lee de Supabase la configuración y todos los casos (lo guardado por cualquier usuario).
+  async function loadFromServer(){
+    const [{data:cfg, error:cfgErr}, {data:casos, error:casosErr}] = await Promise.all([
+      supabaseClient.from(CRONICOS_CONFIG_TABLE).select("*").eq("id","settings").maybeSingle(),
+      supabaseClient.from(CRONICOS_CASOS_TABLE).select("*")
+    ]);
+    if(!aliveRef.current) return;
+    if(cfgErr || casosErr){ setSaveStatus("Error al leer Supabase: "+((cfgErr||casosErr).message)); return false; }
+    if(cfg && Array.isArray(cfg.motivos)) setMotivoIncluded(new Set(cfg.motivos));
+    if(casos){
+      const m = new Map();
+      casos.forEach(row=> m.set(row.id, casoRowToManual(row)));
+      manualRef.current = m;
+      setCasesManual(m);
+    }
+    return true;
+  }
   useEffect(()=>{
-    let alive = true;
+    aliveRef.current = true;
     (async ()=>{
-      const [{data:cfg, error:cfgErr}, {data:casos, error:casosErr}] = await Promise.all([
-        supabaseClient.from(CRONICOS_CONFIG_TABLE).select("*").eq("id","settings").maybeSingle(),
-        supabaseClient.from(CRONICOS_CASOS_TABLE).select("*")
-      ]);
-      if(!alive) return;
-      if(cfgErr || casosErr) setSaveStatus("Error al leer Supabase: "+((cfgErr||casosErr).message));
-      if(cfg && Array.isArray(cfg.motivos)) setMotivoIncluded(new Set(cfg.motivos));
-      if(casos){
-        const m = new Map();
-        casos.forEach(row=> m.set(row.id, casoRowToManual(row)));
-        manualRef.current = m;
-        setCasesManual(m);
-      }
-      setDbReady(true);
+      try{
+        const {data} = await supabaseClient.auth.getSession();
+        userRef.current = (data && data.session && data.session.user && data.session.user.email) || "";
+      }catch(e){}
+      await loadFromServer();
+      if(aliveRef.current) setDbReady(true);
     })();
-    return ()=>{ alive = false; };
+    return ()=>{ aliveRef.current = false; };
   }, []);
+  async function refreshFromServer(){
+    setSaveStatus("Actualizando...");
+    const ok = await loadFromServer();
+    if(ok) setSaveStatus("Datos actualizados");
+  }
 
   function persistMotivos(nextSet){
     setMotivoIncluded(nextSet);
@@ -2528,47 +2776,96 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
     setSortDir(col && col.sortType==="num" ? "desc" : "asc");
   }
 
-  // Cada guardado parte del último valor conocido del caso (no del que tenía la fila al dibujarse),
-  // así dos guardados seguidos (ej. escribir Opinión médica y enseguida tocar "+") no se pisan entre sí.
+  // Cada guardado primero lee el caso tal como está AHORA en el servidor y le aplica solo este cambio.
+  // Así lo que otro usuario guardó (otro campo u otra observación) nunca se pisa ni se pierde, y dos guardados
+  // seguidos del mismo caso se hacen uno después del otro. `patch` es un objeto, o una función
+  // (estadoActual) => objeto cuando el cambio depende de lo que ya hay (agregar/editar/borrar observaciones).
   function saveCase(caseObj, patch){
-    const prev = manualRef.current.get(caseObj.id) || {};
-    const base = {
-      notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
-      posibleAlta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
-      inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
-      observaciones: Array.isArray(caseObj.observaciones) ? caseObj.observaciones : [],
-      ...prev
-    };
-    const m = {...base, ...patch, tipo: caseObj.tipo||""};
-    const nextMap = new Map(manualRef.current);
-    nextMap.set(caseObj.id, m);
-    manualRef.current = nextMap;
-    setCasesManual(nextMap);
-    setSaveStatus("Guardando...");
-    supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
-      id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
-      tipo: m.tipo, notificar: m.notificar||"", opinion_medica: m.opinionMedica||"",
-      tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"", accion: m.accion||"",
-      inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
-      observaciones: m.observaciones||[], updated_at: new Date().toISOString()
-    }).then(({error})=>{
+    const run = async ()=>{
+      setSaveStatus("Guardando...");
+      const {data:row, error:selErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("id", caseObj.id).maybeSingle();
+      if(selErr){ setSaveStatus("Error al guardar: "+selErr.message); return; }
+      const local = manualRef.current.get(caseObj.id);
+      const prev = row ? casoRowToManual(row) : (local || {});
+      const base = {
+        notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
+        posibleAlta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
+        inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
+        observaciones: [],
+        ...prev
+      };
+      const p = typeof patch==="function" ? patch(base) : patch;
+      if(p===null){ setSaveStatus(""); return; } // nada que cambiar (ej. la observación ya no existe)
+      const m = {...base, ...p, tipo: caseObj.tipo||""};
+      const {error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
+        id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
+        tipo: m.tipo, notificar: m.notificar||"", opinion_medica: m.opinionMedica||"",
+        tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"", accion: m.accion||"",
+        inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
+        observaciones: m.observaciones||[], updated_at: new Date().toISOString()
+      });
       if(error){ setSaveStatus("Error al guardar: "+error.message); return; }
+      if(!aliveRef.current) return;
+      const nextMap = new Map(manualRef.current);
+      nextMap.set(caseObj.id, m);
+      manualRef.current = nextMap;
+      setCasesManual(nextMap);
       setSaveStatus("Guardado");
-    });
+    };
+    const queue = saveQueueRef.current;
+    const prevJob = queue.get(caseObj.id) || Promise.resolve();
+    const job = prevJob.then(run, run).catch(err=>{ setSaveStatus("Error al guardar: "+(err && err.message ? err.message : String(err))); });
+    queue.set(caseObj.id, job);
   }
 
   function commitField(caseObj, field, value){
     saveCase(caseObj, {[field]: value});
   }
 
+  // Posible alta: siempre una fecha DD/MM/AAAA. Lo que se escribe mal se corrige solo; si no se entiende, vuelve al valor anterior.
+  function commitPosibleAlta(caseObj, el){
+    const raw = el.value;
+    const anterior = caseObj.posibleAlta || "";
+    if(raw.trim()===anterior) return;
+    const r = normalizarFechaDMA(raw);
+    if(!r.ok){
+      el.value = anterior;
+      setSaveStatus("Posible alta: «"+raw.trim()+"» no es una fecha válida. Escribila como DD/MM/AAAA (se restauró el valor anterior).");
+      return;
+    }
+    el.value = r.value;
+    if(r.value!==anterior) commitField(caseObj, "posibleAlta", r.value);
+  }
+
   function addObservacion(caseObj){
     const texto = (obsDrafts[caseObj.id]||"").trim();
     if(!texto) return;
-    const entry = {ts: Date.now(), texto};
-    const latest = manualRef.current.get(caseObj.id);
-    const currentObs = latest && Array.isArray(latest.observaciones) ? latest.observaciones : (caseObj.observaciones||[]);
-    saveCase(caseObj, {observaciones: [...currentObs, entry]});
+    const entry = {id:newObsId(), ts:Date.now(), texto, autor:userRef.current};
+    saveCase(caseObj, base=>({observaciones:[...(base.observaciones||[]), entry]}));
     setObsDrafts(prev=>({...prev, [caseObj.id]:""}));
+  }
+  function startEditObs(caseObj, o){ setEditingObs({caseId:caseObj.id, obsId:o.id, texto:o.texto}); }
+  function saveEditObs(caseObj){
+    if(!editingObs) return;
+    const {obsId} = editingObs;
+    const texto = (editingObs.texto||"").trim();
+    if(!texto){ window.alert("La observación no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
+    const editor = userRef.current, ahora = Date.now();
+    saveCase(caseObj, base=>{
+      const obs = base.observaciones||[];
+      if(!obs.some(o=>o.id===obsId)) return null;
+      return {observaciones: obs.map(o=> o.id===obsId ? {...o, texto, editadoTs:ahora, editadoPor:editor} : o)};
+    });
+    setEditingObs(null);
+  }
+  function deleteObs(caseObj, o){
+    if(!window.confirm("¿Eliminar esta observación?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
+    saveCase(caseObj, base=>{
+      const obs = base.observaciones||[];
+      if(!obs.some(x=>x.id===o.id)) return null;
+      return {observaciones: obs.filter(x=>x.id!==o.id)};
+    });
+    if(editingObs && editingObs.obsId===o.id) setEditingObs(null);
   }
 
   function handlePrint(){
@@ -2639,10 +2936,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       const inicioTs = inicioLive ? isoDateToTs(inicioLive) : c0.inicioTs;
       const notif = pick("notificar");
       const notifTxt = notif ? (isoDateToTs(notif)!=null ? fmtDateFromTs(isoDateToTs(notif)) : notif) : "—";
-      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = pick("posibleAlta"), accion = pick("accion");
+      const altaRaw = pick("posibleAlta"), altaN = normalizarFechaDMA(altaRaw);
+      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = altaN.ok ? altaN.value : altaRaw, accion = pick("accion");
       const box = t => t ? "<p class='box'>"+e(t)+"</p>" : "<p class='box none'>Sin datos cargados.</p>";
       const tramos = (c0.tramos||[]).map(t=>"<tr><td>"+fmtDateFromTs(t.desdeTs)+"</td><td>"+fmtDateFromTs(t.hastaTs)+"</td><td>"+t.dias+"</td><td>"+e(CAT_LABEL[t.cat]||t.cat)+"</td><td>"+e(t.label)+"</td></tr>").join("");
-      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<tr><td style='white-space:nowrap'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td></tr>").join("");
+      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<tr><td style='white-space:nowrap'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+(o.autor||o.editadoTs ? "<div style='color:#777;font-size:10px;margin-top:2px'>"+e((o.autor ? "Registró: "+o.autor : "")+(o.editadoTs ? (o.autor?" · ":"")+"editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</div>" : "")+"</td></tr>").join("");
       return "<section class='hc'>"+
         "<div class='head'><div><div class='kicker'>HISTORIA CLÍNICA LABORAL</div><h1>"+e(c0.nombre||"Sin nombre")+"</h1><div class='sub'>Legajo "+e(c0.legajo)+" · Seguimiento de ausentismo</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
         "<h2>Datos del empleado</h2><table class='kv'>"+
@@ -2694,6 +2992,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
             </select>
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
+            <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
             <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
           </div>
           <TopScrollSync targetRef={scrollRef} />
@@ -2734,14 +3033,17 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
                       <td>
-                        <input type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={!dbReady}
+                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={!dbReady}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
                           style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
                       </td>
-                      <td><input type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>commitField(c,"opinionMedica",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>commitField(c,"tactoEmpleado",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} onBlur={e=>commitField(c,"posibleAlta",e.target.value)} disabled={!dbReady} /></td>
-                      <td><input type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>commitField(c,"accion",e.target.value)} disabled={!dbReady} /></td>
+                      <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={!dbReady} /></td>
+                      <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={!dbReady} /></td>
+                      <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} style={{width:110}}
+                        onChange={e=>{ const f = formatDigitsDMA(e.target.value); if(f!==e.target.value) e.target.value = f; }}
+                        onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                        onBlur={e=>commitPosibleAlta(c, e.target)} disabled={!dbReady} /></td>
+                      <td><input key={c.id+"-ac-"+c.accion} type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>{ if(e.target.value!==c.accion) commitField(c,"accion",e.target.value); }} disabled={!dbReady} /></td>
                       <td style={{minWidth:220}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
@@ -2755,17 +3057,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                         <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
                       </td>
                     </tr>
-                    {expandedId===c.id && (
+                    {expandedId===c.id && c.observaciones.length>0 && (
                       <tr>
                         <td colSpan="17" style={{background:"var(--plane)"}}>
-                          <table style={{width:"100%"}}>
-                            <thead><tr><th>Fecha</th><th>Movimiento</th></tr></thead>
-                            <tbody>
-                              {c.observaciones.slice().reverse().map((o,i)=>(
-                                <tr key={i}><td style={{whiteSpace:"nowrap"}}>{new Date(o.ts).toLocaleString("es-AR")}</td><td>{o.texto}</td></tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          <ObservacionesHistory c={c} editingObs={editingObs} setEditingObs={setEditingObs}
+                            onStartEdit={startEditObs} onSaveEdit={saveEditObs} onDelete={deleteObs} disabled={!dbReady} />
                         </td>
                       </tr>
                     )}
