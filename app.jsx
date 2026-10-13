@@ -316,8 +316,10 @@ const ROLES = {
     tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true},
   rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. Gestión de Plantel solo con la carga.",
     tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, plantelCompleto:false},
-  medico: {label:"Servicio médico", desc:"Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión.",
-    tabs:["cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false},
+  medico: {label:"Servicio médico", desc:"Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión. Ve solo la empresa Propios y los motivos por defecto.",
+    tabs:["cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false,
+    // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
+    soloPropios:true, motivosPorDefecto:true},
   gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
     tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false}
 };
@@ -1453,6 +1455,9 @@ function buildCronicoCases(records, plantel, motivoIncluded){
     if(!activo) return;
     // para mostrar el motivo/diagnóstico, preferir una fila real (no CA) dentro de la racha
     const motivoRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA") || last;
+    // "Motivo - Razón": la razón es la que figura en la fila más reciente de la racha que la tenga cargada
+    const razonRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA" && r.razon) || lastStreak.rows.slice().reverse().find(r=>r.razon);
+    const razon = razonRow ? razonRow.razon : "";
     cases.push({
       id: cronicoCaseId(first.legajo, lastStreak.motivoKey, first.anio),
       legajo: first.legajo,
@@ -1462,7 +1467,7 @@ function buildCronicoCases(records, plantel, motivoIncluded){
       sindicato: last.sindicato || first.sindicato || "",
       gerencia: last.gerencia || first.gerencia || "",
       codpla: (motivoRow.idMotivo || first.idMotivo || "").toUpperCase(),
-      motivoLabel: motivoLabelOf(motivoRow),
+      motivoLabel: motivoLabelOf(motivoRow) + (razon ? " - " + razon : ""),
       inicioTs: first.ts,
       ultimaTs: last.ts,
       filas: lastStreak.rows.length,
@@ -2494,7 +2499,7 @@ function ToggleList({title, items, included, onChange, columns, defaultKeys}){
   );
 }
 
-function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel}){
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo}){
   const [unitFilter, setUnitFilter] = useState("__all");
   const [soloVigentes, setSoloVigentes] = useState(true);
   const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
@@ -2530,12 +2535,12 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
 
   return (
     <div className="tabpanel">
-      <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
+      {!ocultarFiltrosMotivo && <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
         <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={idIncluded} onChange={setIdIncluded}
           defaultKeys={idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
         <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
           defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />
-      </div>
+      </div>}
       <div className="card table-card">
         <h3>Ranking de empleados</h3>
         <p className="caption">Suma filas cuyo Id Motivo y Agrupador cuadro presidencia estén tildados arriba — independiente del resto de filtros de ausentismo.</p>
@@ -2638,7 +2643,7 @@ function EmployeeBarChart({items}){
     </svg>
   );
 }
-function DetalleEmpleadosTab({parsed, plantel}){
+function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const employeeOptions = useMemo(()=>{
     const map = new Map();
     parsed.records.forEach(r=>{
@@ -2662,7 +2667,11 @@ function DetalleEmpleadosTab({parsed, plantel}){
   const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
   const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
   const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
-  const [idMotivoIncluded, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.map(m=>m.key)));
+  const [idMotivoElegido, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.map(m=>m.key)));
+  // motivosPorDefecto (Servicio médico): el filtro no se muestra y se usan siempre los Id Motivo "Por defecto"
+  const idMotivoIncluded = useMemo(
+    ()=> motivosPorDefecto ? new Set(parsed.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)) : idMotivoElegido,
+    [motivosPorDefecto, parsed, idMotivoElegido]);
 
   // si lo guardado ya no existe en los datos actuales (otro archivo, otro año), vuelve al primero disponible
   useEffect(()=>{
@@ -2845,12 +2854,12 @@ function DetalleEmpleadosTab({parsed, plantel}){
         </div>
       </div>
 
-      <div className="no-print">
+      {!motivosPorDefecto && <div className="no-print">
         <ToggleList title="Filtro Id Motivo (solo para el detalle de abajo)"
           items={parsed.idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))}
           included={idMotivoIncluded} onChange={setIdMotivoIncluded}
           defaultKeys={parsed.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
-      </div>
+      </div>}
 
       <div className="card table-card de-print-block print-page-break">
         <h3>{ausenciaRows.length ? ("DETALLE DE AUSENCIAS (" + fmt(ausenciaRows.length) + " días)") : "Sin ausencias en el período"}</h3>
@@ -2965,7 +2974,7 @@ const CRONICO_COLUMNS = [
   {key:"tipo", label:"Tipo", get:c=>c.tipo||"", sortType:"text"},
   {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num"},
   {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num"},
-  {key:"motivo", label:"Motivo/Diagnóstico", get:c=>c.motivoLabel||"", sortType:"text"},
+  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text"},
   {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num"},
   {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text"},
   {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text"},
@@ -3031,7 +3040,7 @@ function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSave
     </table>
   );
 }
-function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar}){
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos}){
   const [dbReady, setDbReady] = useState(false);
   const [motivoIncluded, setMotivoIncluded] = useState(new Set());
   const [casesManual, setCasesManual] = useState(new Map());
@@ -3092,7 +3101,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar}){
       .then(({error})=>{ if(error) setSaveStatus("Error al guardar: "+error.message); });
   }
 
-  const cases = useMemo(()=> buildCronicoCases(parsed.records, plantel, motivoIncluded), [parsed, plantel, motivoIncluded]);
+  // motivosFijos (Servicio médico): se usan siempre los motivos "Por defecto", sin mostrar ni guardar el filtro
+  const motivoEfectivo = motivosFijos || motivoIncluded;
+  const cases = useMemo(()=> buildCronicoCases(parsed.records, plantel, motivoEfectivo), [parsed, plantel, motivoEfectivo]);
 
   const casesFull = useMemo(()=> cases.map(c=>{
     const manual = casesManual.get(c.id) || {};
@@ -3243,7 +3254,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar}){
       return "<tr><td>"+e(c.legajo)+"</td><td>"+e(c.nombre||"—")+"</td><td>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td><td>"+e(c.accion||"—")+"</td><td>"+e(ultimaObs||"—")+"</td></tr>";
     }).join("");
     const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
-      "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo/Diagnóstico</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Última observación</th></tr></thead><tbody>"+rows+"</tbody></table>";
+      "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Última observación</th></tr></thead><tbody>"+rows+"</tbody></table>";
     const win = window.open("", "_blank");
     if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
     win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Crónicos</title><style>'+printCss+'</style></head><body>'+html+'</body></html>');
@@ -3335,10 +3346,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar}){
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
-      {puedeEditar && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
+      {puedeEditar && !motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
         defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
 
-      {!motivoIncluded.size ? (
+      {!motivoEfectivo.size ? (
         <div className="card table-card">
           <h3>Crónicos</h3>
           <p className="desc">Elegí arriba qué Id Motivo generan un caso (ej. Enfermedad, Enfermedad ART, Accidente de trabajo, Reserva de puesto) — la selección queda guardada tal cual la dejes, para codificar más adelante. Un caso agrupa, por legajo, todas las ausencias con ese motivo dentro del mismo año, y sólo se lista si el empleado sigue activo y su registro más reciente todavía está bajo ese mismo motivo (si ya volvió a estar presente o cambió de motivo, el caso deja de mostrarse).</p>
@@ -3580,6 +3591,17 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
     return ()=>{ ro.disconnect(); document.documentElement.style.removeProperty("--tabs-h"); };
   }, [!!parsed]);
   const dbPct = dbUsagePct(dbUsage);
+
+  // Servicio médico: la empresa queda fija en "Propios" (el filtro no se muestra) y Crónicos / Detalle trabajan solo con esos legajos
+  const propiosName = parsed ? (parsed.empresas.find(n=>normTxt(n)==="propios") || null) : null;
+  useEffect(()=>{
+    if(!perms.soloPropios || !propiosName) return;
+    setEmpresaIncluded(prev=> (prev && prev.size===1 && prev.has(propiosName)) ? prev : new Set([propiosName]));
+  }, [propiosName]);
+  const parsedVista = useMemo(()=>{
+    if(!perms.soloPropios || !parsed || !empresaIncluded) return parsed;
+    return {...parsed, records: parsed.records.filter(r=>!r.empresa || empresaIncluded.has(r.empresa))};
+  }, [parsed, empresaIncluded]);
 
   // si cambia la escritura de una empresa (p. ej. al cargar el plantel), el filtro de Empresa ya elegido se adapta a los nombres vigentes
   const empresasSig = parsed ? parsed.empresas.join("|") : "";
@@ -3991,16 +4013,16 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const secOptions = useMemo(() => parsed ? parsed.sectores.map(v=>({value:v,label:v})) : [], [parsed]);
 
   const TABS = [
-    {key:"resumen", label:"Resumen"},
-    {key:"resumen_gerencia", label:"Resumen por Gerencia"},
-    {key:"cuadro_diario", label:"Cuadro Diario"},
-    {key:"evolucion", label:"Evolución mensual"},
-    {key:"tipos", label:"Tipos de ausencia"},
-    {key:"cronicos", label:"Crónicos"},
-    {key:"ranking", label:"Ranking"},
-    {key:"detalle_empleados", label:"Detalle Empleados"},
-    {key:"plantel", label:"Gestión de Plantel"},
-    {key:"usuarios", label:"Usuarios y permisos"}
+    {key:"resumen", label:"Resumen", color:"#2f80ed"},
+    {key:"resumen_gerencia", label:"Resumen por Gerencia", color:"#12a594"},
+    {key:"cuadro_diario", label:"Cuadro Diario", color:"#f2771a"},
+    {key:"evolucion", label:"Evolución mensual", color:"#2fa84f"},
+    {key:"tipos", label:"Tipos de ausencia", color:"#8e63e6"},
+    {key:"cronicos", label:"Crónicos", color:"#e5484d"},
+    {key:"ranking", label:"Ranking", color:"#e5a000"},
+    {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
+    {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
+    {key:"usuarios", label:"Usuarios y permisos", color:"#7b8794"}
   ];
   const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
 
@@ -4137,9 +4159,11 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
                 <MultiSelect label="Sector" options={secOptions} selected={FILTERS.sector} onChange={v=>setFilterDim("sector",v)} allLabel="Todos" />
               </div>
 
-              <div className="no-print">
-                <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
-              </div>
+              {!perms.soloPropios && (
+                <div className="no-print">
+                  <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
+                </div>
+              )}
             </React.Fragment>
           )}
 
@@ -4175,7 +4199,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
 
           <nav className="tabs no-print" ref={tabsRef}>
             {TABS.filter(t=>perms.tabs.includes(t.key)).map(t=>(
-              <button key={t.key} className={shownTab===t.key?"active":""} onClick={()=>setActiveTab(t.key)}>{t.label}</button>
+              <button key={t.key} className={shownTab===t.key?"active":""} style={{"--tab-color":t.color}} onClick={()=>setActiveTab(t.key)}><span className="tdot"></span>{t.label}</button>
             ))}
           </nav>
 
@@ -4184,10 +4208,10 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
           {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
-          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
-          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
+          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
-          {shownTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
         </React.Fragment>
       )}

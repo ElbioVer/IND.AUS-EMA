@@ -201,9 +201,11 @@ tbody td.status{text-align:center;}
 .motivo-check input{accent-color:var(--accent);width:14px;height:14px;}
 
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);overflow-x:auto;position:sticky;top:0;z-index:30;background:var(--plane);}
-.tabs button{background:none;border:none;padding:10px 14px;font-size:13.5px;font-weight:650;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap;cursor:pointer;font-family:inherit;}
-.tabs button:hover{color:var(--ink);}
-.tabs button.active{color:var(--accent);border-bottom-color:var(--accent);}
+.tabs button{--tab-color:var(--accent);display:inline-flex;align-items:center;gap:6px;background:none;border:none;border-radius:8px 8px 0 0;padding:10px 11px;font-size:13px;font-weight:700;color:color-mix(in srgb, var(--tab-color) 70%, var(--ink));border-bottom:3px solid color-mix(in srgb, var(--tab-color) 55%, transparent);white-space:nowrap;cursor:pointer;font-family:inherit;}
+.tabs button .tdot{width:9px;height:9px;border-radius:50%;background:var(--tab-color);flex:none;}
+.tabs button:hover{background:color-mix(in srgb, var(--tab-color) 14%, transparent);color:var(--ink);}
+.tabs button.active{background:color-mix(in srgb, var(--tab-color) 22%, transparent);color:var(--ink);border-bottom-color:var(--tab-color);}
+.tabs button.active .tdot{box-shadow:0 0 0 3px color-mix(in srgb, var(--tab-color) 35%, transparent);}
 .tabpanel{display:flex;flex-direction:column;gap:16px;}
 
 .chart-card{padding:18px 20px;display:flex;flex-direction:column;gap:6px;}
