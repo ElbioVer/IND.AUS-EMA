@@ -226,6 +226,75 @@ function InstallButton({style}){
   return <button type="button" className="btn secondary no-print" style={style} onClick={onClick}>Instalar app</button>;
 }
 
+// Cada usuario cambia su propia contraseña: se pide la actual (se verifica iniciando sesión de nuevo) y la nueva dos veces.
+// Las contraseñas nunca se guardan ni se muestran en la app: Supabase solo conserva una versión cifrada.
+function ChangePasswordButton({userEmail}){
+  const [open, setOpen] = useState(false);
+  const [actual, setActual] = useState("");
+  const [nueva, setNueva] = useState("");
+  const [repetir, setRepetir] = useState("");
+  const [ver, setVer] = useState(false);
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  function cerrar(){ setOpen(false); setActual(""); setNueva(""); setRepetir(""); setVer(false); setError(""); setOk(false); }
+  async function guardar(e){
+    e.preventDefault();
+    setError("");
+    if(nueva.length<8){ setError("La contraseña nueva debe tener al menos 8 caracteres."); return; }
+    if(nueva!==repetir){ setError("La contraseña nueva y su repetición no coinciden."); return; }
+    if(nueva===actual){ setError("La contraseña nueva tiene que ser distinta de la actual."); return; }
+    setBusy(true);
+    try{
+      const {error:errLogin} = await supabaseClient.auth.signInWithPassword({email:userEmail, password:actual});
+      if(errLogin){ setError(errLogin.message==="Invalid login credentials" ? "La contraseña actual no es correcta." : errLogin.message); setBusy(false); return; }
+      const {error:errUpd} = await supabaseClient.auth.updateUser({password:nueva});
+      if(errUpd){ setError("No se pudo cambiar la contraseña: "+errUpd.message); setBusy(false); return; }
+      setBusy(false); setOk(true); setActual(""); setNueva(""); setRepetir("");
+      setTimeout(cerrar, 2200);
+    }catch(err){
+      setBusy(false);
+      setError("No se pudo cambiar la contraseña: "+((err && err.message) ? err.message : String(err)));
+    }
+  }
+  return (
+    <React.Fragment>
+      <button type="button" className="btn secondary no-print" onClick={()=>setOpen(true)}>Cambiar contraseña</button>
+      {open && (
+        <div className="modal-backdrop no-print" onClick={busy ? undefined : cerrar}>
+          <div className="modal-panel" style={{maxWidth:420}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Cambiar mi contraseña</h3>
+              <button type="button" className="btn secondary small" onClick={cerrar} disabled={busy}>Cerrar</button>
+            </div>
+            {ok ? (
+              <p className="desc" style={{margin:0, color:"var(--good)", fontWeight:700}}>Contraseña actualizada. Desde ahora usá la nueva para entrar.</p>
+            ) : (
+              <form onSubmit={guardar} style={{display:"flex", flexDirection:"column", gap:12}}>
+                <p className="hint" style={{margin:0}}>Usuario: <b>{userEmail}</b></p>
+                <div className="field"><label>Contraseña actual</label>
+                  <input type={ver?"text":"password"} autoComplete="current-password" value={actual} onChange={e=>setActual(e.target.value)} required autoFocus /></div>
+                <div className="field"><label>Contraseña nueva (mínimo 8 caracteres)</label>
+                  <input type={ver?"text":"password"} autoComplete="new-password" value={nueva} onChange={e=>setNueva(e.target.value)} required minLength={8} /></div>
+                <div className="field"><label>Repetir contraseña nueva</label>
+                  <input type={ver?"text":"password"} autoComplete="new-password" value={repetir} onChange={e=>setRepetir(e.target.value)} required minLength={8} /></div>
+                <label className="motivo-check" style={{cursor:"pointer"}}>
+                  <input type="checkbox" checked={ver} onChange={e=>setVer(e.target.checked)} /> Mostrar lo que escribo
+                </label>
+                {error && <div className="warn-banner">{error}</div>}
+                <div style={{display:"flex", gap:10}}>
+                  <button type="submit" className="btn" disabled={busy}>{busy ? "Guardando…" : "Guardar contraseña"}</button>
+                  <button type="button" className="btn secondary" onClick={cerrar} disabled={busy}>Cancelar</button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
+
 function AuthGate(){
   const [session, setSession] = useState(undefined); // undefined=cargando, null=sin sesion, obj=logueado
   useEffect(()=>{
@@ -3894,6 +3963,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           )}
           <span title={perms.desc}>{userEmail} · <b>{perms.label}</b></span>
           <InstallButton />
+          <ChangePasswordButton userEmail={userEmail} />
           <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
         </div>
         {parsed && perms.objetivo && (
