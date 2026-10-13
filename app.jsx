@@ -738,7 +738,56 @@ function buildParsedAggregates(records, fileName, hasMotivo){
   };
 }
 
-const AUS_UPDATE_CMP_FIELDS = ["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato","tipoContrat"];
+/* ---- nombre de empresa: el del PLANTEL manda ----
+   En el ausentismo una misma empresa puede venir con otra escritura ("DELFINO CLAUDIO" / "Delfino Claudio"). Se unifican
+   (sin importar mayúsculas, acentos ni espacios sobrantes) y se muestra siempre como figura en el plantel; si la empresa no
+   está en el plantel, se usa la escritura más frecuente en el ausentismo. */
+function buildEmpresaCanon(plantel, parsedRaw){
+  const canon = new Map(); // clave normalizada -> nombre que se muestra
+  const pCount = new Map();
+  (plantel||[]).forEach(p=>{
+    if(!p.empresa) return;
+    const k = normTxt(p.empresa);
+    if(!pCount.has(k)) pCount.set(k, new Map());
+    const m = pCount.get(k);
+    m.set(p.empresa, (m.get(p.empresa)||0)+1);
+  });
+  pCount.forEach((m,k)=>{
+    let best = null, bestN = -1;
+    m.forEach((n,name)=>{ if(n>bestN){ best = name; bestN = n; } });
+    canon.set(k, best);
+  });
+  const variants = new Map(); // empresas que no están en el plantel pero vienen con más de una escritura
+  (parsedRaw.empresas||[]).forEach(name=>{
+    const k = normTxt(name);
+    if(canon.has(k)) return;
+    if(!variants.has(k)) variants.set(k, []);
+    variants.get(k).push(name);
+  });
+  const multi = Array.from(variants.entries()).filter(([k,arr])=>arr.length>1);
+  if(multi.length){
+    const counts = new Map();
+    parsedRaw.records.forEach(r=>{ if(r.empresa) counts.set(r.empresa, (counts.get(r.empresa)||0)+1); });
+    multi.forEach(([k,arr])=>{ arr.sort((a,b)=>(counts.get(b)||0)-(counts.get(a)||0)); canon.set(k, arr[0]); });
+  }
+  return canon;
+}
+function withCanonEmpresa(parsedRaw, plantel){
+  if(!parsedRaw) return parsedRaw;
+  const canon = buildEmpresaCanon(plantel, parsedRaw);
+  const nameOf = n => canon.get(normTxt(n)) || n;
+  const empresas = Array.from(new Set(parsedRaw.empresas.map(nameOf))).sort();
+  const needsFix = empresas.length!==parsedRaw.empresas.length || parsedRaw.empresas.some(n=>nameOf(n)!==n);
+  if(!needsFix) return parsedRaw;
+  const records = parsedRaw.records.map(r=>{
+    if(!r.empresa) return r;
+    const c = nameOf(r.empresa);
+    return c===r.empresa ? r : {...r, empresa:c};
+  });
+  return {...parsedRaw, records, empresas};
+}
+
+const AUS_UPDATE_CMP_FIELDS =["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato","tipoContrat"];
 function mergeAusentismoRecords(existingRecords, newRecords){
   const validExisting = existingRecords.filter(r=>r.valid);
   const invalidExisting = existingRecords.filter(r=>!r.valid);
@@ -761,7 +810,8 @@ function mergeAusentismoRecords(existingRecords, newRecords){
       // si la carga nueva trae una columna opcional vacía, no borra el valor ya cargado para esa fila
       const mergedRow = {...r};
       AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
-      const changed = AUS_UPDATE_CMP_FIELDS.some(f=>(prev[f]||"")!==(mergedRow[f]||""));
+      // la empresa se compara sin mayúsculas: escribirla distinto no es un cambio real
+      const changed = AUS_UPDATE_CMP_FIELDS.some(f=> f==="empresa" ? normTxt(prev[f])!==normTxt(mergedRow[f]) : (prev[f]||"")!==(mergedRow[f]||""));
       map.set(key, mergedRow);
       if(changed){ modificados++; changedRows.push(mergedRow); } else sinCambios++;
     } else {
@@ -3472,9 +3522,9 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const verResumen = perms.tabs.includes("resumen"); // las tarjetas de ausentismo de arriba pertenecen al Resumen
   const [fileName, setFileName] = useState(null);
   const [error, setError] = useState(null);
-  const [parsed, setParsed] = useState(null);
+  const [parsedRaw, setParsed] = useState(null);
   const parsedRef = useRef(null);
-  parsedRef.current = parsed;
+  parsedRef.current = parsedRaw;
   const [sel, setSel] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -3490,6 +3540,8 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const [plantelHistorial, setPlantelHistorial] = useState([]);
   const [plantelUpdatedAt, setPlantelUpdatedAt] = useState(null);
   const plantelActive = plantel.length>0;
+  // datos de ausentismo con el nombre de empresa unificado según el plantel (ver withCanonEmpresa)
+  const parsed = useMemo(()=> withCanonEmpresa(parsedRaw, plantel), [parsedRaw, plantel]);
   const [cuatriSel, setCuatriSel] = useState("");
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
   const [cloudLoading, setCloudLoading] = useState(true);
@@ -3528,6 +3580,21 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
     return ()=>{ ro.disconnect(); document.documentElement.style.removeProperty("--tabs-h"); };
   }, [!!parsed]);
   const dbPct = dbUsagePct(dbUsage);
+
+  // si cambia la escritura de una empresa (p. ej. al cargar el plantel), el filtro de Empresa ya elegido se adapta a los nombres vigentes
+  const empresasSig = parsed ? parsed.empresas.join("|") : "";
+  useEffect(()=>{
+    if(!empresaIncluded || !parsed) return;
+    const vigentes = new Map(parsed.empresas.map(n=>[normTxt(n), n]));
+    let cambio = false;
+    const next = new Set();
+    empresaIncluded.forEach(n=>{
+      const v = vigentes.get(normTxt(n));
+      if(v!==n) cambio = true;
+      if(v) next.add(v);
+    });
+    if(cambio) setEmpresaIncluded(next.size===parsed.empresas.length ? null : next);
+  }, [empresasSig]);
 
   const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
 
