@@ -235,7 +235,130 @@ function AuthGate(){
   }, []);
   if(session===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando...</div>;
   if(!session) return <LoginForm onSignedIn={setSession} />;
-  return <App userEmail={session.user.email} onSignOut={()=>supabaseClient.auth.signOut()} />;
+  return <RoleGate userId={session.user.id} userEmail={session.user.email} onSignOut={()=>supabaseClient.auth.signOut()} />;
+}
+
+/* ===================== perfiles y permisos ===================== */
+// Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
+// ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","ranking","detalle_empleados","plantel"];
+const ROLES = {
+  admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
+    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true},
+  rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. Gestión de Plantel solo con la carga.",
+    tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, plantelCompleto:false},
+  medico: {label:"Servicio médico", desc:"Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión.",
+    tabs:["cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false},
+  gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
+    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false}
+};
+
+function RoleGate({userId, userEmail, onSignOut}){
+  const [perfil, setPerfil] = useState(undefined); // undefined=cargando | {rol} | {rol,legacy} | null=sin perfil | {error}
+  const load = useCallback(async ()=>{
+    setPerfil(undefined);
+    try{
+      const {data, error} = await supabaseClient.from("perfiles").select("rol,email").eq("user_id", userId).maybeSingle();
+      if(error){
+        const txt = (error.message||"")+" "+(error.code||"");
+        // todavía no se creó la tabla de perfiles (no se corrió el SQL de permisos): se sigue como hasta ahora, con aviso
+        if(/PGRST205|42P01|does not exist|schema cache/i.test(txt)) setPerfil({rol:"admin", legacy:true});
+        else setPerfil({error: error.message||"Error desconocido"});
+        return;
+      }
+      setPerfil(data && ROLES[data.rol] ? data : null);
+    }catch(err){
+      setPerfil({error: (err && err.message) ? err.message : String(err)});
+    }
+  }, [userId]);
+  useEffect(()=>{ load(); }, [load]);
+  if(perfil===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando permisos...</div>;
+  if(perfil===null || perfil.error){
+    return (
+      <div className="app" style={{maxWidth:560}}>
+        <div className="card" style={{padding:"24px 26px", display:"flex", flexDirection:"column", gap:12}}>
+          <h2 style={{margin:0, fontSize:18}}>{perfil===null ? "Tu usuario no tiene un perfil asignado" : "No se pudieron verificar tus permisos"}</h2>
+          <p className="desc" style={{margin:0}}>
+            {perfil===null
+              ? <React.Fragment>Iniciaste sesión como <b>{userEmail}</b>, pero todavía no tiene un perfil. Pedile al administrador que te asigne uno.</React.Fragment>
+              : <React.Fragment>No se pudo leer tu perfil ({perfil.error}). Probá de nuevo; si sigue igual, avisale al administrador.</React.Fragment>}
+          </p>
+          <div style={{display:"flex", gap:10}}>
+            <button type="button" className="btn" onClick={load}>Reintentar</button>
+            <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return <App userEmail={userEmail} userId={userId} rol={perfil.rol} permisosSinActivar={!!perfil.legacy} onSignOut={onSignOut} />;
+}
+
+// Administración de perfiles (solo Administrador). Los usuarios nuevos se crean en Supabase (Authentication → Users) y nacen como "Gerencias".
+function UsuariosTab({userId}){
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState(null);
+  const [msg, setMsg] = useState("");
+  const load = useCallback(async ()=>{
+    const {data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at").order("email");
+    if(error){ setError(error.message); return; }
+    setError(null); setRows(data||[]);
+  }, []);
+  useEffect(()=>{ load(); }, [load]);
+  const sort = useTableSort(rows||[], {email:{get:r=>r.email, type:"text"}, rol:{get:r=>(ROLES[r.rol]||{}).label||r.rol, type:"text"}});
+  async function cambiarRol(row, rol){
+    if(row.user_id===userId || !ROLES[rol]) return;
+    setMsg("Guardando...");
+    const {error} = await supabaseClient.from("perfiles").update({rol}).eq("user_id", row.user_id);
+    if(error){ setMsg("Error al guardar: "+error.message); return; }
+    setRows(rs=>rs.map(r=> r.user_id===row.user_id ? {...r, rol} : r));
+    setMsg("Guardado: "+row.email+" → "+ROLES[rol].label);
+  }
+  return (
+    <div className="tabpanel">
+      <div className="card table-card">
+        <h3>Usuarios y permisos</h3>
+        <div className="caption">Elegí el perfil de cada usuario. Los cambios se aplican la próxima vez que esa persona abra o recargue la app. Tu propio perfil no se puede cambiar desde acá, para no quedarte sin acceso.</div>
+        {error && <div className="warn-banner">No se pudo leer la lista de usuarios: {error}</div>}
+        {rows && (
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="email" label="Usuario (correo)" sort={sort.sort} toggle={sort.toggle} />
+                <SortTh k="rol" label="Perfil" sort={sort.sort} toggle={sort.toggle} />
+              </tr></thead>
+              <tbody>
+                {!rows.length && <tr><td colSpan="2" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin usuarios.</td></tr>}
+                {sort.sorted.map(r=>(
+                  <tr key={r.user_id}>
+                    <td>{r.email}{r.user_id===userId ? " (vos)" : ""}</td>
+                    <td>
+                      <select value={r.rol} disabled={r.user_id===userId} onChange={e=>cambiarRol(r, e.target.value)}>
+                        {Object.keys(ROLES).map(k=>(<option key={k} value={k}>{ROLES[k].label}</option>))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {msg && <p className="hint" style={{margin:0}}>{msg}</p>}
+        <p className="hint" style={{margin:0}}>Para dar de alta a una persona nueva: en Supabase → Authentication → Users → Add user. Entra con el perfil <b>Gerencias</b> (el más acotado) y desde acá se lo cambiás.</p>
+      </div>
+      <div className="card table-card">
+        <h3>Qué puede hacer cada perfil</h3>
+        <div className="overflow-x">
+          <table>
+            <thead><tr><th>Perfil</th><th>Permisos</th></tr></thead>
+            <tbody>
+              {Object.keys(ROLES).map(k=>(<tr key={k}><td style={{whiteSpace:"nowrap"}}><b>{ROLES[k].label}</b></td><td>{ROLES[k].desc}</td></tr>))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
@@ -1569,7 +1692,7 @@ function DbUsageCard({usage, error, checking, onCheck, rowsPerMonth}){
   );
 }
 
-function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs}){
+function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs, soloCarga}){
   const [stage, setStage] = useState("idle");
   const [rawRows, setRawRows] = useState(null);
   const [fileName, setFileName] = useState("");
@@ -1730,7 +1853,7 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
         </div>
       )}
 
-      {plantelActive && globalPlantelStats && (
+      {!soloCarga && plantelActive && globalPlantelStats && (
         <div className="card table-card">
           <h3>Control de consistencia</h3>
           <p className="caption">Alcance actual (mismos filtros que Resumen) · Período: {diasPeriodoLabel}</p>
@@ -1776,13 +1899,13 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
         </div>
       )}
 
-      <DbUsageCard usage={dbUsage} error={dbUsageError} checking={dbChecking} onCheck={onCheckDb} rowsPerMonth={dbRowsPerMonth} />
+      {!soloCarga && <DbUsageCard usage={dbUsage} error={dbUsageError} checking={dbChecking} onCheck={onCheckDb} rowsPerMonth={dbRowsPerMonth} />}
     </div>
   );
 }
 
 /* ===================== tabs ===================== */
-function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs}){
+function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs, verFiltros}){
   const [audit, setAudit] = useState(null);
   const unitSort = useTableSort(rankingUnits, {
     name:{get:u=>u.name, type:"text"},
@@ -1872,12 +1995,12 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
         </div>
         {objetivoNote && <p className="caption" style={{marginTop:4}}>{objetivoNote}</p>}
       </div>
-      <MotivoChecklist motivoUniverse={motivoUniverse} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />
+      {verFiltros && <MotivoChecklist motivoUniverse={motivoUniverse} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />}
       {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} cols={audit.cols} rowToArr={audit.rowToArr} />}
     </div>
   );
 }
-function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, setExcludedMotivos, scopeMonthKeys}){
+function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, setExcludedMotivos, scopeMonthKeys, verFiltros}){
   const gerencias = parsed.gerencias || [];
   const [gerenciaSel, setGerenciaSel] = useState(gerencias[0] || "");
   useEffect(()=>{ if((!gerenciaSel || !gerencias.includes(gerenciaSel)) && gerencias.length) setGerenciaSel(gerencias[0]); }, [gerencias.join("|")]);
@@ -2003,7 +2126,7 @@ function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaInclud
           </div>
         </React.Fragment>
       )}
-      <MotivoChecklist motivoUniverse={motivoUniverseLocal} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />
+      {verFiltros && <MotivoChecklist motivoUniverse={motivoUniverseLocal} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />}
       {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} />}
     </div>
   );
@@ -2197,14 +2320,16 @@ function EvolucionTab({evoMonths, evoSeries, objetivo}){
     </div>
   );
 }
-function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo}){
+function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo, soloApAnpYMotivo}){
   return (
     <div className="tabpanel">
-      <div className="card chart-card">
-        <h3>Composición de ausencias por unidad</h3>
-        <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos sin tildar abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
-        <CompositionChart units={compositionData} />
-      </div>
+      {!soloApAnpYMotivo && (
+        <div className="card chart-card">
+          <h3>Composición de ausencias por unidad</h3>
+          <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos sin tildar abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
+          <CompositionChart units={compositionData} />
+        </div>
+      )}
       <div className="card chart-card">
         <h3>AP vs ANP por unidad</h3>
         <p className="desc">Ausente pago vs. ausente no pago, entre las ausencias contabilizadas (no excluidas por motivo) de cada unidad.</p>
@@ -2378,7 +2503,7 @@ function EmployeeBarChart({items}){
   const maxVal = Math.max(1, ...items.map(i=>i.value));
   const barW = (chartW - gap*(items.length+1)) / items.length;
   return (
-    <svg className="chart" viewBox={"0 0 "+chartW+" "+chartH}>
+    <svg className="chart" style={{maxWidth:chartW}} viewBox={"0 0 "+chartW+" "+chartH}>
       {items.map((it,i)=>{
         const x = gap + i*(barW+gap);
         const h = (chartH-padT-padB) * (it.value/maxVal);
@@ -2740,7 +2865,7 @@ function casoRowToManual(row){
   };
 }
 // Historial de movimientos de un caso: ordenable, y cada observación se puede editar o eliminar (se ve igual para todos los usuarios).
-function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled}){
+function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly}){
   const {sorted, sort, toggle} = useTableSort(c.observaciones, {
     fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
   }, {key:"fecha", dir:"desc"});
@@ -2768,7 +2893,7 @@ function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSave
               </td>
               <td style={{verticalAlign:"top"}}>{o.autor || "—"}</td>
               <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
-                {editing ? (
+                {readOnly ? null : editing ? (
                   <React.Fragment>
                     <button type="button" className="btn small" onClick={()=>onSaveEdit(c)} disabled={disabled}>Guardar</button>{" "}
                     <button type="button" className="btn secondary small" onClick={()=>setEditingObs(null)}>Cancelar</button>
@@ -2787,7 +2912,7 @@ function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSave
     </table>
   );
 }
-function CronicosTab({parsed, plantel, idMotivoUniverse}){
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar}){
   const [dbReady, setDbReady] = useState(false);
   const [motivoIncluded, setMotivoIncluded] = useState(new Set());
   const [casesManual, setCasesManual] = useState(new Map());
@@ -2800,6 +2925,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   const [sortKey, setSortKey] = useKeptState("cron.sortKey", "dias");
   const [sortDir, setSortDir] = useKeptState("cron.sortDir", "desc");
   const scrollRef = useRef(null);
+  const locked = !dbReady || !puedeEditar; // sin permiso de edición todo se ve, pero no se puede modificar
   const aliveRef = useRef(true);
   const saveQueueRef = useRef(new Map()); // id del caso -> cola de guardados (uno por vez, en orden)
   const userRef = useRef("");              // email del usuario, para firmar los movimientos
@@ -2841,6 +2967,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   }
 
   function persistMotivos(nextSet){
+    if(!puedeEditar) return;
     setMotivoIncluded(nextSet);
     supabaseClient.from(CRONICOS_CONFIG_TABLE).upsert({id:"settings", motivos:Array.from(nextSet), updated_at:new Date().toISOString()})
       .then(({error})=>{ if(error) setSaveStatus("Error al guardar: "+error.message); });
@@ -2894,6 +3021,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
   // seguidos del mismo caso se hacen uno después del otro. `patch` es un objeto, o una función
   // (estadoActual) => objeto cuando el cambio depende de lo que ya hay (agregar/editar/borrar observaciones).
   function saveCase(caseObj, patch){
+    if(!puedeEditar) return;
     const run = async ()=>{
       setSaveStatus("Guardando...");
       const {data:row, error:selErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("id", caseObj.id).maybeSingle();
@@ -3088,8 +3216,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
-      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
-        defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />
+      {puedeEditar && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
+        defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
 
       {!motivoIncluded.size ? (
         <div className="card table-card">
@@ -3134,12 +3262,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.codpla||"—"}</td>
                       <td>{c.tipo}</td>
                       <td style={{whiteSpace:"nowrap"}}>
-                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={!dbReady}
+                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={locked}
                           onBlur={e=>{ const v=e.target.value; if(v) commitField(c,"inicioManualTs", isoDateToTs(v)); }}
                           style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
                         {c.inicioManualTs!=null && (
-                          <div className="hint" style={{cursor:"pointer", marginTop:2}} onClick={()=>commitField(c,"inicioManualTs", null)}>
-                            editado a mano · restablecer
+                          <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"inicioManualTs", null) : undefined}>
+                            {puedeEditar ? "editado a mano · restablecer" : "editado a mano"}
                           </div>
                         )}
                       </td>
@@ -3147,27 +3275,29 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
                       <td>
-                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={!dbReady}
+                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={locked}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
                           style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
                       </td>
-                      <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={!dbReady} /></td>
-                      <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={!dbReady} /></td>
+                      <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={locked} /></td>
+                      <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={locked} /></td>
                       <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} style={{width:110}}
                         onChange={e=>{ const f = formatDigitsDMA(e.target.value); if(f!==e.target.value) e.target.value = f; }}
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
-                        onBlur={e=>commitPosibleAlta(c, e.target)} disabled={!dbReady} /></td>
-                      <td><input key={c.id+"-ac-"+c.accion} type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>{ if(e.target.value!==c.accion) commitField(c,"accion",e.target.value); }} disabled={!dbReady} /></td>
+                        onBlur={e=>commitPosibleAlta(c, e.target)} disabled={locked} /></td>
+                      <td><input key={c.id+"-ac-"+c.accion} type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>{ if(e.target.value!==c.accion) commitField(c,"accion",e.target.value); }} disabled={locked} /></td>
                       <td style={{minWidth:220}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
                             {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
                           </div>
                         )}
-                        <div style={{display:"flex", gap:4}}>
-                          <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts[c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,[c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addObservacion(c); }} disabled={!dbReady} />
-                          <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addObservacion(c)} disabled={!dbReady}>+</button>
-                        </div>
+                        {puedeEditar && (
+                          <div style={{display:"flex", gap:4}}>
+                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts[c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,[c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addObservacion(c); }} disabled={locked} />
+                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addObservacion(c)} disabled={locked}>+</button>
+                          </div>
+                        )}
                         <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
                       </td>
                     </tr>
@@ -3175,7 +3305,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
                       <tr>
                         <td colSpan="17" style={{background:"var(--plane)"}}>
                           <ObservacionesHistory c={c} editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditObs} onSaveEdit={saveEditObs} onDelete={deleteObs} disabled={!dbReady} />
+                            onStartEdit={startEditObs} onSaveEdit={saveEditObs} onDelete={deleteObs} disabled={locked} readOnly={!puedeEditar} />
                         </td>
                       </tr>
                     )}
@@ -3268,7 +3398,9 @@ function SimuladorTab({rankingUnits, objetivo}){
 }
 
 /* ===================== app ===================== */
-function App({userEmail, onSignOut}){
+function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
+  const perms = ROLES[rol] || ROLES.gerencias;
+  const verResumen = perms.tabs.includes("resumen"); // las tarjetas de ausentismo de arriba pertenecen al Resumen
   const [fileName, setFileName] = useState(null);
   const [error, setError] = useState(null);
   const [parsed, setParsed] = useState(null);
@@ -3277,7 +3409,8 @@ function App({userEmail, onSignOut}){
   const [sel, setSel] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const [activeTab, setActiveTab] = useState("resumen");
+  const [activeTab, setActiveTab] = useState(perms.tabs[0]);
+  const shownTab = perms.tabs.includes(activeTab) ? activeTab : perms.tabs[0]; // nunca se muestra un menú que el perfil no tiene
   const [objetivo, setObjetivo] = useState(3);
   const [FILTERS, setFiltersState] = useState({mes:null, departamento:null, gerencia:null, sector:null});
   const [empresaIncluded, setEmpresaIncluded] = useState(null);
@@ -3311,7 +3444,7 @@ function App({userEmail, onSignOut}){
     setDbChecking(false);
   }, []);
   const syncActive = !!syncStatus;
-  useEffect(()=>{ if(!syncActive) checkDb(); }, [syncActive]);
+  useEffect(()=>{ if(!syncActive && perms.plantelCompleto) checkDb(); }, [syncActive]); // el estado de la base lo ve solo el Administrador
   const dbRowsPerMonth = useMemo(()=> rowsPerMonthOf(parsed), [parsed]);
 
   // la barra de pestañas queda fija arriba al bajar; su alto se guarda en --tabs-h para que la barra de scroll horizontal de las tablas se fije justo debajo
@@ -3730,7 +3863,8 @@ function App({userEmail, onSignOut}){
     {key:"cronicos", label:"Crónicos"},
     {key:"ranking", label:"Ranking"},
     {key:"detalle_empleados", label:"Detalle Empleados"},
-    {key:"plantel", label:"Gestión de Plantel"}
+    {key:"plantel", label:"Gestión de Plantel"},
+    {key:"usuarios", label:"Usuarios y permisos"}
   ];
   const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
 
@@ -3741,28 +3875,28 @@ function App({userEmail, onSignOut}){
           <div className="eyebrow">Indicador de Ausentismo / Presentismo</div>
           <h1>Radar de ausentismo por unidad de negocio</h1>
           <p className="sub">Lee el export tal como sale del sistema (hoja Sheet1) y usa "Agrupador cuadro presentismo" + "Entrada" (DD/MM/AAAA) como única fuente de verdad para todo el cálculo.</p>
-          {parsed && (
+          {parsed && perms.tabs.includes("plantel") && (
             <p className="hint" style={{marginTop:2}}>
               {plantelActive
                 ? <React.Fragment>Plantel: actualizado {plantelUpdatedAt ? plantelUpdatedAt.toLocaleString("es-AR") : ""} · {fmt(plantel.length)} legajos — dotación calculada por días activos.</React.Fragment>
                 : <React.Fragment>Sin plantel cargado — dotación calculada contando filas del Excel.</React.Fragment>}
-              {" "}<button type="button" className="cell-link" onClick={()=>setActiveTab("plantel")}>Gestionar plantel</button>
+              {" "}<button type="button" className="cell-link" onClick={()=>setActiveTab("plantel")}>{perms.plantelCompleto ? "Gestionar plantel" : "Actualizar plantel"}</button>
             </p>
           )}
         </div>
         <div className="hint" style={{display:"flex", alignItems:"center", gap:8}}>
-          {dbUsage && dbPct>=DB_WARN_PCT && (
+          {perms.plantelCompleto && dbUsage && dbPct>=DB_WARN_PCT && (
             <button type="button" className={"schip "+dbUsageLevel(dbPct)} style={{border:"none", cursor:"pointer", fontSize:11}}
               title={"La base de datos usa "+fmt(dbUsage.db_bytes/MB)+" de "+fmt(DB_LIMIT_MB)+" MB. Tocá para ver el detalle."}
               onClick={()=>setActiveTab("plantel")}>
               <span className="dot"></span>Base de datos {fmt(dbPct)} %
             </button>
           )}
-          {userEmail}
+          <span title={perms.desc}>{userEmail} · <b>{perms.label}</b></span>
           <InstallButton />
           <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
         </div>
-        {parsed && (
+        {parsed && perms.objetivo && (
           <div className="objetivo-box">
             <label htmlFor="objetivoInput">Objetivo</label>
             <input id="objetivoInput" type="number" step="0.1" min="0" value={objetivo} onChange={e=>{ const v=parseFloat(e.target.value); setObjetivo(isNaN(v)?3:v); }} />
@@ -3771,8 +3905,9 @@ function App({userEmail, onSignOut}){
         )}
       </div>
 
+      {permisosSinActivar && <div className="warn-banner no-print">Los permisos por perfil todavía no están activados: ejecutá <b>supabase-permisos-roles.sql</b> en el SQL Editor de Supabase. Mientras tanto todos los usuarios tienen acceso total.</div>}
       {cloudError && <div className="warn-banner no-print">{cloudError}</div>}
-      {uploadNotice && <div className="warn-banner no-print">{uploadNotice}</div>}
+      {uploadNotice &&<div className="warn-banner no-print">{uploadNotice}</div>}
       {syncStatus && (
         <div className="chip ok no-print" style={{alignSelf:"flex-start"}}>
           <span className="dot"></span>{syncStatus.label}… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}
@@ -3785,7 +3920,10 @@ function App({userEmail, onSignOut}){
         </div>
       )}
 
-      {!cloudLoading && !parsed && !error && (
+      {!cloudLoading && !parsed && !error && !perms.cargar && (
+        <div className="upload-card"><div className="hint">Todavía no hay datos cargados en el servidor. Cuando RRHH o el Administrador los carguen vas a poder verlos acá.</div></div>
+      )}
+      {!cloudLoading && !parsed && !error && perms.cargar && (
         <div className="upload-card">
           <div className="upload-icon">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2Z"/></svg>
@@ -3805,10 +3943,12 @@ function App({userEmail, onSignOut}){
             <h2>No se pudo procesar el archivo</h2>
             <p>{error}</p>
           </div>
-          <div>
-            <label className="btn secondary" htmlFor="fileInputRetry">Elegir otro archivo</label>
-            <input id="fileInputRetry" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
-          </div>
+          {perms.cargar && (
+            <div>
+              <label className="btn secondary" htmlFor="fileInputRetry">Elegir otro archivo</label>
+              <input id="fileInputRetry" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+            </div>
+          )}
         </React.Fragment>
       )}
 
@@ -3819,13 +3959,21 @@ function App({userEmail, onSignOut}){
             <div className="meta">{fmt(parsed.totalRows)} filas leídas</div>
             <div className="meta">Entrada: {rangoDesde ? fmtDate(rangoDesde.getUTCDate(), rangoDesde.getUTCMonth()+1, rangoDesde.getUTCFullYear()) : "—"} – {rangoHasta ? fmtDate(rangoHasta.getUTCDate(), rangoHasta.getUTCMonth()+1, rangoHasta.getUTCFullYear()) : "—"}</div>
             <div className="spacer"></div>
-            <label className="btn secondary" htmlFor="fileInputUpdate">{loading ? "Leyendo…" : "Actualizar archivo"}</label>
-            <input id="fileInputUpdate" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onUpdateInputChange} />
-            <label className="btn secondary" htmlFor="fileInputSwap">{loading ? "Leyendo…" : "Cambiar archivo"}</label>
-            <input id="fileInputSwap" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+            {perms.cargar && (
+              <React.Fragment>
+                <label className="btn secondary" htmlFor="fileInputUpdate">{loading ? "Leyendo…" : "Actualizar archivo"}</label>
+                <input id="fileInputUpdate" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onUpdateInputChange} />
+              </React.Fragment>
+            )}
+            {perms.reemplazar && (
+              <React.Fragment>
+                <label className="btn secondary" htmlFor="fileInputSwap">{loading ? "Leyendo…" : "Cambiar archivo"}</label>
+                <input id="fileInputSwap" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+              </React.Fragment>
+            )}
           </div>
 
-          {ausUpdatePreview && (
+          {perms.cargar && ausUpdatePreview && (
             <div className="card table-card no-print">
               <h3>Resumen de la actualización — {ausUpdatePreview.fileName}</h3>
               <p className="hint">Se fusiona con el archivo actual por Legajo + Fecha de Entrada. Nada de lo ya cargado se borra: las filas nuevas se agregan y las que ya existían con esa combinación se actualizan si cambiaron.</p>
@@ -3843,54 +3991,67 @@ function App({userEmail, onSignOut}){
             </div>
           )}
 
-          <div className="filters-bar no-print">
-            <MultiSelect label="Mes" options={mesOptions} selected={FILTERS.mes} onChange={v=>setFilterDim("mes",v)} allLabel="Todos los meses" />
-            <MultiSelect label="Gerencia" options={gerOptions} selected={FILTERS.gerencia} onChange={v=>setFilterDim("gerencia",v)} allLabel="Todos" />
-            <MultiSelect label="Departamento" options={deptOptions} selected={FILTERS.departamento} onChange={v=>setFilterDim("departamento",v)} allLabel="Todos" />
-            <MultiSelect label="Sector" options={secOptions} selected={FILTERS.sector} onChange={v=>setFilterDim("sector",v)} allLabel="Todos" />
-          </div>
+          {perms.filtros && (
+            <React.Fragment>
+              <div className="filters-bar no-print">
+                <MultiSelect label="Mes" options={mesOptions} selected={FILTERS.mes} onChange={v=>setFilterDim("mes",v)} allLabel="Todos los meses" />
+                <MultiSelect label="Gerencia" options={gerOptions} selected={FILTERS.gerencia} onChange={v=>setFilterDim("gerencia",v)} allLabel="Todos" />
+                <MultiSelect label="Departamento" options={deptOptions} selected={FILTERS.departamento} onChange={v=>setFilterDim("departamento",v)} allLabel="Todos" />
+                <MultiSelect label="Sector" options={secOptions} selected={FILTERS.sector} onChange={v=>setFilterDim("sector",v)} allLabel="Todos" />
+              </div>
 
-          <div className="no-print">
-            <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
-          </div>
+              <div className="no-print">
+                <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
+              </div>
+            </React.Fragment>
+          )}
 
-          <KpiGroups plantelActive={plantelActive} dotacion={dotacionDisplay} plantelStats={globalPlantelStats} agg={scopeAgg} />
-          <p className="kgroup-caption no-print">
-            Objetivo <b>{fmtPct(objetivo,1)}</b> · {plantelActive ? "Dotación equivalente (plantel) en el alcance actual" : "Empleados únicos en el alcance actual"}: <b>{fmt(dotacionDisplay)}</b> · <b>{unidadesFuera} / {rankingUnits.length}</b> unidades fuera de objetivo
-            {" "}<SemChip pct={scopeAgg.pct} objetivo={objetivo} />
-            {" "}· {plantelActive ? "Desvío = (AP+ANP) / Jornales de dotación del plantel (ver Gestión de Plantel)" : "Excluye CE + BAJA y los motivos sin tildar (ver Resumen) del denominador"}
-          </p>
+          {verResumen && (
+            <React.Fragment>
+              <KpiGroups plantelActive={plantelActive} dotacion={dotacionDisplay} plantelStats={globalPlantelStats} agg={scopeAgg} />
+              <p className="kgroup-caption no-print">
+                Objetivo <b>{fmtPct(objetivo,1)}</b> · {plantelActive ? "Dotación equivalente (plantel) en el alcance actual" : "Empleados únicos en el alcance actual"}: <b>{fmt(dotacionDisplay)}</b> · <b>{unidadesFuera} / {rankingUnits.length}</b> unidades fuera de objetivo
+                {" "}<SemChip pct={scopeAgg.pct} objetivo={objetivo} />
+                {" "}· {plantelActive ? "Desvío = (AP+ANP) / Jornales de dotación del plantel (ver Gestión de Plantel)" : "Excluye CE + BAJA y los motivos sin tildar (ver Resumen) del denominador"}
+              </p>
 
-          <div className="filters-bar no-print">
-            <div className="field">
-              <label>Cuatrimestre</label>
-              <select value={cuatriSel} onChange={e=>setCuatriSel(e.target.value)}>
-                {CUATRI_OPTIONS.map(c=>(<option key={c.value} value={c.value}>{c.label}</option>))}
-              </select>
-            </div>
-          </div>
-          <p className="hint no-print" style={{marginTop:-8}}>Esta fila de tarjetas depende únicamente del filtro de Cuatrimestre — no se ve afectada por Mes, Departamento, Gerencia, Sector ni Empresa. El período en curso se calcula sobre los días transcurridos (hasta el último día cargado), no sobre el cuatrimestre completo.</p>
-          <KpiGroups plantelActive={plantelActive} dotacion={cuatriDotacionDisplay} plantelStats={cuatriPlantelStats} agg={cuatriScopeAgg} />
-          <p className="kgroup-caption no-print">
-            Cuatrimestre: <b>{(CUATRI_OPTIONS.find(c=>c.value===cuatriSel)||CUATRI_OPTIONS[0]).label}</b> · {plantelActive ? "Dotación equivalente (plantel)" : "Empleados únicos"}: <b>{fmt(cuatriDotacionDisplay)}</b> · <b>{cuatriUnidadesFuera} / {cuatriRankingUnits.length}</b> unidades fuera de objetivo
-            {" "}<SemChip pct={cuatriScopeAgg.pct} objetivo={objetivo} />
-          </p>
+              {perms.filtros && (
+                <React.Fragment>
+                  <div className="filters-bar no-print">
+                    <div className="field">
+                      <label>Cuatrimestre</label>
+                      <select value={cuatriSel} onChange={e=>setCuatriSel(e.target.value)}>
+                        {CUATRI_OPTIONS.map(c=>(<option key={c.value} value={c.value}>{c.label}</option>))}
+                      </select>
+                    </div>
+                  </div>
+                  <p className="hint no-print" style={{marginTop:-8}}>Esta fila de tarjetas depende únicamente del filtro de Cuatrimestre — no se ve afectada por Mes, Departamento, Gerencia, Sector ni Empresa. El período en curso se calcula sobre los días transcurridos (hasta el último día cargado), no sobre el cuatrimestre completo.</p>
+                </React.Fragment>
+              )}
+              <KpiGroups plantelActive={plantelActive} dotacion={cuatriDotacionDisplay} plantelStats={cuatriPlantelStats} agg={cuatriScopeAgg} />
+              <p className="kgroup-caption no-print">
+                Cuatrimestre: <b>{(CUATRI_OPTIONS.find(c=>c.value===cuatriSel)||CUATRI_OPTIONS[0]).label}</b> · {plantelActive ? "Dotación equivalente (plantel)" : "Empleados únicos"}: <b>{fmt(cuatriDotacionDisplay)}</b> · <b>{cuatriUnidadesFuera} / {cuatriRankingUnits.length}</b> unidades fuera de objetivo
+                {" "}<SemChip pct={cuatriScopeAgg.pct} objetivo={objetivo} />
+              </p>
+            </React.Fragment>
+          )}
 
           <nav className="tabs no-print" ref={tabsRef}>
-            {TABS.map(t=>(
-              <button key={t.key} className={activeTab===t.key?"active":""} onClick={()=>setActiveTab(t.key)}>{t.label}</button>
+            {TABS.filter(t=>perms.tabs.includes(t.key)).map(t=>(
+              <button key={t.key} className={shownTab===t.key?"active":""} onClick={()=>setActiveTab(t.key)}>{t.label}</button>
             ))}
           </nav>
 
-          {activeTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} />}
-          {activeTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} />}
-          {activeTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
-          {activeTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
-          {activeTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} />}
-          {activeTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
-          {activeTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
-          {activeTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} />}
-          {activeTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} />}
+          {shownTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} verFiltros={perms.filtros} />}
+          {shownTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} verFiltros={perms.filtros} />}
+          {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
+          {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
+          {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
+          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsed} plantel={plantel} />}
+          {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsed} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} />}
+          {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
         </React.Fragment>
       )}
     </div>
