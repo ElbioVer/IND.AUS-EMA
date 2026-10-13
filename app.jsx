@@ -1108,7 +1108,9 @@ function gapIsBridgeable(prevTs, curTs){
 }
 
 /* ===================== crónicos ===================== */
-const CRONICO_TIPOS = ["", "ACTUAL", "CRONICO", "RES PTO", "PROC BAJA"];
+// Selección "Por defecto" de los motivos que generan un caso crónico (la selección vigente al 13/10/2026).
+const CRONICOS_DEFAULT_MOTIVOS = new Set(["AT","CA","CJ","DS","EFS","EN","ET","EX","FA","LSS","MA","MT","MU","NAC","PH","PRD","RP","SA","SUS"]);
+const CRONICO_TIPOS =["", "ACTUAL", "CRONICO", "RES PTO", "PROC BAJA"];
 function sanitizeIdSeg(s){ const c = (s||"").toString().toUpperCase().replace(/[^A-Z0-9_\-.~:@+]/g,""); return c || "X"; }
 function cronicoCaseId(legajo, motivoKey, anio){ return sanitizeIdSeg(legajo)+"-"+sanitizeIdSeg(motivoKey)+"-"+sanitizeIdSeg(anio); }
 function cronicoTipoAuto(c){
@@ -3086,7 +3088,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse}){
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
-      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos} />
+      <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
+        defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />
 
       {!motivoIncluded.size ? (
         <div className="card table-card">
