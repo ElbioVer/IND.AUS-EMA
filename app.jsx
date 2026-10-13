@@ -3313,6 +3313,18 @@ function App({userEmail, onSignOut}){
   const syncActive = !!syncStatus;
   useEffect(()=>{ if(!syncActive) checkDb(); }, [syncActive]);
   const dbRowsPerMonth = useMemo(()=> rowsPerMonthOf(parsed), [parsed]);
+
+  // la barra de pestañas queda fija arriba al bajar; su alto se guarda en --tabs-h para que la barra de scroll horizontal de las tablas se fije justo debajo
+  const tabsRef = useRef(null);
+  useEffect(()=>{
+    const el = tabsRef.current;
+    if(!el || typeof ResizeObserver==="undefined") return;
+    const setH = ()=> document.documentElement.style.setProperty("--tabs-h", el.offsetHeight+"px");
+    setH();
+    const ro = new ResizeObserver(setH);
+    ro.observe(el);
+    return ()=>{ ro.disconnect(); document.documentElement.style.removeProperty("--tabs-h"); };
+  }, [!!parsed]);
   const dbPct = dbUsagePct(dbUsage);
 
   const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
@@ -3864,7 +3876,7 @@ function App({userEmail, onSignOut}){
             {" "}<SemChip pct={cuatriScopeAgg.pct} objetivo={objetivo} />
           </p>
 
-          <nav className="tabs no-print">
+          <nav className="tabs no-print" ref={tabsRef}>
             {TABS.map(t=>(
               <button key={t.key} className={activeTab===t.key?"active":""} onClick={()=>setActiveTab(t.key)}>{t.label}</button>
             ))}

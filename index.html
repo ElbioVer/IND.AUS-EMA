@@ -85,7 +85,7 @@ window.addEventListener("appinstalled", function(){ window.__installEvt = null; 
 *{box-sizing:border-box;}
 body{background:var(--plane);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;}
 #root{min-height:100%;}
-.app{max-width:1180px;margin:0 auto;padding:28px 20px 60px;display:flex;flex-direction:column;gap:20px;}
+.app{max-width:none;margin:0 auto;padding:28px 24px 60px;display:flex;flex-direction:column;gap:20px;}
 .masthead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;}
 .masthead-text{display:flex;flex-direction:column;gap:4px;min-width:260px;}
 .eyebrow{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);}
@@ -140,7 +140,7 @@ tr.total td{border-top:1.5px solid var(--ink-2);font-weight:800;padding-top:10px
 .cat{display:inline-flex;align-items:center;gap:8px;}
 .cat .dot{width:9px;height:9px;border-radius:3px;flex:none;}
 .overflow-x{overflow-x:auto;}
-.top-scrollbar{overflow-x:auto;overflow-y:hidden;height:14px;margin-bottom:2px;}
+.top-scrollbar{overflow-x:auto;overflow-y:hidden;height:14px;margin-bottom:2px;position:sticky;top:var(--tabs-h,0px);z-index:25;background:var(--surface);}
 .footer-card{padding:18px 20px;display:flex;flex-direction:column;gap:12px;}
 .footer-card h3{margin:0;font-size:13.5px;font-weight:750;}
 .warn-banner{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:10px;background:color-mix(in srgb, var(--critical) 12%, var(--surface));color:var(--critical);font-size:13px;font-weight:700;}
@@ -200,7 +200,7 @@ tbody td.status{text-align:center;}
 .motivo-check{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2);white-space:nowrap;}
 .motivo-check input{accent-color:var(--accent);width:14px;height:14px;}
 
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);overflow-x:auto;}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);overflow-x:auto;position:sticky;top:0;z-index:30;background:var(--plane);}
 .tabs button{background:none;border:none;padding:10px 14px;font-size:13.5px;font-weight:650;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap;cursor:pointer;font-family:inherit;}
 .tabs button:hover{color:var(--ink);}
 .tabs button.active{color:var(--accent);border-bottom-color:var(--accent);}
