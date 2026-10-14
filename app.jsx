@@ -2720,7 +2720,9 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   }, [scopeE]);
 
   const ausenciaRows = useMemo(()=>{
-    return scopeE.filter(r=> r.estado==="A" && idMotivoIncluded.has((r.idMotivo||"").toUpperCase()))
+    // el detalle muestra todos los días del período cuyo Id Motivo está tildado en el filtro (ausencias, vacaciones, etc.),
+    // sin importar el "Estado" de la fila: antes solo salían las de estado "A" y las vacaciones tildadas no aparecían.
+    return scopeE.filter(r=> r.idMotivo && idMotivoIncluded.has(r.idMotivo.toUpperCase()))
       .slice().sort((a,b)=> a.ts-b.ts);
   }, [scopeE, idMotivoIncluded]);
 
@@ -2862,7 +2864,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
       </div>}
 
       <div className="card table-card de-print-block print-page-break">
-        <h3>{ausenciaRows.length ? ("DETALLE DE AUSENCIAS (" + fmt(ausenciaRows.length) + " días)") : "Sin ausencias en el período"}</h3>
+        <h3>{ausenciaRows.length ? ("DETALLE (" + fmt(ausenciaRows.length) + " días)") : "Sin días con los Id Motivo seleccionados en el período"}</h3>
         {ausenciaRows.length>0 && (
           <div className="overflow-x">
             <table>
