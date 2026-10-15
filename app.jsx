@@ -1099,26 +1099,45 @@ function QuickSelectBar({all, apKeys, anpKeys, defaultKeys, selected, onChange})
 const isApItem = it => (it.ap||0)>0 && (it.ap||0)>=(it.anp||0);
 const isAnpItem = it => (it.anp||0)>0 && (it.anp||0)>(it.ap||0);
 
+// Cabecera de los cuadros de filtros: tocándola se expanden o se retraen. Arrancan retraídos (con un resumen de lo elegido) para
+// no ocupar pantalla; solo se abren cuando hace falta filtrar. El estado abierto/cerrado se conserva al cambiar de menú.
+function FilterCardHead({title, open, onToggle, summary}){
+  return (
+    <div role="button" tabIndex={0} aria-expanded={open} onClick={onToggle}
+      onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); onToggle(); } }}
+      style={{display:"flex", alignItems:"center", gap:10, cursor:"pointer", userSelect:"none", flexWrap:"wrap"}}>
+      <h3 style={{margin:0}}>{title}</h3>
+      {summary && <span className="hint" style={{margin:0}}>{summary}</span>}
+      <span className="hint" style={{marginLeft:"auto", margin:"0 0 0 auto", fontWeight:700, color:"var(--accent)"}}>{open ? "▾ Retraer" : "▸ Expandir"}</span>
+    </div>
+  );
+}
+
 function EmpresaChecklist({options, included, onChange}){
+  const [open, setOpen] = useKeptState("fc.open|Empresa", false);
   if(!options.length) return null;
   const inc = included || new Set(options);
   return (
     <div className="card motivo-settings">
-      <h3>Empresa</h3>
-      <QuickSelectBar all={options} selected={inc} onChange={next=>onChange(next.size===options.length ? null : next)} />
-      <p className="hint">Incluí o excluí legajos según la empresa que los emplea (propios, contratistas). Se aplica a toda la base. Tildada = incluida.</p>
-      <div className="motivo-checklist">
-        {options.map(name=>(
-          <label key={name} className="motivo-check">
-            <input type="checkbox" checked={inc.has(name)} onChange={()=>{
-              const next = new Set(inc);
-              if(next.has(name)) next.delete(name); else next.add(name);
-              onChange(next.size===options.length ? null : next);
-            }} />
-            {name}
-          </label>
-        ))}
-      </div>
+      <FilterCardHead title="Empresa" open={open} onToggle={()=>setOpen(o=>!o)} summary={options.filter(n=>inc.has(n)).length+" de "+options.length+" incluidas"} />
+      {open && (
+        <React.Fragment>
+          <QuickSelectBar all={options} selected={inc} onChange={next=>onChange(next.size===options.length ? null : next)} />
+          <p className="hint">Incluí o excluí legajos según la empresa que los emplea (propios, contratistas). Se aplica a toda la base. Tildada = incluida.</p>
+          <div className="motivo-checklist">
+            {options.map(name=>(
+              <label key={name} className="motivo-check">
+                <input type="checkbox" checked={inc.has(name)} onChange={()=>{
+                  const next = new Set(inc);
+                  if(next.has(name)) next.delete(name); else next.add(name);
+                  onChange(next.size===options.length ? null : next);
+                }} />
+                {name}
+              </label>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
     </div>
   );
 }
@@ -1471,6 +1490,8 @@ function buildCronicoCases(records, plantel, motivoIncluded){
       codpla: (motivoRow.idMotivo || first.idMotivo || "").toUpperCase(),
       motivoLabel: motivoLabelOf(motivoRow) + (razon ? " - " + razon : ""),
       razon,
+      // unidad de negocio actual: la del plantel; si el legajo no está, la de sus registros de ausentismo
+      unidad: (p && p.unidad) || last.unidad || first.unidad || "",
       inicioTs: first.ts,
       ultimaTs: last.ts,
       filas: lastStreak.rows.length,
@@ -1607,6 +1628,7 @@ function CellLink({onClick, children}){
 // Los motivos tildados son los que CUENTAN como ausentismo. Internamente se sigue guardando el conjunto de
 // motivos NO incluidos ("excluded"), por eso tildar = sacarlo de ese conjunto.
 function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
+  const [open, setOpen] = useKeptState("fc.open|Motivos de Ausencia (AP/ANP) incluidos en el cálculo", false);
   if(!motivoUniverse.length) return null;
   const isAp = m => (m.ap||0) >= (m.anp||0); // categoría predominante del motivo
   const presets = [
@@ -1620,7 +1642,9 @@ function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
   const incluidos = motivoUniverse.filter(m=>!excluded.has(m.key)).length;
   return (
     <div className="card motivo-settings">
-      <h3>Motivos de Ausencia (AP/ANP) incluidos en el cálculo</h3>
+      <FilterCardHead title="Motivos de Ausencia (AP/ANP) incluidos en el cálculo" open={open} onToggle={()=>setOpen(o=>!o)} summary={incluidos+" de "+motivoUniverse.length+" motivos incluidos"} />
+      {open && (
+      <React.Fragment>
       <p className="hint">Tildá los motivos que querés que cuenten como ausentismo. Aunque el Agrupador los marque AP/ANP, los que dejes sin tildar no cuentan (bajas, suspensiones, licencias especiales, etc.). Se recalcula todo al instante, en todas las pestañas. La selección rápida AP / ANP elige los motivos según su categoría predominante. Hacé clic en la cantidad para ver y copiar el detalle.</p>
       <div className="msel-menu-actions" style={{marginBottom:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
         <span className="hint" style={{margin:0}}>Selección rápida:</span>
@@ -1643,6 +1667,8 @@ function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
           </label>
         ))}
       </div>
+      </React.Fragment>
+      )}
     </div>
   );
 }
@@ -2475,6 +2501,7 @@ function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo, soloApA
 // Cuadro de filtro SÍ/NO, compacto en columnas (2-3 según el ancho), con el mismo título y la misma "Selección rápida" que el resto.
 // items: {key, label, ap?, anp?}. defaultKeys (opcional): selección que activa el botón "Por defecto".
 function ToggleList({title, items, included, onChange, columns, defaultKeys}){
+  const [open, setOpen] = useKeptState("fc.open|"+title, false); // retraído hasta que haga falta filtrar
   if(!items.length) return null;
   function toggle(key){
     const next = new Set(included);
@@ -2485,19 +2512,23 @@ function ToggleList({title, items, included, onChange, columns, defaultKeys}){
   const n = columns || 3;
   return (
     <div className="card motivo-settings">
-      <h3>{title}</h3>
-      <QuickSelectBar all={items.map(i=>i.key)}
-        apKeys={hasCats ? items.filter(isApItem).map(i=>i.key) : null}
-        anpKeys={hasCats ? items.filter(isAnpItem).map(i=>i.key) : null}
-        defaultKeys={defaultKeys} selected={included} onChange={onChange} />
-      <div className="toggle-list-rows toggle-list-cols" style={{columnCount:n, columnGap:28, maxHeight:"none", overflowY:"visible", borderTop:"1px solid var(--border)"}}>
-        {items.map(it=>(
-          <div key={it.key} className="toggle-row" style={{padding:"5px 4px"}} onClick={()=>toggle(it.key)}>
-            <span>{it.label}</span>
-            <span className={"toggle-pill "+(included.has(it.key)?"yes":"no")}>{included.has(it.key)?"SÍ":"NO"}</span>
+      <FilterCardHead title={title} open={open} onToggle={()=>setOpen(o=>!o)} summary={items.filter(i=>included.has(i.key)).length+" de "+items.length+" incluidos"} />
+      {open && (
+        <React.Fragment>
+          <QuickSelectBar all={items.map(i=>i.key)}
+            apKeys={hasCats ? items.filter(isApItem).map(i=>i.key) : null}
+            anpKeys={hasCats ? items.filter(isAnpItem).map(i=>i.key) : null}
+            defaultKeys={defaultKeys} selected={included} onChange={onChange} />
+          <div className="toggle-list-rows toggle-list-cols" style={{columnCount:n, columnGap:28, maxHeight:"none", overflowY:"visible", borderTop:"1px solid var(--border)"}}>
+            {items.map(it=>(
+              <div key={it.key} className="toggle-row" style={{padding:"5px 4px"}} onClick={()=>toggle(it.key)}>
+                <span>{it.label}</span>
+                <span className={"toggle-pill "+(included.has(it.key)?"yes":"no")}>{included.has(it.key)?"SÍ":"NO"}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </React.Fragment>
+      )}
     </div>
   );
 }
@@ -3130,6 +3161,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const seedingRef = useRef(new Set());                      // casos cuya "Razón" ya se intentó cargar en esta sesión
   const [search, setSearch] = useKeptState("cron.search", "");
   const [tipoFilter, setTipoFilter] = useKeptState("cron.tipo", "__all");
+  const [saludFilter, setSaludFilter] = useKeptState("cron.salud", "__all"); // "__all" | "__salud" (AT/ET/EN/CAE) | un código
+  const [unidadSel, setUnidadSel] = useKeptState("cron.unidad", null);       // null = todas las unidades; si no, Set con las elegidas
   const [saveStatus, setSaveStatus] = useState("");
   const [sortKey, setSortKey] = useKeptState("cron.sortKey", "dias");
   const [sortDir, setSortDir] = useKeptState("cron.sortDir", "desc");
@@ -3193,14 +3226,29 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     };
   }), [cases, casesManual]);
 
+  const SIN_UNIDAD = "(Sin unidad)";
+  // opciones del filtro de Unidad de Negocio (con la cantidad de casos de cada una)
+  const unidadOptions = useMemo(()=>{
+    const counts = new Map();
+    casesFull.forEach(c=>{ const u = c.unidad || SIN_UNIDAD; counts.set(u, (counts.get(u)||0)+1); });
+    return Array.from(counts.keys()).sort((a,b)=> unitOrderIndex(a)-unitOrderIndex(b) || a.localeCompare(b, "es"))
+      .map(u=>({value:u, label:u+" ("+counts.get(u)+")"}));
+  }, [casesFull]);
+  const saludCount = useMemo(()=>{
+    const o = {}; casesFull.forEach(c=>{ o[c.codpla] = (o[c.codpla]||0)+1; });
+    return o;
+  }, [casesFull]);
   const filtered = useMemo(()=>{
     const q = normTxt(search);
     return casesFull.filter(c=>{
       if(tipoFilter!=="__all" && c.tipo!==tipoFilter) return false;
+      if(saludFilter==="__salud" && !CRONICOS_CODIGOS_SALUD.has(c.codpla)) return false;
+      if(saludFilter!=="__all" && saludFilter!=="__salud" && c.codpla!==saludFilter) return false;
+      if(unidadSel && !unidadSel.has(c.unidad || SIN_UNIDAD)) return false;
       if(q && !(normTxt(c.legajo).includes(q) || normTxt(c.nombre).includes(q))) return false;
       return true;
     });
-  }, [casesFull, search, tipoFilter]);
+  }, [casesFull, search, tipoFilter, saludFilter, unidadSel]);
 
   const sorted = useMemo(()=>{
     const col = CRONICO_COLUMNS.find(c=>c.key===sortKey) || CRONICO_COLUMNS.find(c=>c.key==="dias");
@@ -3480,6 +3528,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
               <option value="__all">Todos los tipos</option>
               {CRONICO_TIPOS.filter(Boolean).map(t=>(<option key={t} value={t}>{t}</option>))}
             </select>
+            <select value={saludFilter} onChange={e=>setSaludFilter(e.target.value)} title="Filtrar los casos por ausencias de salud">
+              <option value="__all">Todos los casos</option>
+              <option value="__salud">Salud: AT, ET, EN y CAE ({Array.from(CRONICOS_CODIGOS_SALUD).reduce((a,k)=>a+(saludCount[k]||0),0)})</option>
+              {Array.from(CRONICOS_CODIGOS_SALUD).map(k=>(<option key={k} value={k}>Solo {k} ({saludCount[k]||0})</option>))}
+            </select>
+            <MultiSelect label="Unidad de negocio" options={unidadOptions} selected={unidadSel} onChange={setUnidadSel} allLabel="Todas las unidades" />
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
             <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
