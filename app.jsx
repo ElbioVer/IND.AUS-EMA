@@ -1468,6 +1468,7 @@ function buildCronicoCases(records, plantel, motivoIncluded){
       gerencia: last.gerencia || first.gerencia || "",
       codpla: (motivoRow.idMotivo || first.idMotivo || "").toUpperCase(),
       motivoLabel: motivoLabelOf(motivoRow) + (razon ? " - " + razon : ""),
+      razon,
       inicioTs: first.ts,
       ultimaTs: last.ts,
       filas: lastStreak.rows.length,
@@ -2926,6 +2927,65 @@ function TopScrollSync({targetRef}){
   );
 }
 
+/* ===================== encabezado fijo de una tabla ancha =====================
+   Al bajar por la página, cuando los títulos de la tabla salen de la pantalla aparece una copia fija justo debajo del menú
+   (y de la barra de desplazamiento horizontal), con las mismas columnas, que acompaña el desplazamiento lateral y sigue siendo
+   clickeable para ordenar. Los datos son lo único que se mueve. */
+function StickyTableHead({targetRef, columns, sortKey, sortDir, onSort}){
+  const innerRef = useRef(null);
+  const [widths, setWidths] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [active, setActive] = useState(false);
+  useEffect(()=>{
+    const box = targetRef.current;
+    if(!box) return;
+    const table = box.querySelector("table");
+    if(!table || !table.tHead) return;
+    function measure(){
+      const cells = Array.from(table.tHead.rows[0].cells);
+      setWidths(cells.map(c=>c.getBoundingClientRect().width));
+      setTotal(table.getBoundingClientRect().width);
+    }
+    function check(){
+      const tabsH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tabs-h")) || 0;
+      const stick = tabsH + 16;
+      const head = table.tHead.getBoundingClientRect();
+      const tbl = table.getBoundingClientRect();
+      setActive(head.top < stick && tbl.bottom > stick + head.height);
+    }
+    function syncX(){ if(innerRef.current) innerRef.current.scrollLeft = box.scrollLeft; }
+    measure(); check();
+    const ro = new ResizeObserver(()=>{ measure(); check(); });
+    ro.observe(table);
+    const mo = new MutationObserver(()=>{ measure(); check(); });
+    mo.observe(table, {childList:true, subtree:true});
+    window.addEventListener("scroll", check, {passive:true});
+    window.addEventListener("resize", check);
+    box.addEventListener("scroll", syncX);
+    return ()=>{ ro.disconnect(); mo.disconnect(); window.removeEventListener("scroll", check); window.removeEventListener("resize", check); box.removeEventListener("scroll", syncX); };
+  }, [targetRef]);
+  useEffect(()=>{ if(active && innerRef.current && targetRef.current) innerRef.current.scrollLeft = targetRef.current.scrollLeft; }, [active, total]);
+  if(!widths.length) return null;
+  return (
+    <div className="sticky-head-proxy no-print">
+      {active && (
+        <div className="shp-inner" ref={innerRef}>
+          <table style={{width:total}}>
+            <colgroup>{widths.map((w,i)=>(<col key={i} style={{width:w}} />))}</colgroup>
+            <thead><tr>
+              {columns.map(col=>(
+                <th key={col.key} className={col.align==="num"?"num":undefined} style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>onSort(col.key)}>
+                  {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
+                </th>
+              ))}
+            </tr></thead>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ===================== crónicos (tab) ===================== */
 const CRONICOS_CASOS_TABLE = "cronicos_casos";
 const CRONICOS_CONFIG_TABLE = "cronicos_config";
@@ -2982,34 +3042,44 @@ const CRONICO_COLUMNS = [
   {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text"},
   {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text"},
   {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num"},
-  {key:"accion", label:"Acción", get:c=>c.accion||"", sortType:"text"},
+  {key:"acciones", label:"Acción", get:c=>c.acciones.length, sortType:"num"},
   {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num"}
 ];
+// Códigos de ausencia por motivos de salud: su "Razón" del ausentismo se carga sola como primera información del historial del caso.
+// (Se pueden agregar más códigos acá.)
+const CRONICOS_CODIGOS_SALUD = new Set(["AT","ET","EN","CAE"]);
+// Listas de movimientos de un caso (observaciones y acciones): las viejas no tenían id, se les da uno estable para poder editarlas o borrarlas.
+function conIds(arr, pref){ return Array.isArray(arr) ? arr.map(o=> o && o.id ? o : {...o, id:pref+(o&&o.ts)}) : []; }
 function casoRowToManual(row){
+  let acciones = conIds(row.acciones, "a");
+  // antes la acción era un único texto (columna `accion`): si todavía no se pasó a la lista, se muestra como primera acción
+  if(!acciones.length && row.accion) acciones = [{id:"alegacy", ts: row.updated_at ? new Date(row.updated_at).getTime() : 0, texto: row.accion, autor:""}];
   return {
     tipo: row.tipo||"", notificar: row.notificar||"", opinionMedica: row.opinion_medica||"",
-    tactoEmpleado: row.tacto_empleado||"", posibleAlta: row.posible_alta||"", accion: row.accion||"",
+    tactoEmpleado: row.tacto_empleado||"", posibleAlta: row.posible_alta||"",
     inicioManualTs: row.inicio_manual ? isoDateToTs(row.inicio_manual) : null,
-    // las observaciones viejas no tenían id: se les da uno estable (a partir de su fecha) para poder editarlas o borrarlas
-    observaciones: Array.isArray(row.observaciones) ? row.observaciones.map(o=> o && o.id ? o : {...o, id:"o"+(o&&o.ts)}) : []
+    observaciones: conIds(row.observaciones, "o"),
+    acciones,
+    razonSembrada: !!row.razon_sembrada
   };
 }
-// Historial de movimientos de un caso: ordenable, y cada observación se puede editar o eliminar (se ve igual para todos los usuarios).
-function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly}){
-  const {sorted, sort, toggle} = useTableSort(c.observaciones, {
+// Historial de movimientos de un caso (observaciones o acciones, según `field`): ordenable, y cada uno se puede editar o eliminar
+// (se ve igual para todos los usuarios).
+function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly}){
+  const {sorted, sort, toggle} = useTableSort(c[field], {
     fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
   }, {key:"fecha", dir:"desc"});
   return (
     <table style={{width:"100%"}}>
       <thead><tr>
         <SortTh k="fecha" label="Fecha" sort={sort} toggle={toggle} />
-        <SortTh k="texto" label="Movimiento" sort={sort} toggle={toggle} />
+        <SortTh k="texto" label={labelCol||"Movimiento"} sort={sort} toggle={toggle} />
         <SortTh k="autor" label="Registró" sort={sort} toggle={toggle} />
         <th></th>
       </tr></thead>
       <tbody>
         {sorted.map(o=>{
-          const editing = editingObs && editingObs.caseId===c.id && editingObs.obsId===o.id;
+          const editing = editingObs && editingObs.caseId===c.id && editingObs.field===field && editingObs.obsId===o.id;
           return (
             <tr key={o.id}>
               <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>{new Date(o.ts).toLocaleString("es-AR")}</td>
@@ -3030,8 +3100,8 @@ function ObservacionesHistory({c, editingObs, setEditingObs, onStartEdit, onSave
                   </React.Fragment>
                 ) : (
                   <React.Fragment>
-                    <button type="button" className="btn secondary small" onClick={()=>onStartEdit(c,o)} disabled={disabled}>Editar</button>{" "}
-                    <button type="button" className="btn secondary small" onClick={()=>onDelete(c,o)} disabled={disabled}>Eliminar</button>
+                    <button type="button" className="btn secondary small" onClick={()=>onStartEdit(c,field,o)} disabled={disabled}>Editar</button>{" "}
+                    <button type="button" className="btn secondary small" onClick={()=>onDelete(c,field,o)} disabled={disabled}>Eliminar</button>
                   </React.Fragment>
                 )}
               </td>
@@ -3047,8 +3117,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [motivoIncluded, setMotivoIncluded] = useState(new Set());
   const [casesManual, setCasesManual] = useState(new Map());
   const manualRef = useRef(new Map());
-  const [expandedId, setExpandedId] = useState(null);
-  const [obsDrafts, setObsDrafts] = useState({});
+  const [expandedId, setExpandedId] = useState(null);       // caso con el historial de observaciones abierto
+  const [expandedAccId, setExpandedAccId] = useState(null);  // caso con el historial de acciones abierto
+  const [obsDrafts, setObsDrafts] = useState({});            // texto a medio escribir: clave "observaciones:<caso>" / "acciones:<caso>"
+  const seedingRef = useRef(new Set());                      // casos cuya "Razón" ya se intentó cargar en esta sesión
   const [search, setSearch] = useKeptState("cron.search", "");
   const [tipoFilter, setTipoFilter] = useKeptState("cron.tipo", "__all");
   const [saveStatus, setSaveStatus] = useState("");
@@ -3059,7 +3131,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const aliveRef = useRef(true);
   const saveQueueRef = useRef(new Map()); // id del caso -> cola de guardados (uno por vez, en orden)
   const userRef = useRef("");              // email del usuario, para firmar los movimientos
-  const [editingObs, setEditingObs] = useState(null); // {caseId, obsId, texto}
+  const [editingObs, setEditingObs] = useState(null); // {caseId, field, obsId, texto}
 
   // Lee de Supabase la configuración y todos los casos (lo guardado por cualquier usuario).
   async function loadFromServer(){
@@ -3117,8 +3189,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       opinionMedica: manual.opinionMedica || "",
       tactoEmpleado: manual.tactoEmpleado || "",
       posibleAlta: manual.posibleAlta || "",
-      accion: manual.accion || "",
-      observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : []
+      acciones: Array.isArray(manual.acciones) ? manual.acciones : [],
+      // texto de la última acción: para el listado impreso
+      accion: (Array.isArray(manual.acciones) && manual.acciones.length) ? manual.acciones.slice().sort((a,b)=>a.ts-b.ts)[manual.acciones.length-1].texto : "",
+      observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : [],
+      razonSembrada: !!manual.razonSembrada
     };
   }), [cases, casesManual]);
 
@@ -3162,9 +3237,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const prev = row ? casoRowToManual(row) : (local || {});
       const base = {
         notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
-        posibleAlta: caseObj.posibleAlta||"", accion: caseObj.accion||"",
+        posibleAlta: caseObj.posibleAlta||"",
         inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
-        observaciones: [],
+        observaciones: [], acciones: [], razonSembrada: false,
         ...prev
       };
       const p = typeof patch==="function" ? patch(base) : patch;
@@ -3173,7 +3248,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const {error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
         id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
         tipo: m.tipo, notificar: m.notificar||"", opinion_medica: m.opinionMedica||"",
-        tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"", accion: m.accion||"",
+        tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"",
+        // `accion` (texto único, versión anterior) se mantiene con la última acción para no romper pantallas que no se recargaron
+        accion: (m.acciones||[]).length ? m.acciones.slice().sort((a,b)=>a.ts-b.ts)[m.acciones.length-1].texto : "",
+        acciones: m.acciones||[], razon_sembrada: !!m.razonSembrada,
         inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
         observaciones: m.observaciones||[], updated_at: new Date().toISOString()
       });
@@ -3210,36 +3288,58 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     if(r.value!==anterior) commitField(caseObj, "posibleAlta", r.value);
   }
 
-  function addObservacion(caseObj){
-    const texto = (obsDrafts[caseObj.id]||"").trim();
+  // Observaciones ("observaciones") y acciones ("acciones") funcionan igual: lista de movimientos con fecha, autor, edición y borrado.
+  const NOMBRE_ENTRADA = {observaciones:"observación", acciones:"acción"};
+  function addEntry(caseObj, field){
+    const key = field+":"+caseObj.id;
+    const texto = (obsDrafts[key]||"").trim();
     if(!texto) return;
     const entry = {id:newObsId(), ts:Date.now(), texto, autor:userRef.current};
-    saveCase(caseObj, base=>({observaciones:[...(base.observaciones||[]), entry]}));
-    setObsDrafts(prev=>({...prev, [caseObj.id]:""}));
+    saveCase(caseObj, base=>({[field]:[...(base[field]||[]), entry]}));
+    setObsDrafts(prev=>({...prev, [key]:""}));
   }
-  function startEditObs(caseObj, o){ setEditingObs({caseId:caseObj.id, obsId:o.id, texto:o.texto}); }
-  function saveEditObs(caseObj){
+  function startEditEntry(caseObj, field, o){ setEditingObs({caseId:caseObj.id, field, obsId:o.id, texto:o.texto}); }
+  function saveEditEntry(caseObj){
     if(!editingObs) return;
-    const {obsId} = editingObs;
+    const {obsId, field} = editingObs;
     const texto = (editingObs.texto||"").trim();
-    if(!texto){ window.alert("La observación no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
+    if(!texto){ window.alert("La "+NOMBRE_ENTRADA[field]+" no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
     const editor = userRef.current, ahora = Date.now();
     saveCase(caseObj, base=>{
-      const obs = base.observaciones||[];
-      if(!obs.some(o=>o.id===obsId)) return null;
-      return {observaciones: obs.map(o=> o.id===obsId ? {...o, texto, editadoTs:ahora, editadoPor:editor} : o)};
+      const lista = base[field]||[];
+      if(!lista.some(o=>o.id===obsId)) return null;
+      return {[field]: lista.map(o=> o.id===obsId ? {...o, texto, editadoTs:ahora, editadoPor:editor} : o)};
     });
     setEditingObs(null);
   }
-  function deleteObs(caseObj, o){
-    if(!window.confirm("¿Eliminar esta observación?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
+  function deleteEntry(caseObj, field, o){
+    if(!window.confirm("¿Eliminar esta "+NOMBRE_ENTRADA[field]+"?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
     saveCase(caseObj, base=>{
-      const obs = base.observaciones||[];
-      if(!obs.some(x=>x.id===o.id)) return null;
-      return {observaciones: obs.filter(x=>x.id!==o.id)};
+      const lista = base[field]||[];
+      if(!lista.some(x=>x.id===o.id)) return null;
+      return {[field]: lista.filter(x=>x.id!==o.id)};
     });
-    if(editingObs && editingObs.obsId===o.id) setEditingObs(null);
+    if(editingObs && editingObs.obsId===o.id && editingObs.field===field) setEditingObs(null);
   }
+
+  // Ausencias por motivos de salud (AT, ET, EN, CAE...): la "Razón" que viene en el ausentismo se carga sola, una única vez,
+  // como primera información del historial del caso (Observación / Evolución). Solo la hace quien puede editar.
+  useEffect(()=>{
+    if(!puedeEditar || !dbReady) return;
+    casesFull.forEach(c=>{
+      if(!c.razon || !CRONICOS_CODIGOS_SALUD.has(c.codpla)) return;
+      if(c.razonSembrada || c.observaciones.length) return;
+      if(seedingRef.current.has(c.id)) return;
+      seedingRef.current.add(c.id);
+      saveCase(c, base=>{
+        if(base.razonSembrada || (base.observaciones||[]).length) return null; // otro usuario ya la cargó o ya hay información
+        return {
+          observaciones:[{id:"orazon", ts:c.inicioAutoTs + 12*3600*1000, texto:c.razon, autor:"Razón registrada en el ausentismo", origen:"razon"}],
+          razonSembrada:true
+        };
+      });
+    });
+  }, [casesFull, dbReady, puedeEditar]);
 
   function handlePrint(){
     const printCss = `
@@ -3297,6 +3397,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       .grid th{text-align:left;font-size:10.5px;color:#555;text-transform:uppercase;padding:4px 6px;border-bottom:1px solid #999;}
       .grid td{padding:4px 6px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
       .box{border:1px solid #cfd8e8;border-radius:6px;padding:8px 10px;min-height:34px;white-space:pre-wrap;margin:0;}
+      .mov{padding:6px 0 7px;border-bottom:1px solid #e5e5e5;}
+      .mfecha{font-size:10.5px;font-weight:700;color:#0c2e80;}
+      .mmeta{font-weight:400;color:#777;}
+      .mtexto{margin-top:3px;white-space:pre-wrap;line-height:1.45;font-size:12px;}
       .none{color:#777;font-style:italic;}
       .foot{margin-top:18px;font-size:10px;color:#777;border-top:1px solid #ddd;padding-top:6px;}
       .firmas{display:flex;gap:40px;margin-top:40px;}
@@ -3310,10 +3414,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const notif = pick("notificar");
       const notifTxt = notif ? (isoDateToTs(notif)!=null ? fmtDateFromTs(isoDateToTs(notif)) : notif) : "—";
       const altaRaw = pick("posibleAlta"), altaN = normalizarFechaDMA(altaRaw);
-      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = altaN.ok ? altaN.value : altaRaw, accion = pick("accion");
+      // La historia clínica NO imprime las "Acciones": la firma el empleado y esa información es interna.
+      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = altaN.ok ? altaN.value : altaRaw;
       const box = t => t ? "<p class='box'>"+e(t)+"</p>" : "<p class='box none'>Sin datos cargados.</p>";
       const tramos = (c0.tramos||[]).map(t=>"<tr><td>"+fmtDateFromTs(t.desdeTs)+"</td><td>"+fmtDateFromTs(t.hastaTs)+"</td><td>"+t.dias+"</td><td>"+e(CAT_LABEL[t.cat]||t.cat)+"</td><td>"+e(t.label)+"</td></tr>").join("");
-      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<tr><td style='white-space:nowrap'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+(o.autor||o.editadoTs ? "<div style='color:#777;font-size:10px;margin-top:2px'>"+e((o.autor ? "Registró: "+o.autor : "")+(o.editadoTs ? (o.autor?" · ":"")+"editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</div>" : "")+"</td></tr>").join("");
+      // cada movimiento ocupa todo el ancho de la hoja: fecha arriba y el texto completo debajo (antes quedaba una columna casi vacía)
+      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<div class='mov'><div class='mfecha'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor||o.editadoTs ? " <span class='mmeta'>"+e((o.autor ? " · Registró: "+o.autor : "")+(o.editadoTs ? " · editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</span>" : "")+"</div><div class='mtexto'>"+e(o.texto)+"</div></div>").join("");
       return "<section class='hc'>"+
         "<div class='head'><div><div class='kicker'>HISTORIA CLÍNICA LABORAL</div><h1>"+e(c0.nombre||"Sin nombre")+"</h1><div class='sub'>Legajo "+e(c0.legajo)+" · Seguimiento de ausentismo</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
         "<h2>Datos del empleado</h2><table class='kv'>"+
@@ -3328,9 +3434,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
         "</table>"+
         "<h2>Opinión médica</h2>"+box(opinion)+
         "<h2>Táctico empleado</h2>"+box(tacto)+
-        "<h2>Acción</h2>"+box(accion)+
         "<h2>Tramos de ausencia</h2>"+(tramos ? "<table class='grid'><thead><tr><th>Desde</th><th>Hasta</th><th>Días</th><th>Categoría</th><th>Motivo</th></tr></thead><tbody>"+tramos+"</tbody></table>" : "<p class='box none'>Sin datos.</p>")+
-        "<h2>Evolución / Observaciones</h2>"+(obs ? "<table class='grid'><thead><tr><th style='width:26%'>Fecha y hora</th><th>Movimiento</th></tr></thead><tbody>"+obs+"</tbody></table>" : "<p class='box none'>Sin movimientos registrados.</p>")+
+        "<h2>Evolución / Observaciones</h2>"+(obs ? "<div class='movs'>"+obs+"</div>" : "<p class='box none'>Sin movimientos registrados.</p>")+
         "<div class='firmas'><div>Firma del profesional</div><div>Firma del empleado</div></div>"+
         "<div class='foot'>Documento confidencial: contiene información de salud del empleado. Emitido el "+e(emitido)+".</div>"+
       "</section>";
@@ -3370,6 +3475,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
             <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
           </div>
           <TopScrollSync targetRef={scrollRef} />
+          <StickyTableHead targetRef={scrollRef} columns={CRONICO_COLUMNS} sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <div className="overflow-x" ref={scrollRef}>
             <table>
               <thead><tr>
@@ -3417,7 +3523,20 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         onChange={e=>{ const f = formatDigitsDMA(e.target.value); if(f!==e.target.value) e.target.value = f; }}
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                         onBlur={e=>commitPosibleAlta(c, e.target)} disabled={locked} /></td>
-                      <td><input key={c.id+"-ac-"+c.accion} type="text" data-case={c.id} data-field="accion" defaultValue={c.accion} onBlur={e=>{ if(e.target.value!==c.accion) commitField(c,"accion",e.target.value); }} disabled={locked} /></td>
+                      <td style={{minWidth:220}}>
+                        {c.acciones.length>0 && (
+                          <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedAccId(expandedAccId===c.id?null:c.id)}>
+                            {expandedAccId===c.id ? "Ocultar" : "Ver"} historial ({c.acciones.length})
+                          </div>
+                        )}
+                        {puedeEditar && (
+                          <div style={{display:"flex", gap:4}}>
+                            <input type="text" placeholder="Nueva acción…" value={obsDrafts["acciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["acciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"acciones"); }} disabled={locked} />
+                            <button type="button" className="btn secondary" title="Agregar esta acción al historial del caso" onClick={()=>addEntry(c,"acciones")} disabled={locked}>+</button>
+                          </div>
+                        )}
+                        {!puedeEditar && c.acciones.length===0 && "—"}
+                      </td>
                       <td style={{minWidth:220}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
@@ -3426,18 +3545,28 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         )}
                         {puedeEditar && (
                           <div style={{display:"flex", gap:4}}>
-                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts[c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,[c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addObservacion(c); }} disabled={locked} />
-                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addObservacion(c)} disabled={locked}>+</button>
+                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={locked} />
+                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={locked}>+</button>
                           </div>
                         )}
                         <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
                       </td>
                     </tr>
+                    {expandedAccId===c.id && c.acciones.length>0 && (
+                      <tr>
+                        <td colSpan="17" style={{background:"var(--plane)"}}>
+                          <div className="hint" style={{marginBottom:4, fontWeight:700}}>Acciones — {c.nombre||c.legajo} (no se imprimen en la historia clínica)</div>
+                          <ObservacionesHistory c={c} field="acciones" labelCol="Acción" editingObs={editingObs} setEditingObs={setEditingObs}
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
+                        </td>
+                      </tr>
+                    )}
                     {expandedId===c.id && c.observaciones.length>0 && (
                       <tr>
                         <td colSpan="17" style={{background:"var(--plane)"}}>
-                          <ObservacionesHistory c={c} editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditObs} onSaveEdit={saveEditObs} onDelete={deleteObs} disabled={locked} readOnly={!puedeEditar} />
+                          <div className="hint" style={{marginBottom:4, fontWeight:700}}>Observación / Evolución — {c.nombre||c.legajo}</div>
+                          <ObservacionesHistory c={c} field="observaciones" labelCol="Movimiento" editingObs={editingObs} setEditingObs={setEditingObs}
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
                         </td>
                       </tr>
                     )}

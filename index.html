@@ -140,6 +140,10 @@ tr.total td{border-top:1.5px solid var(--ink-2);font-weight:800;padding-top:10px
 .cat{display:inline-flex;align-items:center;gap:8px;}
 .cat .dot{width:9px;height:9px;border-radius:3px;flex:none;}
 .overflow-x{overflow-x:auto;}
+/* encabezado fijo de tablas anchas (Crónicos): se pega justo debajo del menú y de la barra de desplazamiento horizontal */
+.sticky-head-proxy{position:sticky;top:calc(var(--tabs-h,0px) + 16px);height:0;margin:-10px 0;z-index:24;}
+.sticky-head-proxy .shp-inner{position:absolute;top:0;left:0;right:0;overflow:hidden;background:var(--surface);box-shadow:0 1px 0 var(--border), 0 5px 8px rgba(0,0,0,.18);}
+.sticky-head-proxy table{table-layout:fixed;border-collapse:collapse;}
 .top-scrollbar{overflow-x:auto;overflow-y:hidden;height:14px;margin-bottom:2px;position:sticky;top:var(--tabs-h,0px);z-index:25;background:var(--surface);}
 .footer-card{padding:18px 20px;display:flex;flex-direction:column;gap:12px;}
 .footer-card h3{margin:0;font-size:13.5px;font-weight:750;}
