@@ -3342,21 +3342,36 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   }, [casesFull, dbReady, puedeEditar]);
 
   function handlePrint(){
+    // Hoja horizontal. La Acción y la Última observación van en una línea propia debajo de cada caso, usando TODO el ancho de la hoja
+    // (antes quedaban en columnas angostas: el texto se partía en muchas líneas cortas y se gastaban más hojas).
     const printCss = `
+      @page{size:A4 landscape;margin:10mm;}
       *{box-sizing:border-box;}
-      body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff;color:#000;margin:24px;}
+      body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff;color:#000;margin:0;}
       h2{margin:0 0 4px;font-size:19px;}
-      table{width:100%;border-collapse:collapse;font-size:11px;}
-      thead th{text-align:left;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 5px 6px;border-bottom:1px solid #ccc;}
-      tbody td{padding:5px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
+      p{margin:0 0 8px;font-size:12px;}
+      table{width:100%;border-collapse:collapse;font-size:10.5px;}
+      thead{display:table-header-group;}
+      thead th{text-align:left;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 4px 5px;border-bottom:1px solid #999;}
+      tbody.caso{break-inside:avoid;page-break-inside:avoid;}
+      tbody.caso td{padding:4px;vertical-align:top;}
+      tbody.caso tr.dato td{border-top:1px solid #ccc;}
+      tbody.caso tr.nota td{padding:2px 4px 6px 4px;border-bottom:1px solid #e5e5e5;font-size:10.5px;line-height:1.4;}
+      .nota .linea{white-space:pre-wrap;margin:0 0 2px;}
+      .nota b{color:#0c2e80;}
     `;
     const e = escHtml;
+    const NCOLS = 15;
     const rows = sorted.map(c=>{
-      const ultimaObs = c.observaciones.length ? c.observaciones[c.observaciones.length-1].texto : "";
-      return "<tr><td>"+e(c.legajo)+"</td><td>"+e(c.nombre||"—")+"</td><td>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td><td>"+e(c.accion||"—")+"</td><td>"+e(ultimaObs||"—")+"</td></tr>";
+      const ultima = c.observaciones.length ? c.observaciones.slice().sort((a,b)=>a.ts-b.ts)[c.observaciones.length-1] : null;
+      const notas = (c.accion ? "<p class='linea'><b>Acción:</b> "+e(c.accion)+"</p>" : "")
+        + (ultima ? "<p class='linea'><b>Última observación ("+e(new Date(ultima.ts).toLocaleDateString("es-AR"))+"):</b> "+e(ultima.texto)+"</p>" : "");
+      return "<tbody class='caso'><tr class='dato'><td>"+e(c.legajo)+"</td><td>"+e(c.nombre||"—")+"</td><td>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td></tr>"
+        + (notas ? "<tr class='nota'><td colspan='"+NCOLS+"'>"+notas+"</td></tr>" : "")
+        + "</tbody>";
     }).join("");
     const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
-      "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th><th>Acción</th><th>Última observación</th></tr></thead><tbody>"+rows+"</tbody></table>";
+      "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th></tr></thead>"+rows+"</table>";
     const win = window.open("", "_blank");
     if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
     win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Crónicos</title><style>'+printCss+'</style></head><body>'+html+'</body></html>');
