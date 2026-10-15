@@ -2646,6 +2646,8 @@ function EmployeeBarChart({items}){
     </svg>
   );
 }
+// Selección "Por defecto" del filtro Id Motivo de Detalle Empleados (la vigente al 15/10/2026).
+const DETALLE_DEFAULT_MOTIVOS = new Set(["AT","CA","CJ","DS","EFS","EN","ET","EX","FA","JRP","LSS","MA","MT","MU","NAC","SA"]);
 function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const employeeOptions = useMemo(()=>{
     const map = new Map();
@@ -2670,10 +2672,11 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
   const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
   const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
-  const [idMotivoElegido, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.map(m=>m.key)));
+  // El filtro arranca en "Por defecto" (DETALLE_DEFAULT_MOTIVOS)
+  const [idMotivoElegido, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)));
   // motivosPorDefecto (Servicio médico): el filtro no se muestra y se usan siempre los Id Motivo "Por defecto"
   const idMotivoIncluded = useMemo(
-    ()=> motivosPorDefecto ? new Set(parsed.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)) : idMotivoElegido,
+    ()=> motivosPorDefecto ? new Set(parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)) : idMotivoElegido,
     [motivosPorDefecto, parsed, idMotivoElegido]);
 
   // si lo guardado ya no existe en los datos actuales (otro archivo, otro año), vuelve al primero disponible
@@ -2863,7 +2866,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
         <ToggleList title="Filtro Id Motivo (solo para el detalle de abajo)"
           items={parsed.idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))}
           included={idMotivoIncluded} onChange={setIdMotivoIncluded}
-          defaultKeys={parsed.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
+          defaultKeys={parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />
       </div>}
 
       <div className="card table-card de-print-block print-page-break">
