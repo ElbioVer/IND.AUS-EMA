@@ -1393,10 +1393,12 @@ function groupStreakTramos(rows){
 }
 function buildCronicoCases(records, plantel, motivoIncluded){
   if(!motivoIncluded || !motivoIncluded.size) return [];
+  // Fila que puede formar un caso: una ausencia (AP/ANP) o cualquier día cuyo Id Motivo esté tildado en el filtro (ej. VAC, que no es AP/ANP).
+  const esCaso = r => r.cat==="AP" || r.cat==="ANP" || (!!r.idMotivo && motivoIncluded.has(motivoKeyOf(r)));
   const byLegajo = new Map();
   records.forEach(r=>{
     if(!r.valid || !r.legajo) return;
-    if(r.cat!=="AP" && r.cat!=="ANP") return;
+    if(!esCaso(r)) return;
     const k = r.legajo.toUpperCase();
     if(!byLegajo.has(k)) byLegajo.set(k, []);
     byLegajo.get(k).push(r);
@@ -1448,7 +1450,7 @@ function buildCronicoCases(records, plantel, motivoIncluded){
     // sólo casos que siguen vigentes: el último registro cargado de ese legajo (de todo el archivo)
     // todavía es parte de esta racha — si ya volvió a "P" o cambió de motivo, el caso se cerró.
     const lastRec = lastRecordByLegajo.get(legU);
-    const continua = lastRec && (lastRec.cat==="AP"||lastRec.cat==="ANP") && lastRec.ts===last.ts;
+    const continua = lastRec && esCaso(lastRec) && lastRec.ts===last.ts;
     if(!continua) return;
     // sólo empleados activos: con plantel, sin fecha de baja; sin plantel, que su último registro no sea CE/BAJA.
     const activo = p ? (p.bajaTs==null) : (lastRec.cat!=="CE" && lastRec.cat!=="BAJA");
@@ -3114,7 +3116,9 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
 }
 function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos}){
   const [dbReady, setDbReady] = useState(false);
-  const [motivoIncluded, setMotivoIncluded] = useState(new Set());
+  // Filtro de motivos: cada vez que se abre la app arranca en "Por defecto". Los cambios (ej. sumar VAC) son de esta pantalla:
+  // se conservan mientras se navega entre menús, pero no se guardan en el servidor ni cambian lo que ven los demás.
+  const [motivoIncluded, setMotivoIncluded] = useKeptState("cron.motivos", () => new Set(idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)));
   const [casesManual, setCasesManual] = useState(new Map());
   const manualRef = useRef(new Map());
   const [expandedId, setExpandedId] = useState(null);       // caso con el historial de observaciones abierto
@@ -3133,15 +3137,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const userRef = useRef("");              // email del usuario, para firmar los movimientos
   const [editingObs, setEditingObs] = useState(null); // {caseId, field, obsId, texto}
 
-  // Lee de Supabase la configuración y todos los casos (lo guardado por cualquier usuario).
+  // Lee de Supabase todos los casos (lo guardado por cualquier usuario).
   async function loadFromServer(){
-    const [{data:cfg, error:cfgErr}, {data:casos, error:casosErr}] = await Promise.all([
-      supabaseClient.from(CRONICOS_CONFIG_TABLE).select("*").eq("id","settings").maybeSingle(),
-      supabaseClient.from(CRONICOS_CASOS_TABLE).select("*")
-    ]);
+    const {data:casos, error:casosErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*");
     if(!aliveRef.current) return;
-    if(cfgErr || casosErr){ setSaveStatus("Error al leer Supabase: "+((cfgErr||casosErr).message)); return false; }
-    if(cfg && Array.isArray(cfg.motivos)) setMotivoIncluded(new Set(cfg.motivos));
+    if(casosErr){ setSaveStatus("Error al leer Supabase: "+casosErr.message); return false; }
     if(casos){
       const m = new Map();
       casos.forEach(row=> m.set(row.id, casoRowToManual(row)));
@@ -3166,13 +3166,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     setSaveStatus("Actualizando...");
     const ok = await loadFromServer();
     if(ok) setSaveStatus("Datos actualizados");
-  }
-
-  function persistMotivos(nextSet){
-    if(!puedeEditar) return;
-    setMotivoIncluded(nextSet);
-    supabaseClient.from(CRONICOS_CONFIG_TABLE).upsert({id:"settings", motivos:Array.from(nextSet), updated_at:new Date().toISOString()})
-      .then(({error})=>{ if(error) setSaveStatus("Error al guardar: "+error.message); });
   }
 
   // motivosFijos (Servicio médico): se usan siempre los motivos "Por defecto", sin mostrar ni guardar el filtro
@@ -3468,13 +3461,13 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       {!dbReady && (
         <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
       )}
-      {puedeEditar && !motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={persistMotivos}
+      {!motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={setMotivoIncluded}
         defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
 
       {!motivoEfectivo.size ? (
         <div className="card table-card">
           <h3>Crónicos</h3>
-          <p className="desc">Elegí arriba qué Id Motivo generan un caso (ej. Enfermedad, Enfermedad ART, Accidente de trabajo, Reserva de puesto) — la selección queda guardada tal cual la dejes, para codificar más adelante. Un caso agrupa, por legajo, todas las ausencias con ese motivo dentro del mismo año, y sólo se lista si el empleado sigue activo y su registro más reciente todavía está bajo ese mismo motivo (si ya volvió a estar presente o cambió de motivo, el caso deja de mostrarse).</p>
+          <p className="desc">Elegí arriba qué Id Motivo generan un caso (ej. Enfermedad, Enfermedad ART, Accidente de trabajo, Reserva de puesto) — el filtro arranca siempre en «Por defecto» y lo que cambies vale para tu pantalla (no modifica lo que ven los demás). Un caso agrupa, por legajo, todas las ausencias con ese motivo dentro del mismo año, y sólo se lista si el empleado sigue activo y su registro más reciente todavía está bajo ese mismo motivo (si ya volvió a estar presente o cambió de motivo, el caso deja de mostrarse).</p>
         </div>
       ) : (
         <div className="card table-card">
