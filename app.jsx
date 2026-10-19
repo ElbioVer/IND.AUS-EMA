@@ -3467,10 +3467,16 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       table{width:100%;border-collapse:collapse;font-size:10.5px;}
       thead{display:table-header-group;}
       thead th{text-align:left;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 4px 5px;border-bottom:1px solid #999;}
+      /* cada caso es un recuadro completo (marco grueso azul) con sus datos en cuadrícula, y una separación entre un caso y el siguiente */
       tbody.caso{break-inside:avoid;page-break-inside:avoid;}
-      tbody.caso td{padding:4px;vertical-align:top;}
-      tbody.caso tr.dato td{border-top:1px solid #ccc;}
-      tbody.caso tr.nota td{padding:2px 4px 6px 4px;border-bottom:1px solid #e5e5e5;font-size:10.5px;line-height:1.4;}
+      tbody.caso td{padding:4px 5px;vertical-align:top;border:1px solid #9aa4b5;}
+      tbody.caso tr.dato td{background:#eef3fb;border-top:2.5px solid #0c2e80;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      tbody.caso td:first-child{border-left:2.5px solid #0c2e80;}
+      tbody.caso td:last-child{border-right:2.5px solid #0c2e80;}
+      tbody.caso tr:last-child td{border-bottom:2.5px solid #0c2e80;}
+      tbody.caso tr.dato td.id{font-weight:700;font-size:12.5px;color:#000;}
+      tbody.caso tr.nota td{padding:3px 5px 6px 5px;font-size:10.5px;line-height:1.4;}
+      tbody.sep td{height:10px;padding:0;border:0;}
       .nota .linea{white-space:pre-wrap;margin:0 0 2px;}
       .nota b{color:#0c2e80;}
     `;
@@ -3480,9 +3486,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const ultima = c.observaciones.length ? c.observaciones.slice().sort((a,b)=>a.ts-b.ts)[c.observaciones.length-1] : null;
       const notas = (c.accion ? "<p class='linea'><b>Acción:</b> "+e(c.accion)+"</p>" : "")
         + (ultima ? "<p class='linea'><b>Última observación ("+e(new Date(ultima.ts).toLocaleDateString("es-AR"))+"):</b> "+e(ultima.texto)+"</p>" : "");
-      return "<tbody class='caso'><tr class='dato'><td>"+e(c.legajo)+"</td><td>"+e(c.nombre||"—")+"</td><td>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td></tr>"
+      return "<tbody class='caso'><tr class='dato'><td class='id'>"+e(c.legajo)+"</td><td class='id'>"+e(c.nombre||"—")+"</td><td class='id'>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td></tr>"
         + (notas ? "<tr class='nota'><td colspan='"+NCOLS+"'>"+notas+"</td></tr>" : "")
-        + "</tbody>";
+        + "</tbody><tbody class='sep'><tr><td colspan='"+NCOLS+"'></td></tr></tbody>";
     }).join("");
     const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
       "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th></tr></thead>"+rows+"</table>";
