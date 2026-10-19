@@ -488,6 +488,7 @@ const DEFAULT_MOTIVO_TABLE = [
   {key:"EN", refLabel:"Enfermedad", incluir:true},
   {key:"EFS", refLabel:"Enf Fam Sgbatos", incluir:true},
   {key:"ET", refLabel:"Enfermedad (ART)", incluir:true},
+  {key:"CAE", refLabel:"CAE (ausencia por salud)", incluir:true},
   {key:"EX", refLabel:"Examen", incluir:true},
   {key:"ED", refLabel:"Excedencia", incluir:true},
   {key:"FA", refLabel:"Fallecimiento", incluir:true},
@@ -1372,7 +1373,7 @@ function gapIsBridgeable(prevTs, curTs){
 
 /* ===================== crónicos ===================== */
 // Selección "Por defecto" de los motivos que generan un caso crónico (la selección vigente al 13/10/2026).
-const CRONICOS_DEFAULT_MOTIVOS = new Set(["AT","CA","CJ","DS","EFS","EN","ET","EX","FA","LSS","MA","MT","MU","NAC","PH","PRD","RP","SA","SUS"]);
+const CRONICOS_DEFAULT_MOTIVOS = new Set(["AT","CA","CAE","CJ","DS","EFS","EN","ET","EX","FA","LSS","MA","MT","MU","NAC","PH","PRD","RP","SA","SUS"]);
 const CRONICO_TIPOS =["", "ACTUAL", "CRONICO", "RES PTO", "PROC BAJA"];
 const CRONICO_TIPO_ORDEN = ["RES PTO", "CRONICO", "ACTUAL", "PROC BAJA"];
 function sanitizeIdSeg(s){ const c = (s||"").toString().toUpperCase().replace(/[^A-Z0-9_\-.~:@+]/g,""); return c || "X"; }
@@ -2679,7 +2680,7 @@ function EmployeeBarChart({items}){
   );
 }
 // Selección "Por defecto" del filtro Id Motivo de Detalle Empleados (la vigente al 15/10/2026).
-const DETALLE_DEFAULT_MOTIVOS = new Set(["AT","CA","CJ","DS","EFS","EN","ET","EX","FA","JRP","LSS","MA","MT","MU","NAC","SA"]);
+const DETALLE_DEFAULT_MOTIVOS = new Set(["AT","CA","CAE","CJ","DS","EFS","EN","ET","EX","FA","JRP","LSS","MA","MT","MU","NAC","SA"]);
 function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const employeeOptions = useMemo(()=>{
     const map = new Map();
