@@ -2958,6 +2958,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const [legajoSel, setLegajoSel] = useKeptState("de.legajo", () => employeeOptions[0] ? employeeOptions[0].value : "");
   const [periodoVal, setPeriodoVal] = useKeptState("de.periodo", "todos");
   const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
+  const [conCronicos, setConCronicos] = useKeptState("de.conCronicos", false);
   const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
   const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
   // El filtro arranca en "Por defecto" (DETALLE_DEFAULT_MOTIVOS)
@@ -3037,11 +3038,46 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     tipo:{get:r=>tipoOf(r), type:"text"}, motivo:{get:r=>r.motivo, type:"text"}, razon:{get:r=>r.razon, type:"text"}
   });
 
-  function handlePrint(){
+  // Historial de Crónicos del empleado (últimos 12 meses): lee los casos guardados en Supabase y arma el bloque para la impresión.
+  // Incluye observaciones/evolución y acciones registradas en ese lapso (las anteriores no se imprimen).
+  async function historialCronicosHtml(){
+    const e = escHtml;
+    const desdeTs = Date.now() - 365*86400000;
+    const {data, error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("legajo", legajoSel);
+    if(error) throw error;
+    const motLabel = new Map(parsed.idMotivoUniverse.map(m=>[String(m.key).toUpperCase(), m.label]));
+    const pref = sanitizeIdSeg(legajoSel)+"-";
+    const casos = (data||[]).map(row=>{
+      const m = casoRowToManual(row);
+      const movs = [
+        ...m.observaciones.map(o=>({...o, tipoMov:"Observación"})),
+        ...m.acciones.map(o=>({...o, tipoMov:"Acción"}))
+      ].filter(o=>o.ts>=desdeTs).sort((a,b)=>a.ts-b.ts);
+      let mk = String(row.id||"");
+      if(mk.startsWith(pref)) mk = mk.slice(pref.length);
+      mk = mk.replace(/-[^-]*$/, "");
+      return {row, m, movs, motivo: motLabel.get(mk.toUpperCase()) || mk || "—"};
+    }).filter(c=>c.movs.length).sort((a,b)=> b.row.anio-a.row.anio || b.movs[b.movs.length-1].ts-a.movs[a.movs.length-1].ts);
+    const titulo = "<h3>Historial de Crónicos — últimos 12 meses</h3><p class='desc'>Registrado desde el "+fmtDateFromTs(Math.floor(desdeTs/86400000)*86400000)+" hasta hoy.</p>";
+    if(!casos.length) return "<div class='card table-card cron-hist print-page-break'>"+titulo+"<p class='desc'>Sin registros en Crónicos para este empleado en los últimos 12 meses.</p></div>";
+    return "<div class='card table-card cron-hist print-page-break'>"+titulo+casos.map(c=>{
+      const datos = [["Tipo", c.m.tipo], ["Opinión médica", c.m.opinionMedica], ["Táctico empleado", c.m.tactoEmpleado], ["Posible alta", c.m.posibleAlta]].filter(x=>x[1])
+        .map(x=>"<div><span class='lbl'>"+e(x[0])+"</span><span class='val' style='font-weight:400'>"+e(x[1])+"</span></div>").join("");
+      return "<div class='cron-caso'><h4>"+e(c.motivo)+" · "+e(c.row.anio)+"</h4>"+
+        (datos ? "<div class='ficha-grid' style='margin-bottom:8px'>"+datos+"</div>" : "")+
+        "<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Registró</th></tr></thead><tbody>"+
+        c.movs.map(o=>"<tr><td style='white-space:nowrap;vertical-align:top'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='vertical-align:top'>"+e(o.tipoMov)+(o.origen==="medicina" ? " · Medicina Laboral" : "")+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td><td style='vertical-align:top'>"+e(o.autor||"—")+"</td></tr>").join("")+
+        "</tbody></table></div>";
+    }).join("")+"</div>";
+  }
+
+  async function handlePrint(){
     const blocks = Array.from(document.querySelectorAll(".de-print-block"));
     if(!blocks.length) return;
-    const html = blocks.map(el=>el.outerHTML).join("\n");
+    let html = blocks.map(el=>el.outerHTML).join("\n");
     const printCss = `
+      .cron-caso{margin-top:12px;}
+      .cron-caso h4{margin:0 0 6px;font-size:13px;color:#0c2e80;}
       @page{size:landscape;}
       *{box-sizing:border-box;}
       body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff;color:#000;margin:24px;}
@@ -3062,10 +3098,22 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
       svg{width:100%;height:auto;display:block;}
       .chart-card svg{max-width:640px;margin:4px auto 0;}
     `;
+    // la ventana se abre ya (con el clic) para que el navegador no la bloquee; el historial se lee del servidor mientras tanto
     const win = window.open("", "_blank");
     if(!win){
       alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo.");
       return;
+    }
+    if(conCronicos){
+      win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title></head><body style="font-family:Arial,sans-serif;margin:24px">Preparando el historial de Crónicos…</body></html>');
+      try{
+        html += "\n" + await historialCronicosHtml();
+      }catch(err){
+        win.close();
+        alert("No se pudo leer el historial de Crónicos ("+((err && err.message) || "error")+"). Probá de nuevo; si el problema sigue, imprimí sin esa opción.");
+        return;
+      }
+      win.document.open();
     }
     win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title><style>'+printCss+'</style></head><body>'+html+'</body></html>');
     win.document.close();
@@ -3099,6 +3147,10 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
             {availableYearsAll.map(y=>(<option key={y} value={y}>{y}</option>))}
           </select>
         </div>
+        <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Agrega al final de la hoja lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
+          <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
+          Incluir historial de Crónicos (últimos 12 meses)
+        </label>
         <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
       </div>
 
