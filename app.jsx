@@ -2959,6 +2959,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const [periodoVal, setPeriodoVal] = useKeptState("de.periodo", "todos");
   const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
   const [conCronicos, setConCronicos] = useKeptState("de.conCronicos", false);
+  const [agrupar, setAgrupar] = useKeptState("de.agrupar", true);   // días seguidos con el mismo motivo -> un renglón con inicio y fin
   const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
   const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
   // El filtro arranca en "Por defecto" (DETALLE_DEFAULT_MOTIVOS)
@@ -3036,6 +3037,31 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     fecha:{get:r=>r.ts, type:"num"}, estado:{get:r=>r.estado, type:"text"}, idMotivo:{get:r=>r.idMotivo, type:"text"},
     agrup:{get:r=>r.agrup||"(vacío)", type:"text"}, presidencia:{get:r=>r.presidencia||"", type:"text"},
     tipo:{get:r=>tipoOf(r), type:"text"}, motivo:{get:r=>r.motivo, type:"text"}, razon:{get:r=>r.razon, type:"text"}
+  });
+
+  // Períodos: días consecutivos con el mismo Id Motivo se juntan en un solo renglón (desde / hasta / días). Los fines de semana y feriados
+  // entre dos días no cortan el período; cualquier día hábil sin ese motivo sí.
+  const ausGrupos = useMemo(()=>{
+    const out = [];
+    ausenciaRows.forEach(r=>{
+      const key = [r.idMotivo, r.agrup, r.presidencia, tipoOf(r)].join("|");
+      const g = out[out.length-1];
+      if(g && g.key===key && (r.ts===g.hastaTs || gapIsBridgeable(g.hastaTs, r.ts))){
+        if(r.ts!==g.hastaTs) g.dias++;
+        g.hastaTs = r.ts;
+        if(r.razon && !g.razones.includes(r.razon)) g.razones.push(r.razon);
+        if(r.estado && !g.estados.includes(r.estado)) g.estados.push(r.estado);
+      } else {
+        out.push({key, desdeTs:r.ts, hastaTs:r.ts, dias:1, row:r, razones:r.razon?[r.razon]:[], estados:r.estado?[r.estado]:[]});
+      }
+    });
+    return out;
+  }, [ausenciaRows]);
+  const grpSort = useTableSort(ausGrupos, {
+    desde:{get:g=>g.desdeTs, type:"num"}, hasta:{get:g=>g.hastaTs, type:"num"}, dias:{get:g=>g.dias, type:"num"},
+    estado:{get:g=>g.estados.join(" / "), type:"text"}, idMotivo:{get:g=>g.row.idMotivo, type:"text"},
+    agrup:{get:g=>g.row.agrup||"(vacío)", type:"text"}, presidencia:{get:g=>g.row.presidencia||"", type:"text"},
+    tipo:{get:g=>tipoOf(g.row), type:"text"}, motivo:{get:g=>g.row.motivo, type:"text"}, razon:{get:g=>g.razones.join(" / "), type:"text"}
   });
 
   // Historial de Crónicos del empleado (últimos 12 meses): lee los casos guardados en Supabase y arma el bloque para la impresión.
@@ -3147,6 +3173,10 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
             {availableYearsAll.map(y=>(<option key={y} value={y}>{y}</option>))}
           </select>
         </div>
+        <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Si un motivo se repite en días seguidos, el detalle muestra una sola línea con fecha de inicio y de fin (en pantalla y al imprimir)">
+          <input type="checkbox" checked={agrupar} onChange={e=>setAgrupar(e.target.checked)} />
+          Agrupar días consecutivos (inicio y fin)
+        </label>
         <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Agrega al final de la hoja lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
           <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
           Incluir historial de Crónicos (últimos 12 meses)
@@ -3210,8 +3240,42 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
       </div>}
 
       <div className="card table-card de-print-block print-page-break">
-        <h3>{ausenciaRows.length ? ("DETALLE (" + fmt(ausenciaRows.length) + " días)") : "Sin días con los Id Motivo seleccionados en el período"}</h3>
-        {ausenciaRows.length>0 && (
+        <h3>{ausenciaRows.length ? ("DETALLE (" + fmt(ausenciaRows.length) + " días" + (agrupar ? " en " + fmt(ausGrupos.length) + (ausGrupos.length===1 ? " período" : " períodos") : "") + ")") : "Sin días con los Id Motivo seleccionados en el período"}</h3>
+        {ausenciaRows.length>0 && agrupar && (
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="desde" label="Desde" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="hasta" label="Hasta" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="dias" label="Días" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="estado" label="Estado" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="idMotivo" label="Id Motivo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="agrup" label="Agrup. presentismo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="presidencia" label="Agrup. presidencia" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="tipo" label="Tipo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="motivo" label="Motivo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="razon" label="Razón" sort={grpSort.sort} toggle={grpSort.toggle} />
+              </tr></thead>
+              <tbody>
+                {grpSort.sorted.map((g,i)=>(
+                  <tr key={i}>
+                    <td>{fmtDateFromTs(g.desdeTs)}</td>
+                    <td>{g.hastaTs===g.desdeTs ? "—" : fmtDateFromTs(g.hastaTs)}</td>
+                    <td>{g.dias}</td>
+                    <td>{g.estados.join(" / ")}</td>
+                    <td>{g.row.idMotivo}</td>
+                    <td>{g.row.agrup || "(vacío)"}</td>
+                    <td>{g.row.presidencia || "—"}</td>
+                    <td>{tipoOf(g.row)}</td>
+                    <td>{g.row.motivo}</td>
+                    <td>{g.razones.join(" / ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {ausenciaRows.length>0 && !agrupar && (
           <div className="overflow-x">
             <table>
               <thead><tr>
