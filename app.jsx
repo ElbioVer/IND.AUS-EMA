@@ -2540,7 +2540,252 @@ function ToggleList({title, items, included, onChange, columns, defaultKeys}){
   );
 }
 
-function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo}){
+/* ===================== Comité de ausentismo (dentro de Ranking) =====================
+   Por empleado y en una ventana de meses (por defecto los últimos 12 cargados): días ausentes AP, ANP y ENF, en qué meses faltó,
+   y detección de MICROAUSENTISMO: empleados que faltan en casi todos los meses con episodios cortos y repetidos. En un ranking por
+   días no aparecen, porque otros empleados suman más días en un solo período; acá se los detecta por la repetición mes a mes y se
+   muestra el patrón de motivo / razón de sus episodios. Una "ausencia" es una fila AP/ANP cuyo motivo cuenta para el cálculo
+   (mismos motivos tildados/destildados en Resumen). Un "episodio" es una racha de días ausentes seguidos (con fines de semana y
+   feriados en el medio). "ENF" = días con Agrupador cuadro presidencia "ENF". */
+function analizarComite(records, monthKeys, excludedMotivos){
+  const mset = new Set(monthKeys);
+  const exMot = excludedMotivos || new Set();
+  const by = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.legajo || !isCountedCat(r.cat) || !mset.has(r.monthKey) || exMot.has(motivoKeyOf(r))) return;
+    const k = r.legajo.toUpperCase();
+    if(!by.has(k)) by.set(k, []);
+    by.get(k).push(r);
+  });
+  const out = [];
+  by.forEach((rowsIn, k)=>{
+    const rows = rowsIn.slice().sort((a,b)=>a.ts-b.ts);
+    const dias = []; // un registro por día (si hubiera dos filas el mismo día, cuenta una)
+    rows.forEach(r=>{ if(!dias.length || dias[dias.length-1].ts!==r.ts) dias.push(r); });
+    const episodios = [];
+    dias.forEach(r=>{
+      const ep = episodios[episodios.length-1];
+      if(ep && gapIsBridgeable(ep.finTs, r.ts)){ ep.finTs = r.ts; ep.rows.push(r); }
+      else episodios.push({inicioTs:r.ts, finTs:r.ts, rows:[r]});
+    });
+    const porMes = {};
+    let ap=0, anp=0, enf=0;
+    dias.forEach(r=>{
+      const m = porMes[r.monthKey] || (porMes[r.monthKey] = {dias:0, inicios:0});
+      m.dias++;
+      if(r.cat==="AP") ap++; else anp++;
+      if(r.presidencia==="ENF") enf++;
+    });
+    const motivoCnt = new Map(), razonCnt = new Map();
+    episodios.forEach(ep=>{
+      ep.dias = ep.rows.length;
+      const base = ep.rows.find(r=>motivoKeyOf(r)!=="CA") || ep.rows[0];
+      ep.motivo = motivoLabelOf(base);
+      ep.motivoKey = motivoKeyOf(base);
+      const rz = (ep.rows.find(r=>r.razon) || {}).razon || "";
+      ep.razon = rz;
+      ep.presidencia = base.presidencia || "";
+      const mk = ep.rows[0].monthKey;
+      porMes[mk].inicios++;
+      motivoCnt.set(ep.motivo, (motivoCnt.get(ep.motivo)||0)+1);
+      if(rz){ const nk = normTxt(rz); const cur = razonCnt.get(nk) || {texto:rz, n:0}; cur.n++; razonCnt.set(nk, cur); }
+    });
+    const topMotivo = Array.from(motivoCnt.entries()).sort((a,b)=>b[1]-a[1])[0] || ["", 0];
+    const razonesArr = Array.from(razonCnt.values()).sort((a,b)=>b.n-a.n);
+    const conRazon = episodios.filter(ep=>ep.razon).length;
+    const last = dias[dias.length-1];
+    out.push({
+      key:k, legajo:last.legajo, nombre:last.nombre||("Legajo "+last.legajo), unidad:last.unidad||"", departamento:last.departamento||"", sector:last.sector||"",
+      ap, anp, enf, total:dias.length, episodios, nEpisodios:episodios.length, porMes,
+      mesesConFaltas: Object.keys(porMes).length,
+      mesesConInicio: Object.values(porMes).filter(m=>m.inicios>0).length,
+      topMotivo:{label:topMotivo[0], n:topMotivo[1]},
+      topRazon: razonesArr[0] ? {texto:razonesArr[0].texto, n:razonesArr[0].n} : null,
+      conRazon
+    });
+  });
+  return out;
+}
+function patronMotivoTexto(e){
+  const t = e.topMotivo;
+  const mismo = e.nEpisodios>=3 && t.n/e.nEpisodios >= 0.7;
+  let txt = t.label+" — "+t.n+" de "+e.nEpisodios+" episodio"+(e.nEpisodios===1?"":"s");
+  if(e.topRazon) txt += " · Razón más repetida: «"+e.topRazon.texto+"» ("+e.topRazon.n+" de "+e.conRazon+" con razón)";
+  return {txt, mismo};
+}
+
+function ComiteAusentismo({comiteRecords, monthKeys, excludedMotivos, plantel}){
+  const [ventana, setVentana] = useKeptState("cm.ventana", 12);
+  const [minSel, setMinSel] = useKeptState("cm.min", null);       // null = automático (2/3 de los meses de la ventana)
+  const [soloVig, setSoloVig] = useKeptState("cm.vigentes", true);
+  const [verTodos, setVerTodos] = useKeptState("cm.todos", false);
+  const [abierto, setAbierto] = useState(null);
+  const [search, setSearch] = useState("");
+  const hasPlantel = !!(plantel && plantel.length);
+  const plantelBy = useMemo(()=> new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p])), [plantel]);
+  const monthsWin = useMemo(()=> monthKeys.slice(-Math.min(ventana, monthKeys.length)), [monthKeys, ventana]);
+  const N = monthsWin.length;
+  const minAuto = Math.max(1, Math.ceil(N*2/3));
+  const minMeses = Math.min(Math.max(1, N), Math.max(1, minSel!=null ? minSel : minAuto));
+
+  const todos = useMemo(()=>{
+    let list = analizarComite(comiteRecords, monthsWin, excludedMotivos).map(e=>{
+      const p = plantelBy.get(e.key);
+      return {...e, estado:(p&&p.estado)||"", unidad:(p&&p.unidad)||e.unidad,
+        deptSector:[(p&&p.departamento)||e.departamento, (p&&p.sector)||e.sector].filter(Boolean).join(" - ")};
+    });
+    if(hasPlantel && soloVig) list = list.filter(e=>e.estado==="Vigente");
+    // puesto en el ranking por días (para ver que el microausentismo no se detecta con ese ranking)
+    const porDias = list.slice().sort((a,b)=>b.total-a.total || a.legajo.localeCompare(b.legajo));
+    const pos = new Map(porDias.map((e,i)=>[e.key, i+1]));
+    return list.map(e=>({...e, puesto:pos.get(e.key), micro: e.mesesConInicio>=minMeses}));
+  }, [comiteRecords, monthsWin, excludedMotivos, plantelBy, hasPlantel, soloVig, minMeses]);
+
+  const micro = useMemo(()=> todos.filter(e=>e.micro), [todos]);
+  const q = normTxt(search);
+  const base = (verTodos ? todos : micro).filter(e=>!q || normTxt(e.legajo).includes(q) || normTxt(e.nombre).includes(q));
+  const sortC = useTableSort(base, {
+    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"}, deptSector:{get:e=>e.deptSector||"", type:"text"},
+    ap:{get:e=>e.ap, type:"num"}, anp:{get:e=>e.anp, type:"num"}, enf:{get:e=>e.enf, type:"num"}, total:{get:e=>e.total, type:"num"},
+    eps:{get:e=>e.nEpisodios, type:"num"}, meses:{get:e=>e.mesesConInicio, type:"num"}, puesto:{get:e=>e.puesto, type:"num"}, patron:{get:e=>e.topMotivo.label, type:"text"}
+  }, {key:"meses", dir:"desc"});
+  const sum = (arr, f) => arr.reduce((a,e)=>a+f(e), 0);
+
+  function imprimir(){
+    const e = escHtml;
+    const filas = sortC.sorted.map(x=>{
+      const pt = patronMotivoTexto(x);
+      const meses = monthsWin.filter(mk=>x.porMes[mk]).map(mk=>monthLabel(mk)+" ("+x.porMes[mk].dias+")").join(", ");
+      return "<tr><td class='id'>"+e(x.legajo)+"</td><td class='id'>"+e(x.nombre)+"</td><td>"+e(x.unidad||"—")+"</td><td>"+e(x.deptSector||"—")+"</td><td class='n'>"+x.ap+"</td><td class='n'>"+x.anp+"</td><td class='n'>"+x.enf+"</td><td class='n'>"+x.total+"</td><td class='n'>"+x.nEpisodios+"</td><td class='n'>"+x.mesesConInicio+" de "+N+"</td><td>"+e(meses)+"</td><td>"+(pt.mismo ? "<b>Mismo motivo.</b> " : "")+e(pt.txt)+"</td></tr>";
+    }).join("");
+    const css = `
+      @page{size:A4 landscape;margin:10mm;}
+      *{box-sizing:border-box;} body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#000;margin:0;}
+      h2{margin:0 0 4px;font-size:19px;color:#0c2e80;} p{margin:0 0 8px;font-size:11.5px;color:#333;}
+      table{width:100%;border-collapse:collapse;font-size:10px;}
+      thead{display:table-header-group;}
+      th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:#555;padding:3px 4px;border:1px solid #9aa4b5;background:#eef3fb;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      td{padding:3px 4px;border:1px solid #9aa4b5;vertical-align:top;} tr{break-inside:avoid;}
+      td.id{font-weight:700;font-size:11px;} td.n{text-align:right;}
+    `;
+    const rango = N ? monthLabel(monthsWin[0])+" a "+monthLabel(monthsWin[N-1]) : "—";
+    const html = "<h2>Comité de ausentismo — "+(verTodos ? "Empleados con ausencias" : "Microausentismo")+"</h2>"+
+      "<p>Período analizado: últimos "+N+" meses cargados ("+e(rango)+"). Criterio de microausentismo: episodios de ausencia iniciados en al menos "+minMeses+" de los "+N+" meses. "+sortC.sorted.length+" empleado(s) — "+e(new Date().toLocaleDateString("es-AR"))+".</p>"+
+      "<table><thead><tr><th>Legajo</th><th>Empleado</th><th>Unidad</th><th>Departamento - Sector</th><th>Días AP</th><th>Días ANP</th><th>Días ENF</th><th>Total días</th><th>Episodios</th><th>Meses con faltas</th><th>Meses (días)</th><th>Motivo / razón de los episodios</th></tr></thead><tbody>"+filas+"</tbody></table>";
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Comité de ausentismo</title><style>'+css+'</style></head><body>'+html+'</body></html>');
+    win.document.close(); win.focus(); setTimeout(()=>{ win.print(); }, 400);
+  }
+
+  if(!N) return <div className="card table-card"><p className="desc">Todavía no hay datos de ausentismo cargados.</p></div>;
+  const kpiBox = (label, value, hint) => (<div className="card kpi-tile"><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div>{hint && <div className="hint">{hint}</div>}</div>);
+  return (
+    <React.Fragment>
+      <div className="card table-card">
+        <h3>Comité de ausentismo</h3>
+        <p className="caption">Análisis por empleado de los últimos meses cargados: días ausentes AP, ANP y ENF, en qué meses faltó y detección de <b>microausentismo</b> (empleados que faltan casi todos los meses con episodios cortos y repetidos, y por eso no aparecen arriba en el ranking por días). Se aplican los filtros de arriba (Gerencia, Departamento, Sector y Empresa) menos el de Mes, y los motivos que cuentan en Resumen.</p>
+        <div className="filter-row">
+          <label className="hint" style={{display:"flex", alignItems:"center", gap:6}}>Período
+            <select value={ventana} onChange={e=>{ setVentana(parseInt(e.target.value,10)); setMinSel(null); }}>
+              {[3,6,9,12].map(n=>(<option key={n} value={n}>Últimos {n} meses</option>))}
+            </select>
+          </label>
+          <label className="hint" style={{display:"flex", alignItems:"center", gap:6}} title="Cantidad mínima de meses en los que el empleado empezó un episodio de ausencia para considerarlo microausentismo">Microausentismo: faltas en al menos
+            <input type="number" min={1} max={N} value={minMeses} onChange={e=>{ const v=parseInt(e.target.value,10); setMinSel(isNaN(v)?null:Math.min(N,Math.max(1,v))); }} style={{width:64}} /> de {N} meses
+          </label>
+          {minSel!=null && <button type="button" className="btn secondary small" onClick={()=>setMinSel(null)}>Automático ({minAuto})</button>}
+          {hasPlantel && (
+            <label className="motivo-check" style={{cursor:"pointer"}}>
+              <input type="checkbox" checked={soloVig} onChange={e=>setSoloVig(e.target.checked)} /> Solo empleados vigentes
+            </label>
+          )}
+          <label className="motivo-check" style={{cursor:"pointer"}}>
+            <input type="checkbox" checked={verTodos} onChange={e=>setVerTodos(e.target.checked)} /> Ver todos los empleados con ausencias
+          </label>
+          <input type="text" placeholder="Buscar legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:220}} />
+          <button type="button" className="btn secondary print-btn" onClick={imprimir} disabled={!sortC.sorted.length}>Imprimir</button>
+        </div>
+        <div className="kpi-grid">
+          {kpiBox("Con ausencias en el período", fmt(todos.length), N+" meses: "+monthLabel(monthsWin[0])+" a "+monthLabel(monthsWin[N-1]))}
+          {kpiBox("Con microausentismo", fmt(micro.length), todos.length ? fmtPct(micro.length/todos.length*100,1)+" de los que faltaron" : "")}
+          {kpiBox("Días AP / ANP (microausentismo)", fmt(sum(micro,e=>e.ap))+" / "+fmt(sum(micro,e=>e.anp)), "ENF: "+fmt(sum(micro,e=>e.enf))+" días")}
+          {kpiBox("Días AP / ANP (todos)", fmt(sum(todos,e=>e.ap))+" / "+fmt(sum(todos,e=>e.anp)), "ENF: "+fmt(sum(todos,e=>e.enf))+" días")}
+        </div>
+        <div className="caption" style={{display:"flex", gap:14, flexWrap:"wrap", alignItems:"center"}}>
+          <span>Meses con faltas:</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"var(--accent)"}}></span> empezó un episodio ese mes</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"color-mix(in srgb, var(--accent) 35%, var(--surface))"}}></span> solo continuó una ausencia anterior</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"var(--border)"}}></span> sin faltas</span>
+        </div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <SortTh k="legajo" label="Legajo" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="nombre" label="Empleado" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="unidad" label="Unidad" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="deptSector" label="Departamento - Sector" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="ap" label="Días AP" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="anp" label="Días ANP" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="enf" label="Días ENF" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="total" label="Total días" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="eps" label="Episodios" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="meses" label="Meses con episodios" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <th>Meses</th>
+              <SortTh k="puesto" label="Puesto en ranking por días" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="patron" label="Motivo / razón" sort={sortC.sort} toggle={sortC.toggle} />
+              <th></th>
+            </tr></thead>
+            <tbody>
+              {!sortC.sorted.length && <tr><td colSpan="14" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>{verTodos ? "Sin empleados con ausencias con estos filtros." : "No se detectó microausentismo con este criterio (probá bajando la cantidad mínima de meses)."}</td></tr>}
+              {sortC.sorted.map(e=>{
+                const pt = patronMotivoTexto(e);
+                const abre = abierto===e.key;
+                return (
+                  <React.Fragment key={e.key}>
+                    <tr>
+                      <td style={{fontWeight:700}}>{e.legajo}</td>
+                      <td style={{fontWeight:700}}>{e.nombre}</td>
+                      <td>{e.unidad||"—"}</td>
+                      <td>{e.deptSector||"—"}</td>
+                      <td className="num">{fmt(e.ap)}</td><td className="num">{fmt(e.anp)}</td><td className="num">{fmt(e.enf)}</td><td className="num">{fmt(e.total)}</td>
+                      <td className="num">{fmt(e.nEpisodios)}</td>
+                      <td className="num" style={{whiteSpace:"nowrap"}}>{e.mesesConInicio} de {N}{e.micro && <span className="schip bad" style={{marginLeft:6, fontSize:10.5, padding:"2px 7px"}}>Micro</span>}</td>
+                      <td>
+                        <span style={{display:"inline-flex", gap:2}}>
+                          {monthsWin.map(mk=>{ const d = e.porMes[mk];
+                            const bg = d && d.inicios ? "var(--accent)" : d ? "color-mix(in srgb, var(--accent) 35%, var(--surface))" : "var(--border)";
+                            return <span key={mk} title={monthLabel(mk)+": "+(d ? d.dias+" día(s) ausente(s), "+d.inicios+" episodio(s) iniciado(s)" : "sin faltas")} style={{width:11, height:16, borderRadius:3, background:bg}}></span>; })}
+                        </span>
+                      </td>
+                      <td className="num">{e.puesto}</td>
+                      <td style={{minWidth:260}}>{pt.mismo && <span className="schip warn" style={{marginRight:6, fontSize:10.5, padding:"2px 7px"}}>Mismo motivo</span>}{pt.txt}</td>
+                      <td><button type="button" className="btn secondary small" onClick={()=>setAbierto(abre ? null : e.key)}>{abre ? "Cerrar" : "Ver episodios"}</button></td>
+                    </tr>
+                    {abre && (
+                      <tr><td colSpan="14" style={{background:"var(--plane)"}}>
+                        <div className="hint" style={{fontWeight:700, marginBottom:4}}>Episodios de {e.nombre} — {e.nEpisodios} en {e.mesesConFaltas} mes(es)</div>
+                        <table style={{width:"100%"}}>
+                          <thead><tr><th>Inicio</th><th>Fin</th><th className="num">Días</th><th>Motivo</th><th>Razón</th><th>Agrupador</th></tr></thead>
+                          <tbody>
+                            {e.episodios.map((ep,i)=>(<tr key={i}><td>{fmtDateFromTs(ep.inicioTs)}</td><td>{fmtDateFromTs(ep.finTs)}</td><td className="num">{ep.dias}</td><td>{ep.motivo}</td><td>{ep.razon||"—"}</td><td>{ep.presidencia||"—"}</td></tr>))}
+                          </tbody>
+                        </table>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo, comiteRecords, monthKeys, excludedMotivos}){
+  const [vista, setVista] = useKeptState("rk.vista", "ranking"); // "ranking" | "comite"
   const [unitFilter, setUnitFilter] = useState("__all");
   const [soloVigentes, setSoloVigentes] = useState(true);
   const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
@@ -2576,13 +2821,18 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
 
   return (
     <div className="tabpanel">
-      {!ocultarFiltrosMotivo && <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
+      <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+        <button type="button" className={"btn"+(vista==="ranking" ? "" : " secondary")} onClick={()=>setVista("ranking")}>Ranking de empleados</button>
+        <button type="button" className={"btn"+(vista==="comite" ? "" : " secondary")} onClick={()=>setVista("comite")}>Comité de ausentismo</button>
+      </div>
+      {vista==="comite" && <ComiteAusentismo comiteRecords={comiteRecords||[]} monthKeys={monthKeys||[]} excludedMotivos={excludedMotivos} plantel={plantel} />}
+      {vista==="ranking" && !ocultarFiltrosMotivo && <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
         <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={idIncluded} onChange={setIdIncluded}
           defaultKeys={idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
         <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
           defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />
       </div>}
-      <div className="card table-card">
+      {vista==="ranking" && <div className="card table-card">
         <h3>Ranking de empleados</h3>
         <p className="caption">Suma filas cuyo Id Motivo y Agrupador cuadro presidencia estén tildados arriba — independiente del resto de filtros de ausentismo.</p>
         <div className="filter-row">
@@ -2627,7 +2877,7 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
             </tbody>
           </table>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -4488,6 +4738,11 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
     if(!parsed) return [];
     return parsed.records.filter(r => r.valid && passesFilters(r, FILTERS, empresaIncluded, true));
   }, [parsed, FILTERS, empresaIncluded]);
+  // Comité de ausentismo: mismos filtros (gerencia, departamento, sector, empresa) pero SIN el de Mes, porque analiza varios meses seguidos
+  const comiteRecords = useMemo(() => {
+    if(!parsed) return [];
+    return parsed.records.filter(r => r.valid && passesFilters(r, FILTERS, empresaIncluded, false));
+  }, [parsed, FILTERS, empresaIncluded]);
   const scopeEmpleados = useMemo(() => new Set(scopeRecords.map(r=>r.legajo.toUpperCase())).size, [scopeRecords]);
   const scopeUnitsMap = useMemo(() => buildUnitsMap(scopeRecords), [scopeRecords]);
   const scopeMotivoUniverse = useMemo(() => {
@@ -4856,7 +5111,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
           {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
-          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} />}
+          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} puedeCitar={!!perms.citar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
