@@ -34,15 +34,20 @@ const SYNC_BATCH_SIZE = 1000;
 
 // Trae solo las filas nuevas/modificadas desde "sinceIso" (updated_at > sinceIso).
 // Sin sinceIso, trae todo — se usa una sola vez, la primera vez que se abre en un navegador.
-async function fetchRowsSince(table, sinceIso){
+// tieField (opcional): columna única para desempatar el orden. Muchas filas se guardan con el mismo updated_at (mismo milisegundo),
+// y sin desempate dos páginas seguidas podrían repetir o saltear filas. onProgress(cantidad) avisa cuántas filas se bajaron.
+async function fetchRowsSince(table, sinceIso, onProgress, tieField){
   let from = 0, out = [];
   while(true){
     let q = supabaseClient.from(table).select("*");
     if(sinceIso) q = q.gt("updated_at", sinceIso);
-    q = q.order("updated_at", {ascending:true}).range(from, from+SYNC_PAGE_SIZE-1);
+    q = q.order("updated_at", {ascending:true});
+    if(tieField) q = q.order(tieField, {ascending:true});
+    q = q.range(from, from+SYNC_PAGE_SIZE-1);
     const {data, error} = await q;
     if(error) throw error;
     out = out.concat(data);
+    if(onProgress) onProgress(out.length);
     if(!data.length || data.length < SYNC_PAGE_SIZE) break;
     from += SYNC_PAGE_SIZE;
   }
@@ -4171,6 +4176,11 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [cloudError, setCloudError] = useState(null);
+  // estado de la descarga desde el servidor: "pending" (bajando), "ok" (terminó) o "error" (falló; se reintenta sola)
+  const [serverState, setServerState] = useState("pending");
+  const [dlRows, setDlRows] = useState(0);        // registros de ausentismo descargados hasta ahora (primer ingreso)
+  const [retryInfo, setRetryInfo] = useState(0);  // cantidad de reintentos automáticos hechos
+  const loadRef = useRef(null);
   const [uploadNotice, setUploadNotice] = useState(null); // aviso no bloqueante de la última carga (ej. columna opcional faltante)
   const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
 
@@ -4255,9 +4265,14 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
 
   useEffect(()=>{
     let cancelled = false;
-    (async ()=>{
+    let retryTimer = null;
+    // Si la descarga falla (por ejemplo una conexión de celular que se corta), se reintenta sola unas veces; nunca se le pide a la
+    // persona que suba el archivo (eso lo tiene solo el administrador).
+    async function run(attempt){
       setCloudLoading(true);
       setCloudError(null);
+      setServerState("pending");
+      setDlRows(0);
       try{
         // 1) primero, lo que ya quedó guardado en este navegador de la vez pasada — se ve al instante, sin red.
         const [cachedAusRows, cachedAusSync, cachedPlantelRows, cachedPlantelSync] = await Promise.all([
@@ -4275,14 +4290,15 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           const records = ausRows.map(ausRowToRecord);
           const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
           prevAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
-          applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+          // en un reintento con datos ya en pantalla no se vuelven a aplicar (no se pierden los filtros que la persona ya eligió)
+          if(!(attempt>0 && parsedRef.current)) applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
         }
         setCloudLoading(false);
 
         // 2) después, en segundo plano, solo lo nuevo/modificado desde la última vez (no vuelve a bajar todo).
         const [newPlantelRows, newAusRows] = await Promise.all([
-          fetchRowsSince(PLANTEL_TABLE, cachedPlantelSync),
-          fetchRowsSince(AUSENTISMO_TABLE, cachedAusSync)
+          fetchRowsSince(PLANTEL_TABLE, cachedPlantelSync, null, "legajo"),
+          fetchRowsSince(AUSENTISMO_TABLE, cachedAusSync, n=>{ if(!cancelled) setDlRows(n); }, "id")
         ]);
         if(cancelled) return;
 
@@ -4323,12 +4339,19 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           idbSet("ausentismo_rows", ausRows);
           idbSet("ausentismo_lastSync", maxUpdatedAt(newAusRows, cachedAusSync));
         }
+        if(!cancelled){ setServerState("ok"); setRetryInfo(0); }
       }catch(err){
-        if(!cancelled) setCloudError("No se pudieron cargar los datos guardados en el servidor: " + (err && err.message ? err.message : String(err)));
+        if(cancelled) return;
+        setServerState("error");
+        setCloudError("No se pudieron cargar los datos guardados en el servidor: " + (err && err.message ? err.message : String(err)));
+        const esperas = [4000, 10000, 20000, 40000];
+        if(attempt < esperas.length){ setRetryInfo(attempt+1); retryTimer = setTimeout(()=>run(attempt+1), esperas[attempt]); }
       }
       if(!cancelled) setCloudLoading(false);
-    })();
-    return ()=>{ cancelled = true; };
+    }
+    loadRef.current = ()=>{ if(retryTimer) clearTimeout(retryTimer); run(0); };
+    run(0);
+    return ()=>{ cancelled = true; if(retryTimer) clearTimeout(retryTimer); };
   }, []);
 
   const handleFile = useCallback((file) => {
@@ -4688,16 +4711,26 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
         </div>
       )}
 
-      {cloudLoading && (
-        <div className="upload-card">
-          <div className="hint">Cargando datos guardados en el servidor…</div>
+      {/* Primer ingreso en este dispositivo: todavía no hay datos guardados acá y se están bajando del servidor. Hasta que termine NO se
+          ofrece subir el archivo (eso lo hace solo el administrador); se explica que en breve se podrá ver la información. */}
+      {!parsed && !error && (cloudLoading || serverState==="pending") && (
+        <div className="upload-card" style={{flexDirection:"column", alignItems:"flex-start", gap:8}}>
+          <div style={{fontWeight:700, fontSize:15}}>Es su primer ingreso desde este dispositivo</div>
+          <div className="hint" style={{fontSize:13}}>Se están descargando los datos del servidor. <b>En breve va a poder visualizar la información</b>: no hace falta que haga nada ni que cargue ningún archivo. Esto pasa solo la primera vez; las próximas veces se abre al instante.</div>
+          <div className="chip ok"><span className="dot"></span>{dlRows>0 ? "Registros descargados: "+fmt(dlRows) : "Conectando con el servidor…"}</div>
         </div>
       )}
-
-      {!cloudLoading && !parsed && !error && !perms.cargar && (
+      {!parsed && !error && !cloudLoading && serverState==="error" && (
+        <div className="upload-card" style={{flexDirection:"column", alignItems:"flex-start", gap:8}}>
+          <div style={{fontWeight:700, fontSize:15}}>Todavía no se pudieron descargar los datos</div>
+          <div className="hint" style={{fontSize:13}}>Seguramente sea la conexión. Se reintenta automáticamente{retryInfo>0 && retryInfo<=4 ? " (reintento "+retryInfo+" de 4)" : ""}; en cuanto llegue la información se va a mostrar sola. No hace falta cargar ningún archivo.</div>
+          <button type="button" className="btn secondary" onClick={()=>{ if(loadRef.current) loadRef.current(); }}>Reintentar ahora</button>
+        </div>
+      )}
+      {!cloudLoading && serverState==="ok" && !parsed && !error && !perms.cargar && (
         <div className="upload-card"><div className="hint">Todavía no hay datos cargados en el servidor. Cuando RRHH o el Administrador los carguen vas a poder verlos acá.</div></div>
       )}
-      {!cloudLoading && !parsed && !error && perms.cargar && (
+      {!cloudLoading && serverState==="ok" && !parsed && !error && perms.cargar && (
         <div className="upload-card">
           <div className="upload-icon">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2Z"/></svg>
