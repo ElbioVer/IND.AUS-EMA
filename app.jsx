@@ -167,7 +167,7 @@ function plantelRecordToRow(p){
     fecha_nacimiento: p.nacimientoTs!=null ? tsToISODate(p.nacimientoTs) : null,
     estado: p.estado||"", unidad: p.unidad||"", sector: p.sector||"", gerencia: p.gerencia||"",
     departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
-    puesto: p.puesto||"", jefe: p.jefe||"",
+    puesto: p.puesto||"", jefe: p.jefe||"", celular: p.celular||"",
     updated_at: new Date().toISOString()
   };
 }
@@ -175,7 +175,7 @@ function plantelRowToRecord(row){
   return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
     nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
     gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||"",
-    puesto:row.puesto||"", jefe:row.jefe||""};
+    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||""};
 }
 
 function LoginForm({onSignedIn}){
@@ -464,12 +464,13 @@ const PLANTEL_FIELD_ALIASES = {
   empresa: ["Empresa"],
   grupo: ["Grupo"],
   puesto: ["Puesto"],
-  jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"]
+  jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"],
+  celular: ["Celular","Teléfono","Telefono","Teléfono celular","Telefono celular","Tel. Celular","Tel","Tel.","Móvil","Movil"]
 };
 const PLANTEL_REQUIRED_FIELDS = ["legajo","fechaAlta"];
 const PLANTEL_FIELD_LABELS = {legajo:"Legajo", nombre:"Apellido y Nombre", fechaAlta:"Fecha de Alta", fechaBaja:"Fecha de Baja",
-  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)"};
-const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe"];
+  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)"};
+const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular"];
 function findColByAliases(headerRow, aliases){
   for(let a=0;a<aliases.length;a++){
     const idx = findColIndex(headerRow, aliases[a]);
@@ -1717,7 +1718,7 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   const changedRecords = [];
   const errors = [];
   let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
-  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe"];
+  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular"];
   dataRows.forEach((row, i) => {
     const excelRow = i + 2;
     const legajo = cellStr(row, mapping.legajo).trim();
@@ -1756,7 +1757,8 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
       empresa: cellStr(row, mapping.empresa),
       grupo: cellStr(row, mapping.grupo),
       puesto: cellStr(row, mapping.puesto),
-      jefe: cellStr(row, mapping.jefe)
+      jefe: cellStr(row, mapping.jefe),
+      celular: cellStr(row, mapping.celular)
     };
     seen.add(legajoKey);
     const prev = existingByLegajo.get(legajo);
@@ -3102,13 +3104,17 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     const {data, error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("legajo", legajoSel);
     if(error) throw error;
     const motLabel = new Map(parsed.idMotivoUniverse.map(m=>[String(m.key).toUpperCase(), m.label]));
+    motLabel.set("MANUAL", "Citación manual a Medicina Laboral");
     const pref = sanitizeIdSeg(legajoSel)+"-";
-    const casos = (data||[]).map(row=>{
+    // los casos provisorios (empleado citado a mano antes de figurar en Crónicos) van al final: lo ya copiado al caso real no se repite
+    const vistas = new Set();
+    const casos = (data||[]).slice().sort((a,b)=> (esCasoManualId(a.id)?1:0)-(esCasoManualId(b.id)?1:0)).map(row=>{
       const m = casoRowToManual(row);
       const movs = [
         ...m.observaciones.map(o=>({...o, tipoMov:"Observación"})),
         ...m.acciones.map(o=>({...o, tipoMov:"Acción"}))
-      ].filter(o=>o.ts>=desdeTs).sort((a,b)=>a.ts-b.ts);
+      ].filter(o=>o.ts>=desdeTs && !(o.id && vistas.has(o.id))).sort((a,b)=>a.ts-b.ts);
+      movs.forEach(o=>{ if(o.id) vistas.add(o.id); });
       let mk = String(row.id||"");
       if(mk.startsWith(pref)) mk = mk.slice(pref.length);
       mk = mk.replace(/-[^-]*$/, "");
@@ -3244,6 +3250,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
               <div><span className="lbl">Sector</span><span className="val">{fichaDato("sector") || "—"}</span></div>
               <div><span className="lbl">Puesto</span><span className="val">{fichaDato("puesto") || "—"}</span></div>
               <div><span className="lbl">Jefe directo</span><span className="val">{fichaDato("jefe") || "—"}</span></div>
+              <div><span className="lbl">Celular</span><span className="val">{(plantelFicha && plantelFicha.celular) || "—"}</span></div>
               <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
               <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
             </div>
@@ -3567,6 +3574,63 @@ async function saveCita(obj){
   if(error) throw error;
   return obj;
 }
+/* ---- citación de un empleado que todavía no figura en Crónicos ----
+   Si todavía no se actualizó la base de ausentes, se lo cita igual (por nombre o legajo). Su "caso" provisorio es <legajo>-MANUAL-<año>:
+   ahí se guardan las anotaciones de la Dra. Cuando el empleado aparece como caso de Crónicos, Medicina Laboral toma los datos médicos
+   del caso real y copia a ese caso lo que escribió la Dra. (ver MedicinaLaboralTab). */
+function manualCaseId(legajo, fechaISO){ return cronicoCaseId(legajo, "MANUAL", String(fechaISO||"").slice(0,4) || new Date().getFullYear()); }
+function esCasoManualId(id){ return /-MANUAL-\d+$/.test(String(id||"")); }
+// empleados que se pueden citar a mano: activos del plantel y, si no están en el plantel, los que figuran en las filas de ausentismo
+function employeeOptionsForCita(plantel, records){
+  const map = new Map(), enPlantel = new Set();
+  (plantel||[]).forEach(p=>{
+    const k = (p.legajo||"").toUpperCase(); if(!k) return;
+    enPlantel.add(k);
+    if(p.bajaTs==null) map.set(k, {legajo:p.legajo, nombre:p.nombre||"", unidad:p.unidad||""});
+  });
+  (records||[]).forEach(r=>{
+    if(!r.legajo) return;
+    const k = r.legajo.toUpperCase();
+    if(enPlantel.has(k) || map.has(k)) return;
+    map.set(k, {legajo:r.legajo, nombre:r.nombre||"", unidad:r.unidad||""});
+  });
+  return Array.from(map.values())
+    .map(e=>({value:e.legajo, legajo:e.legajo, nombre:(e.nombre||"").toUpperCase(), unidad:e.unidad, label:e.legajo+" "+(e.nombre||"").toUpperCase()}))
+    .sort((a,b)=> a.nombre.localeCompare(b.nombre,"es") || a.value.localeCompare(b.value,"es"));
+}
+function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar}){
+  const [leg, setLeg] = useState("");
+  const [fecha, setFecha] = useState(defaultFecha||"");
+  const [nota, setNota] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(()=>{ if(!fecha && defaultFecha) setFecha(defaultFecha); }, [defaultFecha]);
+  const emp = options.find(o=>o.value===leg) || null;
+  async function go(){
+    if(!emp || !fecha){ setMsg("Elegí el empleado y la fecha de la citación."); return; }
+    if(minFecha && fecha<minFecha){ setMsg("La fecha no puede ser anterior al "+dateKeyToLabel(minFecha)+"."); return; }
+    setBusy(true); setMsg("Guardando...");
+    try{
+      const r = await onCitar(emp, fecha, nota.trim());
+      setMsg(r || "Citado.");
+      if(!r || !/^Ya /.test(r)){ setLeg(""); setNota(""); }
+    }catch(err){ setMsg("No se pudo citar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(false);
+  }
+  return (
+    <details className="card" style={{padding:"10px 14px"}}>
+      <summary style={{cursor:"pointer", fontWeight:700}}>Citar a un empleado que todavía no figura en Crónicos</summary>
+      <p className="desc" style={{margin:"8px 0"}}>Si todavía no se actualizaron los ausentes, buscalo por nombre o legajo y elegí la fecha: queda en los Citados de Medicina Laboral de ese día. Cuando se actualice la base, se toman sus datos médicos de Crónicos y lo que escriba la Dra. se suma a su caso.</p>
+      <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end"}}>
+        <div className="field"><label>Empleado</label><SearchSelect options={options} value={leg} onChange={setLeg} placeholder="Buscar legajo o nombre…" /></div>
+        <div className="field"><label>Fecha de la citación</label><input type="date" value={fecha} min={minFecha||undefined} onChange={e=>setFecha(e.target.value)} /></div>
+        <div className="field"><label>Motivo de la cita (opcional)</label><input type="text" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Ej.: control, certificado…" style={{minWidth:220}} /></div>
+        <button type="button" className="btn" onClick={go} disabled={busy || !emp || !fecha}>Citar</button>
+        {msg && <span className="hint">{msg}</span>}
+      </div>
+    </details>
+  );
+}
 // Guarda un cambio en un caso de Crónicos leyendo ANTES el caso tal como está en el servidor y aplicando solo ese cambio
 // (así nunca se pisa lo que guardó otro usuario). `patch` es un objeto, o una función (estadoActual) => objeto | null.
 // Devuelve el estado final guardado, o null si no había nada que cambiar. Lo usan Crónicos y Medicina Laboral.
@@ -3672,8 +3736,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [editingObs, setEditingObs] = useState(null); // {caseId, field, obsId, texto}
   const [citas, setCitas] = useState(new Map());       // citaciones a Medicina Laboral (id -> cita)
   const [citaBusy, setCitaBusy] = useState(null);      // caso cuya citación se está guardando
-  // día que se cita desde esta pantalla: el último día cargado (el "hoy" de la información)
+  // Día que se cita desde esta pantalla. Por defecto el último día cargado (el "hoy" de la información), pero se puede elegir una fecha
+  // posterior (la Dra. no viene todos los días): `fechaCita`. La columna "Medicina Laboral" muestra la citación de ESE día.
   const citaFecha = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
+  const [citaFechaSel, setCitaFechaSel] = useKeptState("cron.citaFecha", null);
+  const fechaCita = citaFechaSel && citaFechaSel>=citaFecha ? citaFechaSel : citaFecha;
+  const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
 
   // Lee de Supabase todos los casos (lo guardado por cualquier usuario) y las citaciones a Medicina Laboral.
   async function loadFromServer(){
@@ -3712,6 +3780,18 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const motivoEfectivo = motivosFijos || motivoIncluded;
   const cases = useMemo(()=> buildCronicoCases(parsed.records, plantel, motivoEfectivo), [parsed, plantel, motivoEfectivo]);
 
+  // citaciones pendientes (no anuladas ni atendidas, de hoy en adelante) por legajo: para avisar si ya está citado para otro día
+  const pendientesPorLegajo = useMemo(()=>{
+    const m = new Map();
+    citas.forEach(ct=>{
+      if(ct.anulada || ct.atendido || !citaFecha || ct.fecha<citaFecha) return;
+      const k = String(ct.legajo).toUpperCase();
+      if(!m.has(k)) m.set(k, []);
+      m.get(k).push(ct);
+    });
+    m.forEach(arr=>arr.sort((a,b)=>a.fecha<b.fecha?-1:1));
+    return m;
+  }, [citas, citaFecha]);
   const casesFull = useMemo(()=> cases.map(c=>{
     const manual = casesManual.get(c.id) || {};
     const inicioManualTs = manual.inicioManualTs!=null ? manual.inicioManualTs : null;
@@ -3728,17 +3808,39 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : [],
       razonSembrada: !!manual.razonSembrada,
       // citación vigente de este caso para el día de trabajo (si la hay y no fue anulada)
-      cita: (()=>{ const ct = citas.get(c.id+"|"+citaFecha); return ct && !ct.anulada ? ct : null; })()
+      // citación vigente de este caso para el día elegido (también si se cargó a mano antes de que el empleado figurara en Crónicos)
+      cita: (()=>{
+        let ct = citas.get(c.id+"|"+fechaCita);
+        if(!ct || ct.anulada) ct = citas.get(manualCaseId(c.legajo, fechaCita)+"|"+fechaCita);
+        return ct && !ct.anulada ? ct : null;
+      })(),
+      // otra citación pendiente de este empleado para un día distinto del elegido (solo para avisarlo)
+      otraCita: (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).find(ct=>ct.fecha!==fechaCita) || null
     };
-  }), [cases, casesManual, citas, citaFecha]);
+  }), [cases, casesManual, citas, fechaCita, pendientesPorLegajo]);
+
+  // Citar un empleado que todavía no figura en Crónicos (se carga a mano por nombre o legajo)
+  async function citarManual(emp, fecha, nota){
+    if(!puedeCitar) return "No tenés permiso para citar.";
+    const real = cases.find(c=>String(c.legajo).toUpperCase()===String(emp.legajo).toUpperCase()) || null;
+    const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
+    const id = casoId+"|"+fecha;
+    const ex = citas.get(id);
+    if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
+    const obj = await saveCita({id, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
+      motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
+      fecha, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+    setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
+    return "Citado para el "+dateKeyToLabel(fecha)+(real ? " (ya figura en Crónicos)." : ". Queda en Medicina Laboral.");
+  }
 
   // Citar / anular la citación a Medicina Laboral desde la lista de Crónicos
   async function citar(c){
-    if(!puedeCitar || !citaFecha) return;
+    if(!puedeCitar || !fechaCita) return;
     setCitaBusy(c.id); setSaveStatus("Guardando...");
     try{
-      const obj = await saveCita({id:c.id+"|"+citaFecha, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
-        fecha:citaFecha, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+      const obj = await saveCita({id:c.id+"|"+fechaCita, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
+        fecha:fechaCita, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
       setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
       setSaveStatus("Citado a Medicina Laboral");
     }catch(err){ setSaveStatus("No se pudo citar: "+(err && err.message ? err.message : String(err))); }
@@ -4030,6 +4132,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       {!motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={setMotivoIncluded}
         defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
 
+      {puedeCitar && <CitarEmpleadoBox options={empOptions} minFecha={citaFecha} defaultFecha={fechaCita} onCitar={citarManual} />}
+
       {!motivoEfectivo.size ? (
         <div className="card table-card">
           <h3>Crónicos</h3>
@@ -4049,6 +4153,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
               {Array.from(CRONICOS_CODIGOS_SALUD).map(k=>(<option key={k} value={k}>Solo {k} ({saludCount[k]||0})</option>))}
             </select>
             <MultiSelect label="Unidad de negocio" options={unidadOptions} selected={unidadSel} onChange={setUnidadSel} allLabel="Todas las unidades" />
+            {puedeCitar && (
+              <label style={{display:"inline-flex", gap:6, alignItems:"center", fontSize:13}} title="La Dra. no viene todos los días: elegí para qué día se cita al tildar «Citar» en la columna Medicina Laboral">
+                Citar para el día
+                <input type="date" value={fechaCita} min={citaFecha||undefined} onChange={e=>{ if(e.target.value) setCitaFechaSel(e.target.value); }} style={{fontSize:12.5, padding:"5px 6px"}} disabled={!citaFecha} />
+              </label>
+            )}
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
             <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
@@ -4126,10 +4236,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                             <span style={{fontWeight:700}}>Citado {dateKeyToLabel(c.cita.fecha).slice(0,5)}</span>
                           </label>
                         ) : puedeCitar ? (
-                          <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title={"Citar a Medicina Laboral para el "+dateKeyToLabel(citaFecha)}>
-                            <input type="checkbox" checked={false} onChange={()=>citar(c)} disabled={citaBusy===c.id || !citaFecha} /> Citar
+                          <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title={"Citar a Medicina Laboral para el "+dateKeyToLabel(fechaCita)}>
+                            <input type="checkbox" checked={false} onChange={()=>citar(c)} disabled={citaBusy===c.id || !fechaCita} /> Citar {dateKeyToLabel(fechaCita).slice(0,5)}
                           </label>
                         ) : "—"}
+                        {!(c.cita && c.cita.atendido) && c.otraCita && <div className="hint" style={{marginTop:2}}>Ya citado el {dateKeyToLabel(c.otraCita.fecha).slice(0,5)}</div>}
                       </td>
                       <td style={{minWidth:220}}>
                         {c.observaciones.length>0 && (
@@ -4237,12 +4348,65 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
   const ausentesById = useMemo(()=> new Map(ausentes.map(c=>[c.id, c])), [ausentes]);
 
   const citasDelDia = useMemo(()=> Array.from(citas.values()).filter(c=>c.fecha===fechaISO && !c.anulada), [citas, fechaISO]);
-  const citaDe = id => { const c = citas.get(id+"|"+fechaISO); return c && !c.anulada ? c : null; };
+  // citación de ese día de un caso; si el empleado se citó a mano antes de figurar en Crónicos, la citación está bajo su caso provisorio
+  const citaDe = (id, legajo) => {
+    let c = citas.get(id+"|"+fechaISO);
+    if((!c || c.anulada) && legajo) c = citas.get(manualCaseId(legajo, fechaISO)+"|"+fechaISO);
+    return c && !c.anulada ? c : null;
+  };
 
-  // elementos unificados para las tablas
-  const itemDeAusente = c => ({key:c.id, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio, dias:c.dias});
-  const itemDeCita = ct => { const live = ausentesById.get(ct.casoId);
-    return live ? {...itemDeAusente(live), nota:ct.nota} : {key:ct.casoId, casoId:ct.casoId, legajo:ct.legajo, nombre:ct.nombre, unidad:ct.unidad, motivo:ct.motivo, anio:ct.anio, dias:null, nota:ct.nota}; };
+  // Caso real de Crónicos de cada legajo (si ya figura) y datos del plantel (celular)
+  const casosVigentes = useMemo(()=>{
+    const m = new Map();
+    buildCronicoCases(parsed.records, plantel, CRONICOS_DEFAULT_MOTIVOS).forEach(c=>m.set(String(c.legajo).toUpperCase(), c));
+    return m;
+  }, [parsed, plantel]);
+  const realDe = legajo => casosVigentes.get(String(legajo).toUpperCase()) || null;
+  const plantelPorLegajo = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p])), [plantel]);
+  const celularDe = legajo => ((plantelPorLegajo.get(String(legajo).toUpperCase())||{}).celular)||"";
+  const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
+  // casos provisorios (citaciones manuales) de un legajo
+  const manualIdsDe = legajo => Array.from(manual.keys()).filter(id=>esCasoManualId(id) && id.startsWith(sanitizeIdSeg(legajo)+"-MANUAL-"));
+
+  // Traspaso: cuando un empleado citado a mano ya figura como caso de Crónicos, lo que escribió la Dra. en su caso provisorio se copia
+  // al caso real (sin repetir lo ya copiado). Lo hace quien puede editar, una vez por cada novedad.
+  const traspasoRef = useRef(new Set());
+  useEffect(()=>{
+    if(!puedeEditar || !dbReady) return;
+    manual.forEach((m, id)=>{
+      if(!esCasoManualId(id) || !(m.observaciones||[]).length) return;
+      const legKey = id.replace(/-MANUAL-\d+$/, "");
+      const real = Array.from(casosVigentes.values()).find(c=>sanitizeIdSeg(c.legajo)===legKey);
+      if(!real) return;
+      const have = new Set(((manual.get(real.id)||{}).observaciones||[]).map(o=>o.id));
+      const faltan = m.observaciones.filter(o=>!have.has(o.id));
+      if(!faltan.length) return;
+      const key = id+">"+real.id+":"+faltan.map(o=>o.id).join(",");
+      if(traspasoRef.current.has(key)) return;
+      traspasoRef.current.add(key);
+      enCola(real.id, async ()=>{
+        const nm = await persistCronicoCase({id:real.id, legajo:real.legajo, anio:real.anio}, base=>{
+          const h = new Set((base.observaciones||[]).map(o=>o.id));
+          const add = faltan.filter(o=>!h.has(o.id));
+          return add.length ? {observaciones:[...(base.observaciones||[]), ...add]} : null;
+        }, manualRef.current.get(real.id));
+        if(nm && aliveRef.current){ const n = new Map(manualRef.current); n.set(real.id, nm); manualRef.current = n; setManual(n); setStatus("Se sumó a Crónicos lo anotado a "+(real.nombre||real.legajo)); }
+      }).catch(()=>{ traspasoRef.current.delete(key); });
+    });
+  }, [manual, casosVigentes, puedeEditar, dbReady]);
+
+  // elementos unificados para las tablas. dataId = caso donde están los datos médicos (el real de Crónicos si ya existe).
+  const itemDeAusente = c => ({key:c.id, casoId:c.id, dataId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio, dias:c.dias});
+  const itemDeCita = ct => {
+    const real = realDe(ct.legajo);
+    const live = ausentesById.get(ct.casoId) || (real ? ausentesById.get(real.id) : null);
+    if(live) return {...itemDeAusente(live), nota:ct.nota};
+    if(real){
+      const d = dTs!=null ? Math.round((dTs-real.inicioTs)/86400000)+1 : null;
+      return {key:ct.casoId, casoId:ct.casoId, dataId:real.id, legajo:ct.legajo, nombre:ct.nombre||real.nombre||"", unidad:real.unidad||ct.unidad, motivo:real.motivoLabel||ct.motivo, anio:real.anio, dias:d>=1 ? d : null, nota:ct.nota};
+    }
+    return {key:ct.casoId, casoId:ct.casoId, dataId:ct.casoId, legajo:ct.legajo, nombre:ct.nombre, unidad:ct.unidad, motivo:ct.motivo, anio:ct.anio, dias:null, nota:ct.nota};
+  };
   const q = normTxt(search);
   const pasa = it => !q || normTxt(it.legajo).includes(q) || normTxt(it.nombre).includes(q);
   const itemsCitados = citasDelDia.map(itemDeCita).filter(pasa).sort((a,b)=>String(a.nombre).localeCompare(String(b.nombre),"es"));
@@ -4250,28 +4414,46 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
   const vistos = citasDelDia.filter(c=>c.atendido).sort((a,b)=>a.atendidoTs-b.atendidoTs);
 
   // anotaciones de la Dra. de esa jornada (están guardadas como observaciones del caso, marcadas como Medicina Laboral)
-  const anotacionesDelDia = casoId => ((manual.get(casoId)||{}).observaciones||[]).filter(o=>o.origen==="medicina" && o.fechaVisita===fechaISO).sort((a,b)=>a.ts-b.ts);
+  // Todas las observaciones de un empleado: las de su caso real de Crónicos y las de sus casos provisorios (sin repetir las ya copiadas).
+  const obsDe = item => {
+    const seen = new Map();
+    new Set([item.casoId, item.dataId, ...manualIdsDe(item.legajo)]).forEach(id=>((manual.get(id)||{}).observaciones||[]).forEach(o=>{ if(!seen.has(o.id)) seen.set(o.id, o); }));
+    return Array.from(seen.values());
+  };
+  const anotacionesDelDia = item => obsDe(item).filter(o=>o.origen==="medicina" && o.fechaVisita===fechaISO).sort((a,b)=>a.ts-b.ts);
 
   // ---- acciones ----
   function enCola(casoId, fn){
     const qm = queueRef.current; const prev = qm.get(casoId) || Promise.resolve();
     const job = prev.then(fn, fn); qm.set(casoId, job.catch(()=>{})); return job;
   }
-  const citaNueva = (item, fecha, extra) => ({id:item.casoId+"|"+fecha, casoId:item.casoId, legajo:item.legajo, nombre:item.nombre, unidad:item.unidad, motivo:item.motivo, anio:item.anio||0,
-    fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, ...(extra||{})});
+  const citaNueva = (item, fecha, extra) => { const cid = item.dataId || item.casoId; return {id:cid+"|"+fecha, casoId:cid, legajo:item.legajo, nombre:item.nombre, unidad:item.unidad, motivo:item.motivo, anio:item.anio||0,
+    fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, ...(extra||{})}; };
   async function guardarCitaLocal(obj){ const saved = await saveCita(obj); setCitas(prev=>{ const n = new Map(prev); n.set(saved.id, saved); return n; }); return saved; }
+  // Cita a un empleado que todavía no figura en Crónicos (o que sí figura): queda en los Citados del día elegido
+  async function citarManual(emp, fecha, nota){
+    if(!puedeEditar) return "No tenés permiso para citar.";
+    const real = realDe(emp.legajo);
+    const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
+    const ex = citas.get(casoId+"|"+fecha);
+    if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
+    await guardarCitaLocal({id:casoId+"|"+fecha, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
+      motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
+      fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+    return "Citado para el "+dateKeyToLabel(fecha)+(fecha===fechaISO ? ". Ya figura en los Citados de este día." : ".");
+  }
   async function marcarVisto(item){
     if(!puedeEditar) return;
     setBusy(item.key); setStatus("Guardando...");
     try{
-      const cur = citaDe(item.casoId);
+      const cur = citaDe(item.casoId, item.legajo);
       await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), atendido:true, atendidoPor:userRef.current, atendidoTs:Date.now(), anulada:false});
       setStatus("Marcado como visto");
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
   async function deshacerVisto(item){
-    const cur = citaDe(item.casoId);
+    const cur = citaDe(item.casoId, item.legajo);
     if(!puedeEditar || !cur) return;
     setBusy(item.key); setStatus("Guardando...");
     try{ await guardarCitaLocal({...cur, atendido:false, atendidoPor:"", atendidoTs:0}); setStatus("Visto deshecho"); }
@@ -4283,13 +4465,15 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
     if(!puedeEditar || !texto) return;
     setBusy(item.key); setStatus("Guardando...");
     const entry = {id:newObsId(), ts:Date.now(), texto, autor:userRef.current, origen:"medicina", fechaVisita:fechaISO};
+    // la anotación va al caso real de Crónicos si el empleado ya figura; si no, a su caso provisorio (después se copia al real)
+    const destId = item.dataId || item.casoId;
     try{
-      await enCola(item.casoId, async ()=>{
-        const m = await persistCronicoCase({id:item.casoId, legajo:item.legajo, anio:item.anio}, base=>({observaciones:[...(base.observaciones||[]), entry]}), manualRef.current.get(item.casoId));
-        if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(item.casoId, m); manualRef.current = n; setManual(n); }
+      await enCola(destId, async ()=>{
+        const m = await persistCronicoCase({id:destId, legajo:item.legajo, anio:item.anio}, base=>({observaciones:[...(base.observaciones||[]), entry]}), manualRef.current.get(destId));
+        if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(destId, m); manualRef.current = n; setManual(n); }
       });
       setNotas(p=>({...p, [item.key]:""}));
-      const cur = citaDe(item.casoId);
+      const cur = citaDe(item.casoId, item.legajo);
       if(!cur || !cur.atendido) await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), atendido:true, atendidoPor:userRef.current, atendidoTs:Date.now(), anulada:false});
       setStatus("Anotación guardada (también figura en Crónicos)");
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
@@ -4333,11 +4517,12 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
       .foot{margin-top:14px;font-size:10px;color:#777;border-top:1px solid #ddd;padding-top:5px;}
     `;
     const bloques = vistos.map(v=>{
-      const live = ausentesById.get(v.casoId);
-      const notasDia = anotacionesDelDia(v.casoId);
-      const previas = ((manual.get(v.casoId)||{}).observaciones||[]).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO)).slice().sort((a,b)=>a.ts-b.ts);
-      return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
-        "<div class='m'>"+e(v.unidad||"—")+" · "+e(live ? live.motivoLabel : v.motivo || "—")+(live ? " · "+live.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+"</div>"+
+      const it = itemDeCita(v);
+      const notasDia = anotacionesDelDia(it);
+      const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO)).slice().sort((a,b)=>a.ts-b.ts);
+      const cel = celularDe(v.legajo);
+      return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+(cel ? " · Cel. "+e(cel) : "")+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
+        "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+"</div>"+
         "<div class='lbl'>Anotaciones de la jornada</div>"+
         (notasDia.length ? notasDia.map(o=>"<p class='txt'>"+e(o.texto)+" <span class='meta'>("+e(new Date(o.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}))+(o.autor ? " · "+e(o.autor) : "")+")</span></p>").join("") : "<p class='txt none'>Sin anotaciones registradas.</p>")+
         (conEvolucion && previas.length ? "<div class='lbl'>Evolución previa (Crónicos)</div>"+previas.map(o=>"<p class='txt'><span class='meta'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor ? " · "+e(o.autor) : "")+" — </span>"+e(o.texto)+"</p>").join("") : "")+
@@ -4357,15 +4542,18 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
 
   // ---- ficha de un empleado ----
   function renderFicha(item){
-    const m = manual.get(item.casoId) || {};
-    const obs = (m.observaciones||[]).slice().sort((a,b)=>b.ts-a.ts);
-    const cur = citaDe(item.casoId);
+    const m = manual.get(item.dataId) || manual.get(item.casoId) || {};
+    const obs = obsDe(item).sort((a,b)=>b.ts-a.ts);
+    const cur = citaDe(item.casoId, item.legajo);
     const rc = reCita[item.key] || {fecha:"", nota:""};
     const ocupado = busy===item.key;
+    const sinCaso = esCasoManualId(item.dataId || item.casoId);   // todavía no figura como caso de Crónicos
     return (
       <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
+        {sinCaso && <div className="hint" style={{color:"var(--warning)", fontWeight:700}}>Citado a mano: todavía no figura como caso en Crónicos. Cuando se actualice la base se toman sus datos médicos de allí y lo que anotes se suma a su caso.</div>}
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"6px 20px"}}>
           <div><span className="hint">Unidad</span><div><b>{item.unidad||"—"}</b></div></div>
+          <div><span className="hint">Celular</span><div><b>{celularDe(item.legajo)||"—"}</b></div></div>
           <div><span className="hint">Motivo - Razón</span><div><b>{item.motivo||"—"}</b></div></div>
           <div><span className="hint">Opinión médica</span><div>{m.opinionMedica||"—"}</div></div>
           <div><span className="hint">Táctico empleado</span><div>{m.tactoEmpleado||"—"}</div></div>
@@ -4419,7 +4607,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
           <tbody>
             {!items.length && <tr><td colSpan={mostrarDias ? 8 : 7} style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{vacio}</td></tr>}
             {items.map(it=>{
-              const ct = citaDe(it.casoId);
+              const ct = citaDe(it.casoId, it.legajo);
               const abierto = openKey===titulo+"|"+it.key;
               return (
                 <React.Fragment key={it.key}>
@@ -4458,6 +4646,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
         <button type="button" className="btn secondary" onClick={refresh} disabled={!dbReady} title="Vuelve a leer lo que cargaron los demás usuarios">Actualizar datos</button>
         <span className="hint">{status}</span>
       </div>
+      {puedeEditar && <CitarEmpleadoBox options={empOptions} minFecha={minISO} defaultFecha={fechaISO} onCitar={citarManual} />}
       {loadError && <div className="warn-banner">No se pudieron leer los datos de Medicina Laboral ({loadError}). ¿Ya corriste supabase-migracion-medicina-laboral.sql en Supabase?</div>}
 
       <div className="card table-card">
@@ -4486,12 +4675,12 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
             <tbody>
               {!vistos.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>Todavía no hay empleados vistos en esta jornada.</td></tr>}
               {vistos.map(v=>{
-                const live = ausentesById.get(v.casoId);
-                const nd = anotacionesDelDia(v.casoId);
+                const it = itemDeCita(v);
+                const nd = anotacionesDelDia(it);
                 return (
                   <tr key={v.id}>
                     <td style={{whiteSpace:"nowrap"}}>{v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "—"}</td>
-                    <td>{v.legajo}</td><td>{v.nombre||"—"}</td><td>{v.unidad||"—"}</td><td>{live ? live.motivoLabel : (v.motivo||"—")}</td>
+                    <td>{v.legajo}</td><td>{v.nombre||"—"}</td><td>{it.unidad||"—"}</td><td>{it.motivo||"—"}</td>
                     <td style={{whiteSpace:"pre-wrap"}}>{nd.length ? nd.map(o=>o.texto).join("\n— ") : <span className="hint">Sin anotaciones</span>}</td>
                   </tr>
                 );
