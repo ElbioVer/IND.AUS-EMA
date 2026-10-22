@@ -2936,6 +2936,21 @@ function EmployeeBarChart({items}){
 }
 // Selección "Por defecto" del filtro Id Motivo de Detalle Empleados (la vigente al 15/10/2026).
 const DETALLE_DEFAULT_MOTIVOS = new Set(["AT","CA","CAE","CJ","DS","EFS","EN","ET","EX","FA","JRP","LSS","MA","MT","MU","NAC","SA"]);
+// Estilos del calendario anual del Detalle de empleados. Van dentro de la propia tarjeta para que valgan igual en pantalla y en la hoja impresa.
+const ANUAL_GRID_CSS = `
+.ygrid-wrap{overflow-x:auto;}
+.ygrid{width:100%;min-width:820px;border-collapse:collapse;table-layout:fixed;font-size:11px;}
+.ygrid th,.ygrid td{border:1px solid #777 !important;padding:0 !important;text-align:center;height:26px;background:#fff;color:#000;font-weight:600;overflow:hidden;}
+.ygrid thead th{height:24px;font-size:11px;letter-spacing:0;text-transform:none;background:#e9e9e9;color:#000;}
+.ygrid th.ymes{width:92px;text-align:left;padding-left:6px !important;font-size:11px;background:#e9e9e9;}
+.ygrid td.g-off,.ygrid-leg i.g-off{background:#d3d3d3;}
+.ygrid td.g-ap,.ygrid-leg i.g-ap{background:#ffff00;}
+.ygrid td.g-anp,.ygrid-leg i.g-anp{background:#ffb300;}
+.ygrid td.g-none{background:repeating-linear-gradient(45deg,#f4f4f4,#f4f4f4 3px,#cfcfcf 3px,#cfcfcf 4px);}
+.ygrid-leg{display:flex;gap:22px;flex-wrap:wrap;margin-top:12px;font-size:12px;}
+.ygrid-leg span{display:inline-flex;align-items:center;gap:6px;}
+.ygrid-leg i{display:inline-block;width:20px;height:14px;border:1px solid #777;}
+`;
 function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
   const employeeOptions = useMemo(()=>{
     const map = new Map();
@@ -3002,6 +3017,21 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     const monthsSet = new Set(periodoMonths);
     return parsed.records.filter(r=> r.valid && r.legajo===legajoSel && r.anio===anioSel && monthsSet.has(r.mes));
   }, [parsed, legajoSel, anioSel, periodoVal, customMonths]);
+
+  // Calendario anual: todas las ausencias AP/ANP del legajo en el año elegido (no depende del período ni del filtro de Id Motivo).
+  // Clave "mes-día" -> {code, cat, label}; además marca como no laborable ("off-mes-día") los días que el archivo trae como feriado (Id Motivo FER).
+  const anualMap = useMemo(()=>{
+    const map = new Map();
+    if(!legajoSel || anioSel==null) return map;
+    parsed.records.forEach(r=>{
+      if(!r.valid || r.legajo!==legajoSel || r.anio!==anioSel) return;
+      const k = r.mes+"-"+r.dia;
+      if(r.cat==="AP" || r.cat==="ANP"){
+        if(!map.has(k)) map.set(k, {code:(r.idMotivo||"").toUpperCase(), cat:r.cat, label:(r.motivo||r.idMotivo||"")+(r.razon ? " — "+r.razon : "")});
+      } else if((r.idMotivo||"").toUpperCase()==="FER") map.set("off-"+k, true);
+    });
+    return map;
+  }, [parsed, legajoSel, anioSel]);
 
   const cardVals = useMemo(()=>{
     let presentes=0, vac=0, ap=0, anp=0, sanciones=0;
@@ -3102,6 +3132,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     if(!blocks.length) return;
     let html = blocks.map(el=>el.outerHTML).join("\n");
     const printCss = `
+      *{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
       .cron-caso{margin-top:12px;}
       .cron-caso h4{margin:0 0 6px;font-size:13px;color:#0c2e80;}
       @page{size:landscape;}
@@ -3238,6 +3269,43 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
           included={idMotivoIncluded} onChange={setIdMotivoIncluded}
           defaultKeys={parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />
       </div>}
+
+      {anioSel!=null && (
+        <div className="card table-card de-print-block print-page-break">
+          <style>{ANUAL_GRID_CSS}</style>
+          <h3>Calendario anual de ausencias {anioSel}{ficha && (ficha.nombre||legajoSel) ? " — "+(fichaDato("nombre")||ficha.nombre||"")+" (Legajo "+legajoSel+")" : ""}</h3>
+          <p className="desc">Cada casillero es un día, con el código (Id Motivo) de la ausencia. Muestra todas las ausencias AP y ANP del año elegido, sin importar el período ni el filtro de Id Motivo.</p>
+          <div className="ygrid-wrap"><table className="ygrid">
+            <thead><tr>
+              <th className="ymes">{anioSel}</th>
+              {Array.from({length:31}, (_,i)=>(<th key={i}>{i+1}</th>))}
+            </tr></thead>
+            <tbody>
+              {MESES.map((mn,mi)=>{
+                const dim = daysInMonth(mi+1, anioSel);
+                return (
+                  <tr key={mi}>
+                    <th className="ymes">{mn.toUpperCase()}</th>
+                    {Array.from({length:31}, (_,di)=>{
+                      const d = di+1;
+                      if(d>dim) return <td key={di} className="g-none"></td>;
+                      const ab = anualMap.get(mi+1+"-"+d);
+                      if(ab) return <td key={di} className={ab.cat==="AP" ? "g-ap" : "g-anp"} title={fmtDate(d,mi+1,anioSel)+": "+ab.label}>{ab.code}</td>;
+                      const ts = Date.UTC(anioSel, mi, d);
+                      return <td key={di} className={anualMap.get("off-"+(mi+1)+"-"+d) || isNonWorkingGapDay(ts) ? "g-off" : ""}></td>;
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table></div>
+          <div className="ygrid-leg">
+            <span><i className="g-anp"></i>ANP (ausente no pago)</span>
+            <span><i className="g-ap"></i>AP (ausente pago)</span>
+            <span><i className="g-off"></i>Sábado, domingo y feriado</span>
+          </div>
+        </div>
+      )}
 
       <div className="card table-card de-print-block print-page-break">
         <h3>{ausenciaRows.length ? ("DETALLE (" + fmt(ausenciaRows.length) + " días" + (agrupar ? " en " + fmt(ausGrupos.length) + (ausGrupos.length===1 ? " período" : " períodos") : "") + ")") : "Sin días con los Id Motivo seleccionados en el período"}</h3>
