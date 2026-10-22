@@ -3531,6 +3531,7 @@ function newObsId(){ return "o"+Date.now().toString(36)+Math.random().toString(3
 const CRONICO_COLUMNS = [
   {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text"},
   {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text"},
+  {key:"telefono", label:"Teléfono de contacto", get:c=>c.telefonoContacto||"", sortType:"text"},
   {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text"},
   {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text"},
   {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text"},
@@ -3565,8 +3566,15 @@ function casoRowToManual(row){
     inicioManualTs: row.inicio_manual ? isoDateToTs(row.inicio_manual) : null,
     observaciones: conIds(row.observaciones, "o"),
     acciones,
-    razonSembrada: !!row.razon_sembrada
+    razonSembrada: !!row.razon_sembrada,
+    telefonoContacto: row.telefono_contacto||""
   };
+}
+// Teléfono de contacto de un caso: el que se cargó en Crónicos y, si no hay, el celular del plantel.
+// Devuelve {tel, editado, plantel} (editado = hay uno cargado a mano que reemplaza al del plantel).
+function telefonoContactoDe(manualCaso, celularPlantel){
+  const own = String((manualCaso||{}).telefonoContacto||"").trim();
+  return {tel: own || celularPlantel || "", editado: !!own, plantel: celularPlantel||""};
 }
 /* ---- Medicina Laboral: citaciones (tabla `medicina_laboral`, migración supabase-migracion-medicina-laboral.sql) ----
    Una citación = un empleado/caso citado para un día. La puede crear RRHH/Administrador desde Crónicos (origen "rrhh") o la Dra.
@@ -3660,7 +3668,7 @@ async function persistCronicoCase(caseObj, patch, localFallback){
     notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
     posibleAlta: caseObj.posibleAlta||"",
     inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
-    observaciones: [], acciones: [], razonSembrada: false,
+    observaciones: [], acciones: [], razonSembrada: false, telefonoContacto: "",
     ...prev
   };
   const p = typeof patch==="function" ? patch(base) : patch;
@@ -3672,7 +3680,7 @@ async function persistCronicoCase(caseObj, patch, localFallback){
     tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"",
     // `accion` (texto único, versión anterior) se mantiene con la última acción para no romper pantallas que no se recargaron
     accion: (m.acciones||[]).length ? m.acciones.slice().sort((a,b)=>a.ts-b.ts)[m.acciones.length-1].texto : "",
-    acciones: m.acciones||[], razon_sembrada: !!m.razonSembrada,
+    acciones: m.acciones||[], razon_sembrada: !!m.razonSembrada, telefono_contacto: m.telefonoContacto||"",
     inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
     observaciones: m.observaciones||[], updated_at: new Date().toISOString()
   });
@@ -3798,6 +3806,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const motivoEfectivo = motivosFijos || motivoIncluded;
   const cases = useMemo(()=> buildCronicoCases(parsed.records, plantel, motivoEfectivo), [parsed, plantel, motivoEfectivo]);
 
+  const plantelCelulares = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p.celular||""])), [plantel]);
+  const celularPlantelDe = legajo => plantelCelulares.get(String(legajo||"").toUpperCase()) || "";
   // citaciones pendientes (no anuladas ni atendidas, de hoy en adelante) por legajo: para avisar si ya está citado para otro día
   const pendientesPorLegajo = useMemo(()=>{
     const m = new Map();
@@ -3825,7 +3835,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       accion: (Array.isArray(manual.acciones) && manual.acciones.length) ? manual.acciones.slice().sort((a,b)=>a.ts-b.ts)[manual.acciones.length-1].texto : "",
       observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : [],
       razonSembrada: !!manual.razonSembrada,
-      // citación vigente de este caso para el día de trabajo (si la hay y no fue anulada)
+      // teléfono de contacto: el cargado acá o, si no hay, el celular del plantel
+      telefonoContacto: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).tel,
+      telefonoEditado: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).editado,
+      telefonoPlantel: celularPlantelDe(c.legajo),
       // citación vigente de este caso para el día elegido (también si se cargó a mano antes de que el empleado figurara en Crónicos)
       cita: (()=>{
         let ct = citas.get(c.id+"|"+fechaCita);
@@ -3835,7 +3848,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       // otra citación pendiente de este empleado para un día distinto del elegido (solo para avisarlo)
       otraCita: (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).find(ct=>ct.fecha!==fechaCita) || null
     };
-  }), [cases, casesManual, citas, fechaCita, pendientesPorLegajo]);
+  }), [cases, casesManual, citas, fechaCita, pendientesPorLegajo, plantelCelulares]);
 
   // Citar un empleado que todavía no figura en Crónicos (se carga a mano por nombre o legajo)
   async function citarManual(emp, fecha, nota){
@@ -4194,7 +4207,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                 ))}
               </tr></thead>
               <tbody>
-                {!sorted.length && <tr><td colSpan="18" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
+                {!sorted.length && <tr><td colSpan="19" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
                 {sorted.map(c=>{
                   const notifStatus = cronicoNotificarStatus(c);
                   return (
@@ -4202,6 +4215,18 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                     <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
                       <td>{c.legajo}</td>
                       <td>{c.nombre||"—"}</td>
+                      <td style={{minWidth:150}}>
+                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={locked}
+                          onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                          onBlur={e=>{ const v = e.target.value.trim(); if(v!==(c.telefonoContacto||"")) commitField(c,"telefonoContacto", v); }}
+                          style={{width:140, fontSize:12.5, padding:"5px 6px"}} />
+                        {c.telefonoEditado && (
+                          <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"telefonoContacto","") : undefined}
+                            title={c.telefonoPlantel ? "Celular del plantel: "+c.telefonoPlantel : "El plantel no tiene celular cargado"}>
+                            {puedeEditar ? "distinto al plantel · restablecer" : "distinto al plantel"}
+                          </div>
+                        )}
+                      </td>
                       <td>{c.grupo||"—"}</td>
                       <td>{c.sindicato||"—"}</td>
                       <td>{c.gerencia||"—"}</td>
@@ -4277,7 +4302,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                     </tr>
                     {expandedAccId===c.id && c.acciones.length>0 && (
                       <tr>
-                        <td colSpan="18" style={{background:"var(--plane)"}}>
+                        <td colSpan="19" style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Acciones — {c.nombre||c.legajo} (no se imprimen en la historia clínica)</div>
                           <ObservacionesHistory c={c} field="acciones" labelCol="Acción" editingObs={editingObs} setEditingObs={setEditingObs}
                             onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
@@ -4286,7 +4311,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                     )}
                     {expandedId===c.id && c.observaciones.length>0 && (
                       <tr>
-                        <td colSpan="18" style={{background:"var(--plane)"}}>
+                        <td colSpan="19" style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Observación / Evolución — {c.nombre||c.legajo}</div>
                           <ObservacionesHistory c={c} field="observaciones" labelCol="Movimiento" editingObs={editingObs} setEditingObs={setEditingObs}
                             onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
@@ -4382,6 +4407,8 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
   const realDe = legajo => casosVigentes.get(String(legajo).toUpperCase()) || null;
   const plantelPorLegajo = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p])), [plantel]);
   const celularDe = legajo => ((plantelPorLegajo.get(String(legajo).toUpperCase())||{}).celular)||"";
+  // Teléfono de contacto de un empleado/caso: el que se cargó en Crónicos y, si no, el celular del plantel
+  const telefonoDe = item => telefonoContactoDe(manual.get(item.dataId) || manual.get(item.casoId), celularDe(item.legajo));
   const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
   // casos provisorios (citaciones manuales) de un legajo
   const manualIdsDe = legajo => Array.from(manual.keys()).filter(id=>esCasoManualId(id) && id.startsWith(sanitizeIdSeg(legajo)+"-MANUAL-"));
@@ -4538,7 +4565,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
       const it = itemDeCita(v);
       const notasDia = anotacionesDelDia(it);
       const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO)).slice().sort((a,b)=>a.ts-b.ts);
-      const cel = celularDe(v.legajo);
+      const cel = telefonoDe(it).tel;
       return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+(cel ? " · Cel. "+e(cel) : "")+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
         "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+"</div>"+
         "<div class='lbl'>Anotaciones de la jornada</div>"+
@@ -4571,7 +4598,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar}){
         {sinCaso && <div className="hint" style={{color:"var(--warning)", fontWeight:700}}>Citado a mano: todavía no figura como caso en Crónicos. Cuando se actualice la base se toman sus datos médicos de allí y lo que anotes se suma a su caso.</div>}
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"6px 20px"}}>
           <div><span className="hint">Unidad</span><div><b>{item.unidad||"—"}</b></div></div>
-          <div><span className="hint">Celular</span><div><b>{celularDe(item.legajo)||"—"}</b></div></div>
+          <div><span className="hint">Celular / teléfono de contacto</span><div><b>{telefonoDe(item).tel||"—"}</b>{telefonoDe(item).editado && <span className="hint"> (cargado en Crónicos{telefonoDe(item).plantel ? "; plantel: "+telefonoDe(item).plantel : ""})</span>}</div></div>
           <div><span className="hint">Motivo - Razón</span><div><b>{item.motivo||"—"}</b></div></div>
           <div><span className="hint">Opinión médica</span><div>{m.opinionMedica||"—"}</div></div>
           <div><span className="hint">Táctico empleado</span><div>{m.tactoEmpleado||"—"}</div></div>
