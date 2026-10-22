@@ -1712,6 +1712,7 @@ function DefaultMotivoRefTable(){
 function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   const header = rows2d[0] || [];
   const dataRows = rows2d.slice(1);
+  const idxIngreso = findColByAliases(header, ["Fecha de Ingreso","Fecha Ingreso"]);
   const existingByLegajo = new Map(existingPlantel.map(p=>[p.legajo, p]));
   const seen = new Set();
   const records = [];
@@ -1720,12 +1721,22 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
   const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular"];
   dataRows.forEach((row, i) => {
-    const excelRow = i + 2;
+    const excelRow = i + 2 + (rows2d.headerOffset||0);   // número de fila real del Excel (si hay títulos arriba de los encabezados)
     const legajo = cellStr(row, mapping.legajo).trim();
     if(legajo===""){ errors.push({row:excelRow, legajo:"(vacío)", problem:"Legajo vacío"}); return; }
     const legajoKey = legajo.toUpperCase();
     if(seen.has(legajoKey)){ errors.push({row:excelRow, legajo, problem:"Legajo duplicado dentro del archivo"}); return; }
-    const altaRaw = mapping.fechaAlta!==-1 ? row[mapping.fechaAlta] : "";
+    // Baja anterior al primer mes con datos: no aporta días, se descarta aunque le falte la fecha de alta (no cuenta como error).
+    if(cutoffTs!=null && mapping.fechaBaja!==-1){
+      const bajaPre = String(row[mapping.fechaBaja]==null?"":row[mapping.fechaBaja]).trim();
+      if(bajaPre!==""){
+        const bp = parseEntrada(row[mapping.fechaBaja]);
+        if(bp.valid && Date.UTC(bp.anio, bp.mes-1, bp.dia) < cutoffTs){ seen.add(legajoKey); descartados++; return; }
+      }
+    }
+    let altaRaw = mapping.fechaAlta!==-1 ? row[mapping.fechaAlta] : "";
+    // Si la columna elegida para el alta (p. ej. "Fecha cálculo vacaciones") viene vacía en esa fila, se usa la Fecha de Ingreso.
+    if(String(altaRaw==null?"":altaRaw).trim()==="" && idxIngreso!==-1) altaRaw = row[idxIngreso];
     const altaParsed = parseEntrada(altaRaw);
     if(!altaParsed.valid){ errors.push({row:excelRow, legajo, problem:"Fecha de alta inválida o vacía"}); return; }
     const altaTs = Date.UTC(altaParsed.anio, altaParsed.mes-1, altaParsed.dia);
@@ -1890,7 +1901,14 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
       try{
         const wb = isCsv ? XLSX.read(e.target.result, {type:"string", raw:true, cellDates:false}) : XLSX.read(new Uint8Array(e.target.result), {type:"array", cellDates:false});
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows2d = XLSX.utils.sheet_to_json(ws, {header:1, defval:"", raw:true});
+        let rows2d = XLSX.utils.sheet_to_json(ws, {header:1, defval:"", raw:true});
+        // Algunos listados traen títulos arriba ("Listado de Legajos", usuario y fecha de emisión…): la fila de encabezados es la primera
+        // (de las 20 primeras) que tiene las columnas Legajo y Fecha de Alta/Ingreso; todo lo de arriba se ignora.
+        let hIdx = 0;
+        for(let i=0; i<Math.min(rows2d.length, 20); i++){
+          if(findColByAliases(rows2d[i], PLANTEL_FIELD_ALIASES.legajo)!==-1 && findColByAliases(rows2d[i], PLANTEL_FIELD_ALIASES.fechaAlta)!==-1){ hIdx = i; break; }
+        }
+        if(hIdx>0){ const off = hIdx; rows2d = rows2d.slice(hIdx); rows2d.headerOffset = off; }
         if(!rows2d.length || !rows2d[0].length){ setError("El archivo está vacío o no tiene encabezados."); setLoading(false); return; }
         const header = rows2d[0];
         const autoMap = {};
