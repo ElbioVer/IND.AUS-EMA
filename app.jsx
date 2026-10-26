@@ -315,10 +315,10 @@ function AuthGate(){
 /* ===================== perfiles y permisos ===================== */
 // Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
 // ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
-const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","ranking","detalle_empleados","plantel"];
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","ranking","detalle_empleados","plantel"];
 const ROLES = {
   admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
-    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true},
+    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true},
   rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. Puede citar a Medicina Laboral desde Crónicos (y ver ese menú, sin anotar). Gestión de Plantel solo con la carga.",
     tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:true, sancionar:true},
   medico: {label:"Servicio médico", desc:"Medicina Laboral (atiende, anota, cita e imprime el reporte de la jornada), Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión. Ve solo la empresa Propios y los motivos por defecto.",
@@ -1504,7 +1504,9 @@ function buildCronicoCases(records, plantel, motivoIncluded){
       ultimaTs: last.ts,
       filas: lastStreak.rows.length,
       fechaIngresoTs: p ? p.altaTs : null,
-      tramos: groupStreakTramos(lastStreak.rows)
+      tramos: groupStreakTramos(lastStreak.rows),
+      // fechas (ts) de los días del caso: para armar las fechas de las ausencias en las sanciones
+      diasTs: Array.from(new Set(lastStreak.rows.map(r=>r.ts))).sort((a,b)=>a-b)
     });
   });
   return cases.sort((a,b)=> b.inicioTs-a.inicioTs);
@@ -3549,8 +3551,8 @@ const CRONICO_COLUMNS = [
   {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num"},
   {key:"acciones", label:"Acción", get:c=>c.acciones.length, sortType:"num"},
   {key:"citado", label:"Medicina Laboral", get:c=>c.cita ? (c.cita.atendido ? 2 : 1) : 0, sortType:"num"},
-  // solo para quien puede emitir sanciones (RRHH y Administrador): 2 = injustificada pendiente de emitir, 1 = ya emitida
-  {key:"sancion", label:"Sanción", get:c=>c.sancionCita ? (c.sancionReg ? 1 : 2) : 0, sortType:"num"},
+  // solo para quien puede marcar sanciones (RRHH y Administrador): 1 marcada, 2 definida, 3 emitida
+  {key:"sancion", label:"Sanción", get:c=>c.sancionReg ? ({marcada:1, definida:2, emitida:3}[c.sancionReg.estado]||1) : 0, sortType:"num"},
   {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num"}
 ];
 // Códigos de ausencia por motivos de salud: su "Razón" del ausentismo se carga sola como primera información del historial del caso.
@@ -3603,18 +3605,28 @@ async function deleteCita(id){
   if(error) throw error;
   if(!data || !data.length) throw new Error("el servidor no la eliminó (solo puede el Administrador; si lo sos, falta correr supabase-migracion-medicina-sanciones.sql en Supabase)");
 }
-/* ---- Sanciones por ausencia injustificada (tabla `medicina_sanciones`, migración supabase-migracion-medicina-sanciones.sql) ----
-   Cuando la Dra. marca el resultado del control (art. 210 LCT) como "injustificada", RRHH/Administrador emiten la nota de sanción desde Crónicos.
-   Cada emisión queda registrada (una por citación) con los datos de la nota, para no emitirla dos veces y poder reimprimirla. */
+/* ---- Sanciones por ausencias injustificadas (tabla `medicina_sanciones`, migraciones supabase-migracion-medicina-sanciones.sql y supabase-migracion-sanciones-menu.sql) ----
+   Circuito: 1) RRHH (o el Administrador) marca con una tilde, en Crónicos, al empleado al que corresponde una sanción ("marcada");
+   2) el Administrador, en el menú Sanciones, define el tipo (de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento
+   o Suspensión, con sus días) y revisa las fechas de las ausencias ("definida"); 3) se emite la nota en PDF ("emitida"). */
 const SANCIONES_TABLE = "medicina_sanciones";
+const SANCION_TIPOS = ["Llamado de atención","Apercibimiento","Severo Apercibimiento","Suspensión"];
+function sancionId(casoId){ return "SAN|"+casoId; }
 function sancionRowToObj(r){
-  return {id:r.id, casoId:r.caso_id||"", legajo:r.legajo||"", nombre:r.nombre||"", fechaControl:r.fecha_control||"", fechaAusencia:r.fecha_ausencia||"",
-    medida:r.medida||"", nInterno:r.n_interno||"", lugar:r.lugar||"", fechaEmision:r.fecha_emision||"", sector:r.sector||"", emitidaPor:r.emitida_por||"", emitidaTs:Number(r.emitida_ts)||0};
+  return {id:r.id, casoId:r.caso_id||"", legajo:r.legajo||"", nombre:r.nombre||"", sector:r.sector||"", unidad:r.unidad||"", motivo:r.motivo||"",
+    estado:r.estado||"emitida", medida:r.medida||"", fechas:Array.isArray(r.fechas) ? r.fechas : [], fechaAusencia:r.fecha_ausencia||"",
+    diasSuspension:Number(r.dias_suspension)||0, suspDesde:r.susp_desde||"", suspHasta:r.susp_hasta||"", suspRetoma:r.susp_retoma||"",
+    nInterno:r.n_interno||"", lugar:r.lugar||"", fechaEmision:r.fecha_emision||"",
+    marcadaPor:r.marcada_por||"", marcadaTs:Number(r.marcada_ts)||0, definidaPor:r.definida_por||"", definidaTs:Number(r.definida_ts)||0,
+    emitidaPor:r.emitida_por||"", emitidaTs:Number(r.emitida_ts)||0};
 }
 function sancionObjToRow(o){
-  return {id:o.id, caso_id:o.casoId||"", legajo:o.legajo, nombre:o.nombre||"", fecha_control:o.fechaControl||null, fecha_ausencia:o.fechaAusencia||"",
-    medida:o.medida||"", n_interno:o.nInterno||"", lugar:o.lugar||"", fecha_emision:o.fechaEmision||null, sector:o.sector||"", emitida_por:o.emitidaPor||"", emitida_ts:o.emitidaTs||null,
-    updated_at:new Date().toISOString()};
+  return {id:o.id, caso_id:o.casoId||"", legajo:o.legajo, nombre:o.nombre||"", sector:o.sector||"", unidad:o.unidad||"", motivo:o.motivo||"",
+    estado:o.estado||"marcada", medida:o.medida||"", fechas:o.fechas||[], fecha_ausencia:o.fechaAusencia||"",
+    dias_suspension:o.diasSuspension||0, susp_desde:o.suspDesde||null, susp_hasta:o.suspHasta||null, susp_retoma:o.suspRetoma||null,
+    n_interno:o.nInterno||"", lugar:o.lugar||"", fecha_emision:o.fechaEmision||null,
+    marcada_por:o.marcadaPor||"", marcada_ts:o.marcadaTs||null, definida_por:o.definidaPor||"", definida_ts:o.definidaTs||null,
+    emitida_por:o.emitidaPor||"", emitida_ts:o.emitidaTs||null, updated_at:new Date().toISOString()};
 }
 async function loadSanciones(){
   const {data, error} = await supabaseClient.from(SANCIONES_TABLE).select("*");
@@ -3629,42 +3641,7 @@ async function saveSancion(obj){
 async function deleteSancion(id){
   const {data, error} = await supabaseClient.from(SANCIONES_TABLE).delete().eq("id", id).select();
   if(error) throw error;
-  if(!data || !data.length) throw new Error("el servidor no la eliminó (solo puede el Administrador)");
-}
-// Formulario previo a la nota de sanción: se revisan/corrigen los datos y se genera la hoja (imprimir o guardar como PDF).
-function SancionModal({data, reimpresion, onClose, onGenerar}){
-  const [d, setD] = useState(data);
-  const set = (k, v) => setD(p=>({...p, [k]:v}));
-  const campo = (label, k, extra) => (
-    <div className="field" style={{minWidth:200, flex:"1 1 200px"}}>
-      <label>{label}</label>
-      <input type={(extra && extra.type) || "text"} value={d[k]||""} onChange={e=>set(k, e.target.value)} placeholder={extra && extra.placeholder} />
-    </div>
-  );
-  return (
-    <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,.55)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16}} onClick={onClose}>
-      <div className="card" style={{maxWidth:760, width:"100%", maxHeight:"92vh", overflow:"auto"}} onClick={e=>e.stopPropagation()}>
-        <h3 style={{marginTop:0}}>Nota de sanción por ausencia injustificada</h3>
-        <p className="desc">La Dra. determinó, en el control médico del artículo 210 de la LCT, que la ausencia no se justifica. Revisá los datos y generá la nota (en la ventana de impresión elegí «Guardar como PDF» o imprimila).</p>
-        {reimpresion && <p className="hint" style={{color:"var(--good)", fontWeight:700}}>Esta nota ya fue emitida{d.emitidaPor ? " por "+d.emitidaPor : ""}. Podés generarla de nuevo (se guardan los cambios que hagas).</p>}
-        <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
-          {campo("Legajo", "legajo")}
-          {campo("Nombre", "nombre")}
-          {campo("Sector", "sector")}
-          {campo("Fecha de la ausencia", "fechaAusencia", {placeholder:"Ej.: 20/10/2026 o del 19/10/2026 al 20/10/2026"})}
-          {campo("Fecha del control médico", "fechaControl", {type:"date"})}
-          {campo("Medida correctiva", "medida")}
-          {campo("Lugar", "lugar")}
-          {campo("Fecha de la nota", "fechaEmision", {type:"date"})}
-          {campo("N° interno (opcional)", "nInterno")}
-        </div>
-        <div style={{display:"flex", gap:10, marginTop:14}}>
-          <button type="button" className="btn" onClick={()=>onGenerar(d)} disabled={!d.legajo || !d.fechaControl || !d.fechaEmision}>{reimpresion ? "Generar nota de nuevo" : "Generar nota (PDF) y marcar como emitida"}</button>
-          <button type="button" className="btn secondary" onClick={onClose}>Cancelar</button>
-        </div>
-      </div>
-    </div>
-  );
+  if(!data || !data.length) throw new Error("el servidor no la eliminó (RRHH solo puede quitar las marcadas; el Administrador, cualquiera)");
 }
 
 // descarga de un archivo de texto generado en pantalla (CSV)
@@ -3681,44 +3658,91 @@ function fechaLarga(iso){
   const mt = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/);
   return mt ? (+mt[3])+" de "+MESES_LARGO[+mt[2]-1]+" de "+mt[1] : String(iso||"");
 }
-// Nota de sanción (llamado de atención) por ausencia injustificada tras el control médico del art. 210 de la LCT.
-// Abre una hoja A4 lista para imprimir o guardar como PDF (en la ventana de impresión: "Guardar como PDF").
-function printSancionNota(d){
+// "2026-10-26" -> "26/10/2026"
+function isoToDMY(iso){
+  const mt = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return mt ? mt[3]+"/"+mt[2]+"/"+mt[1] : "";
+}
+// lista de fechas ISO -> "06/10/2026", "06/10/2026 y 08/10/2026" o "06/10/2026, 07/10/2026 y 09/10/2026" (de menor a mayor)
+function fechasTexto(isos){
+  const a = Array.from(new Set((isos||[]).filter(Boolean))).sort().map(isoToDMY);
+  if(a.length<=1) return a.join("");
+  return a.slice(0,-1).join(", ")+" y "+a[a.length-1];
+}
+// texto escrito ("06/10/2026, 07/10/2026 y 09/10/2026") -> {ok, isos} ordenadas de menor a mayor; si alguna fecha no se entiende, ok:false
+function parseFechasTexto(txt){
+  const tokens = String(txt||"").split(/[,;\s]+|\by\b/i).map(t=>t.trim()).filter(Boolean);
+  const isos = [];
+  for(const t of tokens){
+    const r = normalizarFechaDMA(t);
+    if(!r.ok || !r.value) return {ok:false, isos:[]};
+    const [d,m,y] = r.value.split("/");
+    isos.push(y+"-"+m+"-"+d);
+  }
+  return {ok:true, isos:Array.from(new Set(isos)).sort()};
+}
+const JORNADAS_TXT = ["","Una","Dos","Tres","Cuatro","Cinco","Seis","Siete","Ocho","Nueve","Diez","Once","Doce","Trece","Catorce","Quince","Dieciséis","Diecisiete","Dieciocho","Diecinueve","Veinte"];
+function jornadasTexto(n){ return n===1 ? "Una Jornada laboral" : (JORNADAS_TXT[n] || String(n))+" Jornadas laborales"; }
+// nombre con el que se guarda el PDF (el título de la hoja): "9931 GIMENEZ. JAVIER GUSTAVO - Suspensión"
+function sancionNombreArchivo(d){ return ((d.legajo||"")+" "+(d.nombre||"")+" - "+(d.medida||"Sanción")).replace(/[\\\/:*?"<>|]+/g,"").trim(); }
+// Una nota de sanción (una hoja A4). Dos modelos: Llamado de atención / Apercibimiento / Severo Apercibimiento ("medida correctiva") y Suspensión.
+function sancionNotaPagina(d, logoUrl){
+  const e = escHtml;
+  const fechas = fechasTexto(d.fechas) || d.fechaAusencia || "…";
+  const blanco = "___/___/___";
+  const dmy = iso => iso ? isoToDMY(iso) : blanco;
+  const decision = d.medida==="Suspensión"
+    ? "suspenderlo por el término de "+e(jornadasTexto(Math.max(1, d.diasSuspension||1)))+" desde el día "+e(dmy(d.suspDesde))+" Hasta el día "+e(dmy(d.suspHasta))+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+e(dmy(d.suspRetoma))+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo."
+    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
+  return "<section class='nota'>"+
+    "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
+    "<div class='dest'><div class='senor'>Señor/a:</div><div class='nom'>"+e(d.nombre||"")+"</div>"+
+      "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>"+
+    "<p class='cuerpo ind'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, al registrar Ausencias injustificadas, en fechas "+e(fechas)+", generando trastornos operativos de su pleno conocimiento, se ha resuelto,&nbsp; en concordancia con sus antecedentes y la gravedad de la falta cometida, "+decision+"</p>"+
+    "<p class='cuerpo'>La presente medida tiene por finalidad reencauzar su gestión&nbsp; y evitar en el futuro la reiteración de este tipo de hechos.</p>"+
+    "<p class='cuerpo'>Apercibimosle que ante la reiteración de este tipo de incumplimientos, se le aplicarán medidas disciplinarias más severas,</p>"+
+    "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+
+    "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
+    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+}
+// Abre una ventana con una o varias notas (una hoja cada una), lista para imprimir o guardar como PDF ("Guardar como PDF" en la ventana de impresión).
+// El título de la hoja es el nombre con el que se guarda el archivo. La hoja se imprime sin márgenes del navegador (así no salen la fecha, el título,
+// "about:blank" ni el número de página): los márgenes los da la propia hoja.
+function abrirNotasSancion(titulo, notas){
   const e = escHtml;
   const logoUrl = new URL("logo-ema.png", location.href).href;
   const css = `
-    @page{size:A4;margin:16mm 18mm;}
+    @page{size:A4;margin:0;}
     *{box-sizing:border-box;}
-    body{font-family:"Times New Roman",Times,serif;color:#000;font-size:12.5px;margin:0;line-height:1.35;}
+    html,body{margin:0;padding:0;}
+    body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
+    .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;}
+    .nota:last-child{page-break-after:auto;}
     .top{display:flex;justify-content:space-between;align-items:flex-start;}
     .top img{width:60mm;height:auto;}
     .lugar{margin-top:14mm;font-size:13px;}
-    .dest{margin-top:8mm;line-height:1.3;font-size:13px;}
-    .dest i{display:block;}
-    hr{border:0;border-top:1px solid #000;margin:3mm 0 3mm;}
-    p.cuerpo{text-align:justify;text-indent:55mm;margin:0;font-size:12.5px;}
-    p.notif{margin:12mm 0 0;}
-    .firmas{margin:14mm 0 0 55mm;font-size:13px;}
+    .dest{margin-top:8mm;}
+    .senor{font-style:italic;font-size:15px;}
+    .nom{font-size:21px;line-height:1.25;margin:1mm 0 1mm;}
+    .dato{font-style:italic;font-size:15px;display:flex;}
+    .dato span{display:inline-block;width:24mm;}
+    .dato b{font-weight:700;}
+    hr{border:0;border-top:1.5px solid #000;margin:4mm 0 6mm;}
+    p.cuerpo{text-align:justify;margin:0 0 6mm;font-size:14px;line-height:1.5;}
+    p.ind{text-indent:38mm;}
+    .firmas{margin:16mm 0 0 55mm;font-size:14px;}
     .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
     .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
-    .interno{position:fixed;left:0;bottom:0;font-size:13px;}
+    .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
   `;
-  const html = "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
-    "<div class='dest'>"+e((d.legajo||"")+" "+(d.nombre||""))+"<br>"+e(d.sector||"")+"<i>Presente</i></div><hr>"+
-    "<p class='cuerpo'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, con motivo de su ausencia del día <b>"+e(d.fechaAusencia||"…")+"</b>, se procedió a efectuar un control médico en los términos del artículo 210 de la LCT, practicado el día <b>"+e(fechaLarga(d.fechaControl))+"</b>. "+
-    "Del resultado de dicho control y de la evaluación de la documentación médica presentada, no se logró acreditar la dolencia invocada en los términos que justifiquen la ausencia, determinándose que usted se encontraba en condiciones de prestar tareas. "+
-    "Esta situación requiere que tome debida conciencia de las consecuencias que genera, ya que las ausencias que no se encuentran debidamente justificadas afectan la planificación y organización del trabajo, comprometen el cumplimiento de los plazos de diligenciamiento establecidos por nuestro cliente y pueden repercutir negativamente en la calidad del servicio, exponiendo a la empresa a reclamos y eventuales penalidades económicas por incumplimientos contractuales. "+
-    "Por tal motivo, se le exige actuar con responsabilidad y buena fe en el cumplimiento de sus obligaciones laborales, procurando reencauzar su gestión y evitar situaciones que afecten la operatividad y los compromisos asumidos por la empresa, se ha resuelto, en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicar la siguiente medida correctiva: "+e(d.medida||"Llamado de atención")+"</p>"+
-    "<p class='notif'>Queda Usted debidamente notificado.</p>"+
-    "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
-    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div>";
   const win = window.open("", "_blank");
   if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return false; }
-  win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Nota de sanción - '+e(d.legajo||"")+'</title><style>'+css+'</style></head><body>'+html+'</body></html>');
+  win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+e(titulo)+'</title><style>'+css+'</style></head><body>'+notas.map(d=>sancionNotaPagina(d, logoUrl)).join("")+'</body></html>');
   win.document.close(); win.focus();
   setTimeout(()=>{ win.print(); }, 700);
   return true;
 }
+function printSancionNota(d){ return abrirNotasSancion(sancionNombreArchivo(d), [d]); }
 async function loadCitas(){
   const {data, error} = await supabaseClient.from(MEDICINA_TABLE).select("*");
   if(error) throw error;
@@ -3865,7 +3889,7 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
     </table>
   );
 }
-function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar, puedeEliminarSancion}){
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar}){
   const [dbReady, setDbReady] = useState(false);
   // Filtro de motivos: cada vez que se abre la app arranca en "Por defecto". Los cambios (ej. sumar VAC) son de esta pantalla:
   // se conservan mientras se navega entre menús, pero no se guardan en el servidor ni cambian lo que ven los demás.
@@ -3892,7 +3916,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [citas, setCitas] = useState(new Map());       // citaciones a Medicina Laboral (id -> cita)
   const [citaBusy, setCitaBusy] = useState(null);      // caso cuya citación se está guardando
   const [sanciones, setSanciones] = useState(new Map()); // notas de sanción ya emitidas (id de la citación -> registro)
-  const [sancionForm, setSancionForm] = useState(null);  // formulario de la nota abierto: {data, reimpresion}
   // Día que se cita desde esta pantalla. Por defecto el último día cargado (el "hoy" de la información), pero se puede elegir una fecha
   // posterior (la Dra. no viene todos los días): `fechaCita`. La columna "Medicina Laboral" muestra la citación de ESE día.
   const citaFecha = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
@@ -3965,48 +3988,34 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     injustificadas.forEach(ct=>{ const k = String(ct.legajo).toUpperCase(); if(!m.has(k)) m.set(k, ct); });
     return m;
   }, [injustificadas]);
-  const sancionesPendientes = injustificadas.filter(ct=>!sanciones.has(ct.id));
   const columnasVisibles = puedeSancionar ? CRONICO_COLUMNS : CRONICO_COLUMNS.filter(c=>c.key!=="sancion");
   const nCols = columnasVisibles.length;
-  // Texto de la fecha de ausencia para la nota: sale de las ausencias cargadas hasta el día del control (un día, o "del … al …")
-  function ausenciaTextoDe(legajo, fechaISO){
-    const ts = isoDateToTs(fechaISO); if(ts==null) return "";
-    const L = String(legajo).toUpperCase();
-    const upTo = parsed.records.filter(r=>r.valid && String(r.legajo).toUpperCase()===L && r.ts<=ts);
-    const k = buildCronicoCases(upTo, plantel, CRONICOS_DEFAULT_MOTIVOS)[0];
-    if(!k) return "";
-    return k.inicioTs===k.ultimaTs ? fmtDateFromTs(k.inicioTs) : "del "+fmtDateFromTs(k.inicioTs)+" al "+fmtDateFromTs(k.ultimaTs);
-  }
-  function abrirSancion(ct){
-    const reg = sanciones.get(ct.id);
-    const pl = (plantel||[]).find(p=>String(p.legajo||"").toUpperCase()===String(ct.legajo).toUpperCase()) || {};
-    const caso = cases.find(c=>String(c.legajo).toUpperCase()===String(ct.legajo).toUpperCase());
-    const hoy = new Date();
-    const data = reg ? {...reg, citaId:ct.id} : {citaId:ct.id, casoId:ct.casoId, legajo:ct.legajo, nombre:pl.nombre||ct.nombre||"", sector:pl.sector||(caso&&caso.grupo)||"",
-      fechaControl:ct.fecha, fechaAusencia:ausenciaTextoDe(ct.legajo, ct.fecha), medida:"Llamado de atención", nInterno:"", lugar:"Florida",
-      fechaEmision: hoy.getFullYear()+"-"+pad2(hoy.getMonth()+1)+"-"+pad2(hoy.getDate())};
-    setSancionForm({data, reimpresion: !!reg});
-  }
-  // La hoja se abre primero (en el mismo clic, para que el navegador no la bloquee) y después se registra la emisión.
-  async function generarSancion(d){
-    if(!printSancionNota(d)) return;
-    setSancionForm(null);
-    setSaveStatus("Registrando la sanción…");
+  // Marcar con una tilde a quien corresponde sancionar por ausencias injustificadas (RRHH y Administrador). Queda "marcada" y figura en el menú
+  // Sanciones, donde el Administrador define el tipo de sanción y emite la nota. Las fechas de las ausencias salen del caso (si son más de 10, solo la última;
+  // se revisan en el menú Sanciones).
+  const [sancionBusy, setSancionBusy] = useState(null);
+  async function marcarSancion(c){
+    if(!puedeSancionar || sanciones.has(sancionId(c.id))) return;
+    setSancionBusy(c.id); setSaveStatus("Marcando para sanción…");
     try{
-      const prev = sanciones.get(d.citaId);
-      const obj = await saveSancion({id:d.citaId, casoId:d.casoId, legajo:d.legajo, nombre:d.nombre, sector:d.sector, fechaControl:d.fechaControl, fechaAusencia:d.fechaAusencia,
-        medida:d.medida, nInterno:d.nInterno, lugar:d.lugar, fechaEmision:d.fechaEmision, emitidaPor:(prev && prev.emitidaPor) || userRef.current, emitidaTs:(prev && prev.emitidaTs) || Date.now()});
+      const dias = (c.diasTs||[]).slice().sort((a,b)=>a-b);
+      const fechas = (dias.length<=10 ? dias : dias.slice(-1)).map(ts=>tsToISODate(ts));
+      const pl = (plantel||[]).find(p=>String(p.legajo||"").toUpperCase()===String(c.legajo).toUpperCase()) || {};
+      const obj = await saveSancion({id:sancionId(c.id), casoId:c.id, legajo:c.legajo, nombre:pl.nombre||c.nombre||"", sector:pl.sector||c.grupo||"", unidad:c.unidad||"",
+        motivo:c.motivoLabel||"", estado:"marcada", medida:"", fechas, diasSuspension:0, nInterno:"", lugar:"Florida", fechaEmision:"", marcadaPor:userRef.current, marcadaTs:Date.now()});
       setSanciones(p=>{ const n = new Map(p); n.set(obj.id, obj); return n; });
-      setSaveStatus("Sanción registrada como emitida");
-    }catch(err){ setSaveStatus("Se generó la nota pero no se pudo registrar la emisión: "+((err && err.message) ? err.message : String(err))+" (¿corriste supabase-migracion-medicina-sanciones.sql?)"); }
+      setSaveStatus("Marcado para sanción: ya figura en el menú Sanciones");
+    }catch(err){ setSaveStatus("No se pudo marcar: "+((err && err.message) ? err.message : String(err))+" (¿corriste supabase-migracion-sanciones-menu.sql?)"); }
+    setSancionBusy(null);
   }
-  async function deshacerSancion(ct){
-    if(!puedeEliminarSancion || !sanciones.has(ct.id)) return;
-    if(!window.confirm("¿Quitar la marca de «emitida» de la sanción a "+(ct.nombre||ct.legajo)+"? Volverá a figurar como pendiente de emitir.")) return;
-    try{ await deleteSancion(ct.id); setSanciones(p=>{ const n = new Map(p); n.delete(ct.id); return n; }); setSaveStatus("Marca de emisión quitada"); }
-    catch(err){ setSaveStatus("No se pudo quitar: "+((err && err.message) ? err.message : String(err))); }
+  async function desmarcarSancion(c){
+    const reg = sanciones.get(sancionId(c.id));
+    if(!puedeSancionar || !reg || reg.estado!=="marcada") return;
+    setSancionBusy(c.id); setSaveStatus("Quitando la marca…");
+    try{ await deleteSancion(reg.id); setSanciones(p=>{ const n = new Map(p); n.delete(reg.id); return n; }); setSaveStatus("Marca de sanción quitada"); }
+    catch(err){ setSaveStatus("No se pudo quitar la marca: "+((err && err.message) ? err.message : String(err))); }
+    setSancionBusy(null);
   }
-
   const casesFull = useMemo(()=> cases.map(c=>{
     const manual = casesManual.get(c.id) || {};
     const inicioManualTs = manual.inicioManualTs!=null ? manual.inicioManualTs : null;
@@ -4032,9 +4041,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
         if(!ct || ct.anulada) ct = citas.get(manualCaseId(c.legajo, fechaCita)+"|"+fechaCita);
         return ct && !ct.anulada ? ct : null;
       })(),
-      // sanción: control con ausencia injustificada dentro de este caso (y su registro de emisión, si ya se emitió la nota)
-      sancionCita: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return ct && ct.fecha>=tsToISODate(inicioManualTs!=null ? inicioManualTs : c.inicioTs) ? ct : null; })(),
-      sancionReg: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return ct ? (sanciones.get(ct.id)||null) : null; })(),
+      // sanción: registro de este caso (marcada / definida / emitida) y si la Dra. consideró injustificada la ausencia en el control médico
+      sancionReg: sanciones.get(sancionId(c.id)) || null,
+      draInjustificada: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return !!ct && ct.fecha>=tsToISODate(inicioManualTs!=null ? inicioManualTs : c.inicioTs); })(),
       // otra citación pendiente de este empleado para un día distinto del elegido (solo para avisarlo)
       otraCita: (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).find(ct=>ct.fecha!==fechaCita) || null
     };
@@ -4353,28 +4362,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       {!motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={setMotivoIncluded}
         defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
 
-      {sancionForm && <SancionModal data={sancionForm.data} reimpresion={sancionForm.reimpresion} onClose={()=>setSancionForm(null)} onGenerar={generarSancion} />}
-
-      {puedeSancionar && sancionesPendientes.length>0 && (
-        <div className="card table-card" style={{borderLeft:"4px solid var(--bad)"}}>
-          <h3>Sanciones pendientes de emitir ({sancionesPendientes.length})</h3>
-          <div className="caption">La Dra. determinó, en el control médico (art. 210 LCT), que la ausencia no se justifica. Al emitir la sanción se genera la nota en PDF y queda registrada.</div>
-          <div className="overflow-x">
-            <table>
-              <thead><tr><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Control médico</th><th></th></tr></thead>
-              <tbody>
-                {sancionesPendientes.map(ct=>(
-                  <tr key={ct.id}>
-                    <td>{ct.legajo}</td><td>{ct.nombre||"—"}</td><td>{ct.unidad||"—"}</td><td>{dateKeyToLabel(ct.fecha)}</td>
-                    <td><button type="button" className="btn small" onClick={()=>abrirSancion(ct)}>Emitir sanción</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
       {puedeCitar && <CitarEmpleadoBox options={empOptions} minFecha={citaFecha} defaultFecha={fechaCita} onCitar={citarManual} />}
 
       {!motivoEfectivo.size ? (
@@ -4499,18 +4486,15 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       </td>
                       {puedeSancionar && (
                         <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
-                          {!c.sancionCita ? "—" : c.sancionReg ? (
-                            <div>
-                              <span style={{color:"var(--good)", fontWeight:700}}>✔ Sanción emitida {c.sancionReg.fechaEmision ? dateKeyToLabel(c.sancionReg.fechaEmision).slice(0,5) : ""}</span>
-                              <div className="hint"><span style={{cursor:"pointer", textDecoration:"underline"}} onClick={()=>abrirSancion(c.sancionCita)}>Ver / reimprimir nota</span>
-                                {puedeEliminarSancion && <React.Fragment> · <span style={{cursor:"pointer", textDecoration:"underline"}} onClick={()=>deshacerSancion(c.sancionCita)}>deshacer</span></React.Fragment>}</div>
-                            </div>
+                          {c.sancionReg && c.sancionReg.estado!=="marcada" ? (
+                            <span style={{color:"var(--good)", fontWeight:700}} title="Se define y se emite desde el menú Sanciones">✔ Sanción {c.sancionReg.estado==="emitida" ? "emitida" : "definida"}: {c.sancionReg.medida}</span>
                           ) : (
-                            <div>
-                              <span style={{color:"var(--bad)", fontWeight:700}} title={"Control médico del "+dateKeyToLabel(c.sancionCita.fecha)+": la Dra. no justificó la ausencia"}>✔ Ausencia injustificada</span>
-                              <div><button type="button" className="btn small" onClick={()=>abrirSancion(c.sancionCita)}>Emitir sanción</button></div>
-                            </div>
+                            <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}} title="Tildá para que el Administrador defina y emita la sanción por ausencias injustificadas (figura en el menú Sanciones)">
+                              <input type="checkbox" checked={!!c.sancionReg} onChange={()=>c.sancionReg ? desmarcarSancion(c) : marcarSancion(c)} disabled={sancionBusy===c.id} />
+                              <span style={c.sancionReg ? {fontWeight:700, color:"var(--bad)"} : undefined}>{c.sancionReg ? "Sanción marcada" : "Sancionar"}</span>
+                            </label>
                           )}
+                          {c.draInjustificada && <div className="hint" style={{color:"var(--bad)", marginTop:2}} title="En el control médico del art. 210 la Dra. no justificó la ausencia">La Dra.: ausencia injustificada</div>}
                         </td>
                       )}
                       <td style={{minWidth:220}}>
@@ -4791,7 +4775,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     try{
       const cur = citaDe(item.casoId, item.legajo);
       await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), resultado: valor, anulada:false});
-      setStatus(valor==="injustificada" ? "Marcada como ausencia injustificada: RRHH la verá en Crónicos para emitir la sanción" : valor==="justificada" ? "Marcada como ausencia justificada" : "Resultado del control borrado");
+      setStatus(valor==="injustificada" ? "Marcada como ausencia injustificada: RRHH lo verá en Crónicos al decidir si corresponde una sanción" : valor==="justificada" ? "Marcada como ausencia justificada" : "Resultado del control borrado");
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
@@ -4935,7 +4919,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
                   <input type="radio" name={"res-"+item.key} checked={((cur && cur.resultado)||"")===v} onChange={()=>setResultado(item, v)} disabled={ocupado} /> {t}
                 </label>
               ))}
-              {cur && cur.resultado==="injustificada" && <span className="hint">RRHH verá en Crónicos que corresponde emitir la sanción.</span>}
+              {cur && cur.resultado==="injustificada" && <span className="hint">RRHH lo verá en Crónicos al decidir si corresponde una sanción.</span>}
             </div>
             <div>
               <div className="hint" style={{fontWeight:700, marginBottom:4}}>Anotación de la Dra. (se guarda también en Crónicos y marca al empleado como visto)</div>
@@ -5086,6 +5070,215 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
           {anFiltradas.length>300 && <div className="hint" style={{marginTop:6}}>Se muestran las 300 más recientes; la exportación incluye todas las que cumplen los filtros ({fmt(anFiltradas.length)}).</div>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ===================== Sanciones =====================
+   Casos que RRHH marcó en Crónicos para sancionar por ausencias injustificadas. El Administrador define el tipo de sanción (de menor a mayor gravedad:
+   Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión, con sus días) y revisa las fechas de las ausencias; una vez definidas se emiten
+   las notas en PDF (cada una con el nombre del empleado y la sanción). RRHH ve la lista pero no define ni emite. */
+function localISO(ts){ const d = new Date(ts); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+const SANCION_ESTADOS = {marcada:{txt:"Pendiente de definir", color:"var(--warning)"}, definida:{txt:"Definida: lista para emitir", color:"var(--accent)"}, emitida:{txt:"Emitida", color:"var(--good)"}};
+function SancionesTab({plantel, puedeDefinir}){
+  const [sanciones, setSanciones] = useState(new Map());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [desde, setDesde] = useKeptState("san.desde", "");
+  const [hasta, setHasta] = useKeptState("san.hasta", "");
+  const [estadoF, setEstadoF] = useKeptState("san.estado", "__todas");
+  const [search, setSearch] = useKeptState("san.search", "");
+  const [openId, setOpenId] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [busy, setBusy] = useState(null);
+  const userRef = useRef("");
+  const aliveRef = useRef(true);
+
+  async function cargar(){
+    try{ const m = await loadSanciones(); if(aliveRef.current){ setSanciones(m); setError(""); } return true; }
+    catch(err){ if(aliveRef.current) setError((err && err.message) ? err.message : String(err)); return false; }
+  }
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{ const {data} = await supabaseClient.auth.getSession(); userRef.current = (data && data.session && data.session.user && data.session.user.email) || ""; }catch(e){}
+      await cargar();
+      if(aliveRef.current) setLoading(false);
+    })();
+    return ()=>{ aliveRef.current = false; };
+  }, []);
+  async function actualizar(){ setStatus("Actualizando..."); const ok = await cargar(); setStatus(ok ? "Datos actualizados" : ""); }
+
+  const refTs = r => r.marcadaTs || r.definidaTs || r.emitidaTs || 0;
+  const todas = useMemo(()=> Array.from(sanciones.values()).sort((a,b)=>refTs(b)-refTs(a)), [sanciones]);
+  const lista = useMemo(()=>{
+    const q = normTxt(search);
+    return todas.filter(r=>{
+      const iso = refTs(r) ? localISO(refTs(r)) : "";
+      if(desde && iso && iso<desde) return false;
+      if(hasta && iso && iso>hasta) return false;
+      if(estadoF!=="__todas" && r.estado!==estadoF) return false;
+      if(q && !normTxt(r.legajo).includes(q) && !normTxt(r.nombre).includes(q)) return false;
+      return true;
+    });
+  }, [todas, desde, hasta, estadoF, search]);
+  const nPor = est => todas.filter(r=>r.estado===est).length;
+  const definidas = lista.filter(r=>r.estado==="definida");
+
+  function abrir(r){
+    if(openId===r.id){ setOpenId(null); return; }
+    setOpenId(r.id);
+    setDraft({medida:r.medida||"", dias:r.diasSuspension||1, fechasTxt:(r.fechas||[]).map(isoToDMY).join(", "), suspDesde:r.suspDesde||"", suspHasta:r.suspHasta||"", suspRetoma:r.suspRetoma||"",
+      nInterno:r.nInterno||"", lugar:r.lugar||"Florida", fechaEmision:r.fechaEmision||localISO(Date.now())});
+  }
+  async function guardarDefinicion(r){
+    if(!puedeDefinir) return;
+    const d = draft;
+    if(!d.medida){ setStatus("Elegí el tipo de sanción."); return; }
+    const dias = parseInt(d.dias, 10);
+    if(d.medida==="Suspensión" && !(dias>=1)){ setStatus("Indicá cuántos días de suspensión."); return; }
+    const pf = parseFechasTexto(d.fechasTxt);
+    if(!pf.ok){ setStatus("Revisá las fechas de las ausencias: escribilas como DD/MM/AAAA separadas por coma."); return; }
+    if(!pf.isos.length && !r.fechaAusencia){ setStatus("Cargá al menos una fecha de ausencia."); return; }
+    setBusy(r.id); setStatus("Guardando...");
+    try{
+      const obj = await saveSancion({...r, estado:"definida", medida:d.medida, diasSuspension: d.medida==="Suspensión" ? dias : 0,
+        suspDesde: d.medida==="Suspensión" ? (d.suspDesde||"") : "", suspHasta: d.medida==="Suspensión" ? (d.suspHasta||"") : "", suspRetoma: d.medida==="Suspensión" ? (d.suspRetoma||"") : "",
+        fechas:pf.isos, nInterno:(d.nInterno||"").trim(), lugar:(d.lugar||"").trim()||"Florida", fechaEmision:d.fechaEmision||localISO(Date.now()),
+        definidaPor:userRef.current, definidaTs:Date.now(), emitidaPor:"", emitidaTs:0});
+      setSanciones(p=>{ const n = new Map(p); n.set(obj.id, obj); return n; });
+      setOpenId(null); setStatus("Sanción definida: "+obj.medida+(obj.medida==="Suspensión" ? " ("+jornadasTexto(obj.diasSuspension).toLowerCase()+")" : ""));
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // La hoja se abre primero (en el mismo clic, para que el navegador no la bloquee); después se registra la emisión.
+  async function emitir(rs){
+    if(!puedeDefinir || !rs.length) return;
+    if(!abrirNotasSancion(rs.length===1 ? sancionNombreArchivo(rs[0]) : "Sanciones - "+localISO(Date.now()), rs)) return;
+    const aMarcar = rs.filter(r=>r.estado==="definida");
+    if(!aMarcar.length){ setStatus("Nota generada"); return; }
+    setStatus("Registrando la emisión…");
+    try{
+      const saved = [];
+      for(const r of aMarcar) saved.push(await saveSancion({...r, estado:"emitida", emitidaPor:userRef.current, emitidaTs:Date.now()}));
+      setSanciones(p=>{ const n = new Map(p); saved.forEach(o=>n.set(o.id, o)); return n; });
+      setStatus(saved.length===1 ? "Sanción emitida" : saved.length+" sanciones emitidas");
+    }catch(err){ setStatus("Se generó la nota pero no se pudo registrar la emisión: "+((err && err.message) ? err.message : String(err))); }
+  }
+  async function quitar(r){
+    if(!puedeDefinir) return;
+    if(!window.confirm("¿Quitar la sanción de "+(r.nombre||r.legajo)+" de la lista? Se borra la marca y lo definido. No se puede deshacer.")) return;
+    setBusy(r.id);
+    try{ await deleteSancion(r.id); setSanciones(p=>{ const n = new Map(p); n.delete(r.id); return n; }); setStatus("Sanción quitada de la lista"); }
+    catch(err){ setStatus("No se pudo quitar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  const campo = (label, k, extra) => (
+    <div className="field" style={{minWidth:170, flex:"1 1 170px"}}>
+      <label>{label}</label>
+      <input type={(extra && extra.type) || "text"} value={draft[k]==null ? "" : draft[k]} min={extra && extra.min} onChange={e=>setDraft(p=>({...p, [k]:e.target.value}))} placeholder={extra && extra.placeholder} />
+    </div>
+  );
+  const fechasDe = r => fechasTexto(r.fechas) || r.fechaAusencia || "—";
+
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field"><label>Marcadas desde</label><input type="date" value={desde} onChange={e=>setDesde(e.target.value)} /></div>
+        <div className="field"><label>Hasta</label><input type="date" value={hasta} onChange={e=>setHasta(e.target.value)} /></div>
+        <div className="field"><label>Estado</label>
+          <select value={estadoF} onChange={e=>setEstadoF(e.target.value)}>
+            <option value="__todas">Todas ({todas.length})</option>
+            <option value="marcada">Pendientes de definir ({nPor("marcada")})</option>
+            <option value="definida">Definidas, listas para emitir ({nPor("definida")})</option>
+            <option value="emitida">Emitidas ({nPor("emitida")})</option>
+          </select>
+        </div>
+        <div className="field"><label>Buscar</label><input type="text" placeholder="Legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{minWidth:180}} /></div>
+        {(desde || hasta || search || estadoF!=="__todas") && <button type="button" className="btn secondary" onClick={()=>{ setDesde(""); setHasta(""); setSearch(""); setEstadoF("__todas"); }}>Quitar filtros</button>}
+        <button type="button" className="btn secondary" onClick={actualizar} disabled={loading} title="Vuelve a leer lo que marcaron los demás usuarios">Actualizar datos</button>
+        {puedeDefinir && <button type="button" className="btn" onClick={()=>emitir(definidas)} disabled={!definidas.length} title="Genera todas las notas definidas de la lista en una sola hoja de impresión (un PDF)">Emitir todas las definidas ({definidas.length})</button>}
+        <span className="hint">{status}</span>
+      </div>
+      {error && <div className="warn-banner">No se pudieron leer las sanciones ({error}). ¿Ya corriste supabase-migracion-sanciones-menu.sql en Supabase?</div>}
+
+      <div className="card table-card">
+        <h3>Sanciones por ausencias injustificadas ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
+        <div className="caption">
+          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)— y revisás las fechas de las ausencias; con todas definidas, se emiten las notas en PDF." : "El Administrador define el tipo de sanción y emite las notas."}
+        </div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr><th>Legajo</th><th>Nombre</th><th>Sector</th><th>Fechas de las ausencias</th><th>Marcó</th><th>Sanción</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              {!lista.length && <tr><td colSpan="8" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{loading ? "Cargando…" : todas.length ? "Ninguna sanción con estos filtros." : "Todavía no hay empleados marcados para sanción."}</td></tr>}
+              {lista.map(r=>{
+                const est = SANCION_ESTADOS[r.estado] || SANCION_ESTADOS.marcada;
+                const abierto = openId===r.id;
+                return (
+                  <React.Fragment key={r.id}>
+                    <tr>
+                      <td style={{verticalAlign:"top"}}>{r.legajo}</td>
+                      <td style={{verticalAlign:"top"}}>{r.nombre||"—"}</td>
+                      <td style={{verticalAlign:"top"}}>{r.sector||r.unidad||"—"}</td>
+                      <td style={{verticalAlign:"top", minWidth:170}}>{fechasDe(r)}</td>
+                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}>{r.marcadaTs ? new Date(r.marcadaTs).toLocaleDateString("es-AR") : "—"}<div className="hint">{r.marcadaPor||""}</div></td>
+                      <td style={{verticalAlign:"top"}}>{r.medida ? <b>{r.medida}</b> : "—"}{r.medida==="Suspensión" && r.diasSuspension ? <div className="hint">{jornadasTexto(r.diasSuspension)}</div> : null}</td>
+                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}><b style={{color:est.color}}>{est.txt}</b>{r.estado==="emitida" && r.emitidaTs ? <div className="hint">{new Date(r.emitidaTs).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
+                        {puedeDefinir && (
+                          <React.Fragment>
+                            <button type="button" className="btn secondary small" onClick={()=>abrir(r)}>{abierto ? "Cerrar" : (r.estado==="marcada" ? "Definir" : "Editar definición")}</button>{" "}
+                            {r.estado==="definida" && <button type="button" className="btn small" onClick={()=>emitir([r])} disabled={busy===r.id}>Emitir PDF</button>}
+                            {r.estado==="emitida" && <button type="button" className="btn secondary small" onClick={()=>emitir([r])} disabled={busy===r.id}>Reimprimir PDF</button>}{" "}
+                            <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>quitar(r)} disabled={busy===r.id}>Quitar</button>
+                          </React.Fragment>
+                        )}
+                      </td>
+                    </tr>
+                    {abierto && (
+                      <tr><td colSpan="8" style={{background:"var(--plane)"}}>
+                        <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
+                          {r.fechaAusencia && !(r.fechas||[]).length && <div className="hint">Nota anterior con la fecha escrita así: «{r.fechaAusencia}». Cargá las fechas abajo para que salgan en la nota.</div>}
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                            <div className="field" style={{minWidth:230}}>
+                              <label>Tipo de sanción (de menor a mayor gravedad)</label>
+                              <select value={draft.medida||""} onChange={e=>setDraft(p=>({...p, medida:e.target.value}))}>
+                                <option value="">— Elegir —</option>
+                                {SANCION_TIPOS.map((t,i)=>(<option key={t} value={t}>{(i+1)+". "+t}</option>))}
+                              </select>
+                            </div>
+                            {draft.medida==="Suspensión" && campo("Días de suspensión", "dias", {type:"number", min:1})}
+                            {campo("Fechas de las ausencias (de menor a mayor)", "fechasTxt", {placeholder:"06/10/2026, 07/10/2026"})}
+                          </div>
+                          {draft.medida==="Suspensión" && (
+                            <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
+                              {campo("Suspendido desde (opcional)", "suspDesde", {type:"date"})}
+                              {campo("Hasta (opcional)", "suspHasta", {type:"date"})}
+                              {campo("Retoma tareas el (opcional)", "suspRetoma", {type:"date"})}
+                              <div className="hint" style={{alignSelf:"center"}}>Si las dejás vacías, en la nota quedan los espacios ___/___/___ para completar a mano.</div>
+                            </div>
+                          )}
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
+                            {campo("Lugar", "lugar")}
+                            {campo("Fecha de la nota", "fechaEmision", {type:"date"})}
+                            {campo("N° interno (opcional)", "nInterno")}
+                          </div>
+                          <div style={{display:"flex", gap:8}}>
+                            <button type="button" className="btn small" onClick={()=>guardarDefinicion(r)} disabled={busy===r.id}>Guardar definición</button>
+                            <button type="button" className="btn secondary small" onClick={()=>setOpenId(null)}>Cancelar</button>
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5682,6 +5875,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
     {key:"tipos", label:"Tipos de ausencia", color:"#8e63e6"},
     {key:"cronicos", label:"Crónicos", color:"#e5484d"},
     {key:"medicina_laboral", label:"Medicina Laboral", color:"#b4724a"},
+    {key:"sanciones", label:"Sanciones", color:"#c0392b"},
     {key:"ranking", label:"Ranking", color:"#e5a000"},
     {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
     {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
@@ -5884,8 +6078,9 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
-          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} puedeEliminarSancion={!!perms.eliminarCita} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} />}
+          {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
         </React.Fragment>
       )}
