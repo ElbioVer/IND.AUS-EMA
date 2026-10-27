@@ -3611,9 +3611,18 @@ async function deleteCita(id){
    o Suspensión, con sus días) y revisa las fechas de las ausencias ("definida"); 3) se emite la nota en PDF ("emitida"). */
 const SANCIONES_TABLE = "medicina_sanciones";
 const SANCION_TIPOS = ["Llamado de atención","Apercibimiento","Severo Apercibimiento","Suspensión"];
+// Motivo de la sanción: define qué nota se imprime. "ausencias" = ausencias injustificadas (notas de Firpo / Gimenez);
+// "control" = al control médico del art. 210 de la LCT se lo encontró en condiciones de prestar tareas (nota con el texto del control médico).
+const SANCION_MOTIVOS = {
+  ausencias:{label:"Ausencias injustificadas", corto:"Ausencias injustificadas"},
+  control:{label:"Encontrarse en condiciones laborales al momento del control médico (art. 210 LCT)", corto:"En condiciones laborales en el control médico"}
+};
 function sancionId(casoId){ return "SAN|"+casoId; }
 function sancionRowToObj(r){
+  // las notas emitidas con la primera versión (id = citación, con fecha de control) eran de "control médico"
+  const motivoSancion = r.motivo_sancion || ((!String(r.id||"").startsWith("SAN|") && r.fecha_control) ? "control" : "ausencias");
   return {id:r.id, casoId:r.caso_id||"", legajo:r.legajo||"", nombre:r.nombre||"", sector:r.sector||"", unidad:r.unidad||"", motivo:r.motivo||"",
+    motivoSancion, fechaControl:r.fecha_control||"",
     estado:r.estado||"emitida", medida:r.medida||"", fechas:Array.isArray(r.fechas) ? r.fechas : [], fechaAusencia:r.fecha_ausencia||"",
     diasSuspension:Number(r.dias_suspension)||0, suspDesde:r.susp_desde||"", suspHasta:r.susp_hasta||"", suspRetoma:r.susp_retoma||"",
     nInterno:r.n_interno||"", lugar:r.lugar||"", fechaEmision:r.fecha_emision||"",
@@ -3622,6 +3631,7 @@ function sancionRowToObj(r){
 }
 function sancionObjToRow(o){
   return {id:o.id, caso_id:o.casoId||"", legajo:o.legajo, nombre:o.nombre||"", sector:o.sector||"", unidad:o.unidad||"", motivo:o.motivo||"",
+    motivo_sancion:o.motivoSancion||"ausencias", fecha_control:o.fechaControl||null,
     estado:o.estado||"marcada", medida:o.medida||"", fechas:o.fechas||[], fecha_ausencia:o.fechaAusencia||"",
     dias_suspension:o.diasSuspension||0, susp_desde:o.suspDesde||null, susp_hasta:o.suspHasta||null, susp_retoma:o.suspRetoma||null,
     n_interno:o.nInterno||"", lugar:o.lugar||"", fecha_emision:o.fechaEmision||null,
@@ -3685,25 +3695,41 @@ const JORNADAS_TXT = ["","Una","Dos","Tres","Cuatro","Cinco","Seis","Siete","Och
 function jornadasTexto(n){ return n===1 ? "Una Jornada laboral" : (JORNADAS_TXT[n] || String(n))+" Jornadas laborales"; }
 // nombre con el que se guarda el PDF (el título de la hoja): "9931 GIMENEZ. JAVIER GUSTAVO - Suspensión"
 function sancionNombreArchivo(d){ return ((d.legajo||"")+" "+(d.nombre||"")+" - "+(d.medida||"Sanción")).replace(/[\\\/:*?"<>|]+/g,"").trim(); }
-// Una nota de sanción (una hoja A4). Dos modelos: Llamado de atención / Apercibimiento / Severo Apercibimiento ("medida correctiva") y Suspensión.
+// Una nota de sanción (una hoja A4). Según el motivo (d.motivoSancion):
+//  - "ausencias": ausencias injustificadas. Dos modelos: Llamado de atención / Apercibimiento / Severo Apercibimiento ("medida correctiva") y Suspensión.
+//  - "control": al control médico del art. 210 de la LCT se lo encontró en condiciones de prestar tareas (mismo texto del control, con la medida elegida).
 function sancionNotaPagina(d, logoUrl){
   const e = escHtml;
   const fechas = fechasTexto(d.fechas) || d.fechaAusencia || "…";
   const blanco = "___/___/___";
   const dmy = iso => iso ? isoToDMY(iso) : blanco;
-  const decision = d.medida==="Suspensión"
-    ? "suspenderlo por el término de "+e(jornadasTexto(Math.max(1, d.diasSuspension||1)))+" desde el día "+e(dmy(d.suspDesde))+" Hasta el día "+e(dmy(d.suspHasta))+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+e(dmy(d.suspRetoma))+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo."
-    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
-  return "<section class='nota'>"+
+  const suspension = "suspenderlo por el término de "+e(jornadasTexto(Math.max(1, d.diasSuspension||1)))+" desde el día "+e(dmy(d.suspDesde))+" Hasta el día "+e(dmy(d.suspHasta))+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+e(dmy(d.suspRetoma))+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo.";
+  const cabecera = "<section class='nota'>"+
     "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
     "<div class='dest'><div class='senor'>Señor/a:</div><div class='nom'>"+e(d.nombre||"")+"</div>"+
-      "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>"+
+      "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>";
+  const pie = "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
+    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+  if(d.motivoSancion==="control"){
+    const unica = (d.fechas||[]).length<=1;
+    const decisionC = d.medida==="Suspensión"
+      ? "en concordancia con sus antecedentes y la gravedad de la falta cometida, "+suspension
+      : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicar la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
+    return cabecera+
+      "<p class='cuerpo ind'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, con motivo de "+(unica ? "su ausencia del día " : "sus ausencias de los días ")+"<b>"+e(fechas)+"</b>, se procedió a efectuar un control médico en los términos del artículo 210 de la LCT, practicado el día <b>"+e(fechaLarga(d.fechaControl)||"…")+"</b>. "+
+      "Del resultado de dicho control y de la evaluación de la documentación médica presentada, no se logró acreditar la dolencia invocada en los términos que justifiquen la ausencia, determinándose que usted se encontraba en condiciones de prestar tareas. "+
+      "Esta situación requiere que tome debida conciencia de las consecuencias que genera, ya que las ausencias que no se encuentran debidamente justificadas afectan la planificación y organización del trabajo, comprometen el cumplimiento de los plazos de diligenciamiento establecidos por nuestro cliente y pueden repercutir negativamente en la calidad del servicio, exponiendo a la empresa a reclamos y eventuales penalidades económicas por incumplimientos contractuales. "+
+      "Por tal motivo, se le exige actuar con responsabilidad y buena fe en el cumplimiento de sus obligaciones laborales, procurando reencauzar su gestión y evitar situaciones que afecten la operatividad y los compromisos asumidos por la empresa, se ha resuelto, "+decisionC+"</p>"+
+      "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+pie;
+  }
+  const decision = d.medida==="Suspensión"
+    ? suspension
+    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
+  return cabecera+
     "<p class='cuerpo ind'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, al registrar Ausencias injustificadas, en fechas "+e(fechas)+", generando trastornos operativos de su pleno conocimiento, se ha resuelto,&nbsp; en concordancia con sus antecedentes y la gravedad de la falta cometida, "+decision+"</p>"+
     "<p class='cuerpo'>La presente medida tiene por finalidad reencauzar su gestión&nbsp; y evitar en el futuro la reiteración de este tipo de hechos.</p>"+
     "<p class='cuerpo'>Apercibimosle que ante la reiteración de este tipo de incumplimientos, se le aplicarán medidas disciplinarias más severas,</p>"+
-    "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+
-    "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
-    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+    "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+pie;
 }
 // Abre una ventana con una o varias notas (una hoja cada una), lista para imprimir o guardar como PDF ("Guardar como PDF" en la ventana de impresión).
 // El título de la hoja es el nombre con el que se guarda el archivo. La hoja se imprime sin márgenes del navegador (así no salen la fecha, el título,
@@ -4001,8 +4027,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const dias = (c.diasTs||[]).slice().sort((a,b)=>a-b);
       const fechas = (dias.length<=10 ? dias : dias.slice(-1)).map(ts=>tsToISODate(ts));
       const pl = (plantel||[]).find(p=>String(p.legajo||"").toUpperCase()===String(c.legajo).toUpperCase()) || {};
+      const dra = c.draInjustificada ? injustificadaPorLegajo.get(String(c.legajo).toUpperCase()) : null;
       const obj = await saveSancion({id:sancionId(c.id), casoId:c.id, legajo:c.legajo, nombre:pl.nombre||c.nombre||"", sector:pl.sector||c.grupo||"", unidad:c.unidad||"",
-        motivo:c.motivoLabel||"", estado:"marcada", medida:"", fechas, diasSuspension:0, nInterno:"", lugar:"Florida", fechaEmision:"", marcadaPor:userRef.current, marcadaTs:Date.now()});
+        motivo:c.motivoLabel||"", estado:"marcada", medida:"", fechas, diasSuspension:0, nInterno:"", lugar:"Florida", fechaEmision:"", marcadaPor:userRef.current, marcadaTs:Date.now(),
+        // si la Dra. no justificó la ausencia en el control médico, el motivo propuesto es el del control (art. 210); el Administrador lo puede cambiar al definir
+        motivoSancion: dra ? "control" : "ausencias", fechaControl: dra ? dra.fecha : ""});
       setSanciones(p=>{ const n = new Map(p); n.set(obj.id, obj); return n; });
       setSaveStatus("Marcado para sanción: ya figura en el menú Sanciones");
     }catch(err){ setSaveStatus("No se pudo marcar: "+((err && err.message) ? err.message : String(err))+" (¿corriste supabase-migracion-sanciones-menu.sql?)"); }
@@ -5129,12 +5158,18 @@ function SancionesTab({plantel, puedeDefinir}){
   function abrir(r){
     if(openId===r.id){ setOpenId(null); return; }
     setOpenId(r.id);
-    setDraft({medida:r.medida||"", dias:r.diasSuspension||1, fechasTxt:(r.fechas||[]).map(isoToDMY).join(", "), suspDesde:r.suspDesde||"", suspHasta:r.suspHasta||"", suspRetoma:r.suspRetoma||"",
+    // las notas viejas traían la fecha de ausencia escrita (ej. "26/10/2026"): si se entiende, se pasa a fecha
+    const legacy = !(r.fechas||[]).length && r.fechaAusencia ? parseFechasTexto(r.fechaAusencia) : null;
+    setDraft({motivoSancion:r.motivoSancion||"ausencias", fechaControl:r.fechaControl||"", medida:r.medida||"", dias:r.diasSuspension||1,
+      fechasTxt:(r.fechas||[]).length ? r.fechas.map(isoToDMY).join(", ") : (legacy && legacy.ok ? legacy.isos.map(isoToDMY).join(", ") : ""),
+      suspDesde:r.suspDesde||"", suspHasta:r.suspHasta||"", suspRetoma:r.suspRetoma||"",
       nInterno:r.nInterno||"", lugar:r.lugar||"Florida", fechaEmision:r.fechaEmision||localISO(Date.now())});
   }
   async function guardarDefinicion(r){
     if(!puedeDefinir) return;
     const d = draft;
+    if(!d.motivoSancion){ setStatus("Elegí el motivo de la sanción."); return; }
+    if(d.motivoSancion==="control" && !d.fechaControl){ setStatus("Indicá la fecha del control médico."); return; }
     if(!d.medida){ setStatus("Elegí el tipo de sanción."); return; }
     const dias = parseInt(d.dias, 10);
     if(d.medida==="Suspensión" && !(dias>=1)){ setStatus("Indicá cuántos días de suspensión."); return; }
@@ -5143,7 +5178,7 @@ function SancionesTab({plantel, puedeDefinir}){
     if(!pf.isos.length && !r.fechaAusencia){ setStatus("Cargá al menos una fecha de ausencia."); return; }
     setBusy(r.id); setStatus("Guardando...");
     try{
-      const obj = await saveSancion({...r, estado:"definida", medida:d.medida, diasSuspension: d.medida==="Suspensión" ? dias : 0,
+      const obj = await saveSancion({...r, estado:"definida", motivoSancion:d.motivoSancion, fechaControl: d.motivoSancion==="control" ? d.fechaControl : "", medida:d.medida, diasSuspension: d.medida==="Suspensión" ? dias : 0,
         suspDesde: d.medida==="Suspensión" ? (d.suspDesde||"") : "", suspHasta: d.medida==="Suspensión" ? (d.suspHasta||"") : "", suspRetoma: d.medida==="Suspensión" ? (d.suspRetoma||"") : "",
         fechas:pf.isos, nInterno:(d.nInterno||"").trim(), lugar:(d.lugar||"").trim()||"Florida", fechaEmision:d.fechaEmision||localISO(Date.now()),
         definidaPor:userRef.current, definidaTs:Date.now(), emitidaPor:"", emitidaTs:0});
@@ -5204,15 +5239,15 @@ function SancionesTab({plantel, puedeDefinir}){
       {error && <div className="warn-banner">No se pudieron leer las sanciones ({error}). ¿Ya corriste supabase-migracion-sanciones-menu.sql en Supabase?</div>}
 
       <div className="card table-card">
-        <h3>Sanciones por ausencias injustificadas ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
+        <h3>Sanciones ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
         <div className="caption">
-          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)— y revisás las fechas de las ausencias; con todas definidas, se emiten las notas en PDF." : "El Administrador define el tipo de sanción y emite las notas."}
+          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el motivo (ausencias injustificadas, o encontrarse en condiciones laborales al momento del control médico) y el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)—, y revisás las fechas; con todas definidas, se emiten las notas en PDF." : "El Administrador define el tipo de sanción y emite las notas."}
         </div>
         <div className="overflow-x">
           <table>
-            <thead><tr><th>Legajo</th><th>Nombre</th><th>Sector</th><th>Fechas de las ausencias</th><th>Marcó</th><th>Sanción</th><th>Estado</th><th></th></tr></thead>
+            <thead><tr><th>Legajo</th><th>Nombre</th><th>Sector</th><th>Fechas de las ausencias</th><th>Marcó</th><th>Motivo</th><th>Sanción</th><th>Estado</th><th></th></tr></thead>
             <tbody>
-              {!lista.length && <tr><td colSpan="8" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{loading ? "Cargando…" : todas.length ? "Ninguna sanción con estos filtros." : "Todavía no hay empleados marcados para sanción."}</td></tr>}
+              {!lista.length && <tr><td colSpan="9" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{loading ? "Cargando…" : todas.length ? "Ninguna sanción con estos filtros." : "Todavía no hay empleados marcados para sanción."}</td></tr>}
               {lista.map(r=>{
                 const est = SANCION_ESTADOS[r.estado] || SANCION_ESTADOS.marcada;
                 const abierto = openId===r.id;
@@ -5224,6 +5259,7 @@ function SancionesTab({plantel, puedeDefinir}){
                       <td style={{verticalAlign:"top"}}>{r.sector||r.unidad||"—"}</td>
                       <td style={{verticalAlign:"top", minWidth:170}}>{fechasDe(r)}</td>
                       <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}>{r.marcadaTs ? new Date(r.marcadaTs).toLocaleDateString("es-AR") : "—"}<div className="hint">{r.marcadaPor||""}</div></td>
+                      <td style={{verticalAlign:"top", minWidth:150}}>{(SANCION_MOTIVOS[r.motivoSancion]||SANCION_MOTIVOS.ausencias).corto}{r.motivoSancion==="control" && r.fechaControl ? <div className="hint">Control del {isoToDMY(r.fechaControl)}</div> : null}</td>
                       <td style={{verticalAlign:"top"}}>{r.medida ? <b>{r.medida}</b> : "—"}{r.medida==="Suspensión" && r.diasSuspension ? <div className="hint">{jornadasTexto(r.diasSuspension)}</div> : null}</td>
                       <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}><b style={{color:est.color}}>{est.txt}</b>{r.estado==="emitida" && r.emitidaTs ? <div className="hint">{new Date(r.emitidaTs).toLocaleDateString("es-AR")}</div> : null}</td>
                       <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
@@ -5238,9 +5274,18 @@ function SancionesTab({plantel, puedeDefinir}){
                       </td>
                     </tr>
                     {abierto && (
-                      <tr><td colSpan="8" style={{background:"var(--plane)"}}>
+                      <tr><td colSpan="9" style={{background:"var(--plane)"}}>
                         <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
                           {r.fechaAusencia && !(r.fechas||[]).length && <div className="hint">Nota anterior con la fecha escrita así: «{r.fechaAusencia}». Cargá las fechas abajo para que salgan en la nota.</div>}
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                            <div className="field" style={{minWidth:300, flex:"1 1 300px"}}>
+                              <label>Motivo de la sanción (define qué nota se imprime)</label>
+                              <select value={draft.motivoSancion||"ausencias"} onChange={e=>setDraft(p=>({...p, motivoSancion:e.target.value}))}>
+                                {Object.keys(SANCION_MOTIVOS).map(k=>(<option key={k} value={k}>{SANCION_MOTIVOS[k].label}</option>))}
+                              </select>
+                            </div>
+                            {draft.motivoSancion==="control" && campo("Fecha del control médico", "fechaControl", {type:"date"})}
+                          </div>
                           <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
                             <div className="field" style={{minWidth:230}}>
                               <label>Tipo de sanción (de menor a mayor gravedad)</label>
@@ -5250,7 +5295,7 @@ function SancionesTab({plantel, puedeDefinir}){
                               </select>
                             </div>
                             {draft.medida==="Suspensión" && campo("Días de suspensión", "dias", {type:"number", min:1})}
-                            {campo("Fechas de las ausencias (de menor a mayor)", "fechasTxt", {placeholder:"06/10/2026, 07/10/2026"})}
+                            {campo(draft.motivoSancion==="control" ? "Fecha(s) de la(s) ausencia(s)" : "Fechas de las ausencias (de menor a mayor)", "fechasTxt", {placeholder:"06/10/2026, 07/10/2026"})}
                           </div>
                           {draft.medida==="Suspensión" && (
                             <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
