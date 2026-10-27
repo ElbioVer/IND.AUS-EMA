@@ -2973,7 +2973,7 @@ const ANUAL_GRID_CSS = `
 .ygrid-leg span{display:inline-flex;align-items:center;gap:6px;}
 .ygrid-leg i{display:inline-block;width:20px;height:14px;border:1px solid #777;}
 `;
-function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
+function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones}){
   const employeeOptions = useMemo(()=>{
     const map = new Map();
     parsed.records.forEach(r=>{
@@ -3090,6 +3090,35 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
     agrup:{get:r=>r.agrup||"(vacío)", type:"text"}, presidencia:{get:r=>r.presidencia||"", type:"text"},
     tipo:{get:r=>tipoOf(r), type:"text"}, motivo:{get:r=>r.motivo, type:"text"}, razon:{get:r=>r.razon, type:"text"}
   });
+
+  // Sanciones del empleado (solo para quien las ve: Administrador y RRHH): cada día del detalle indica si se emitió la sanción por esa ausencia.
+  const [sancionesLeg, setSancionesLeg] = useState([]);
+  useEffect(()=>{
+    let vivo = true;
+    setSancionesLeg([]);
+    if(!puedeVerSanciones || !legajoSel) return;
+    (async ()=>{
+      try{
+        const {data, error} = await supabaseClient.from(SANCIONES_TABLE).select("*").eq("legajo", legajoSel);
+        if(error) throw error;
+        if(vivo) setSancionesLeg((data||[]).map(sancionRowToObj));
+      }catch(e){ /* sin la tabla o sin permiso: la columna queda en blanco */ }
+    })();
+    return ()=>{ vivo = false; };
+  }, [puedeVerSanciones, legajoSel]);
+  const sancionesConDias = useMemo(()=> sancionesLeg.map(s=>({s, dias:diasDeSancion(s)})), [sancionesLeg]);
+  // Celda "Sanción" de un día o de un período (desde/hasta en AAAA-MM-DD): una línea por cada sanción que alcanza esos días.
+  function sancionCelda(desdeISO, hastaISO){
+    const hit = sancionesConDias.filter(x=>x.dias.some(d=>d>=desdeISO && d<=hastaISO)).map(x=>x.s);
+    if(!hit.length) return <span className="hint">—</span>;
+    const color = {emitida:"var(--good)", definida:"var(--accent)", marcada:"var(--warning)"};
+    return hit.map(s=>(
+      <div key={s.id} style={{color:color[s.estado]||"inherit", fontWeight:700}} title={(SANCION_MOTIVOS[s.motivoSancion]||SANCION_MOTIVOS.ausencias).label}>
+        {s.estado==="emitida" ? "✔ Emitida: "+(s.medida||"sanción")+(s.emitidaTs ? " ("+new Date(s.emitidaTs).toLocaleDateString("es-AR")+")" : "")
+          : s.estado==="definida" ? "Definida: "+s.medida+" (sin emitir)" : "Marcada para sanción (sin definir)"}
+      </div>
+    ));
+  }
 
   // Períodos: días consecutivos con el mismo Id Motivo se juntan en un solo renglón (desde / hasta / días). Los fines de semana y feriados
   // entre dos días no cortan el período; cualquier día hábil sin ese motivo sí.
@@ -3350,6 +3379,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
                 <SortTh k="tipo" label="Tipo" sort={grpSort.sort} toggle={grpSort.toggle} />
                 <SortTh k="motivo" label="Motivo" sort={grpSort.sort} toggle={grpSort.toggle} />
                 <SortTh k="razon" label="Razón" sort={grpSort.sort} toggle={grpSort.toggle} />
+                {puedeVerSanciones && <th>Sanción</th>}
               </tr></thead>
               <tbody>
                 {grpSort.sorted.map((g,i)=>(
@@ -3364,6 +3394,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
                     <td>{tipoOf(g.row)}</td>
                     <td>{g.row.motivo}</td>
                     <td>{g.razones.join(" / ")}</td>
+                    {puedeVerSanciones && <td>{sancionCelda(tsToISODate(g.desdeTs), tsToISODate(g.hastaTs))}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -3382,6 +3413,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
                 <SortTh k="tipo" label="Tipo" sort={ausSort.sort} toggle={ausSort.toggle} />
                 <SortTh k="motivo" label="Motivo" sort={ausSort.sort} toggle={ausSort.toggle} />
                 <SortTh k="razon" label="Razón" sort={ausSort.sort} toggle={ausSort.toggle} />
+                {puedeVerSanciones && <th>Sanción</th>}
               </tr></thead>
               <tbody>
                 {ausSort.sorted.map((r,i)=>(
@@ -3394,6 +3426,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto}){
                     <td>{tipoOf(r)}</td>
                     <td>{r.motivo}</td>
                     <td>{r.razon}</td>
+                    {puedeVerSanciones && <td>{sancionCelda(tsToISODate(r.ts), tsToISODate(r.ts))}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -3618,6 +3651,21 @@ const SANCION_MOTIVOS = {
   control:{label:"Encontrarse en condiciones laborales al momento del control médico (art. 210 LCT)", corto:"En condiciones laborales en el control médico"}
 };
 function sancionId(casoId){ return "SAN|"+casoId; }
+// Días (AAAA-MM-DD) por los que se sanciona: la lista de fechas; en las notas viejas, la fecha escrita ("26/10/2026" o "del 19/10/2026 al 20/10/2026").
+function diasDeSancion(s){
+  if(Array.isArray(s.fechas) && s.fechas.length) return s.fechas;
+  const txt = String(s.fechaAusencia||"");
+  const rango = txt.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}).*?(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+  if(rango){
+    const a = parseFechasTexto(rango[1]), b = parseFechasTexto(rango[2]);
+    if(a.ok && b.ok && a.isos[0] && b.isos[0] && a.isos[0]<=b.isos[0]){
+      const out = []; for(let ts=isoDateToTs(a.isos[0]), fin=isoDateToTs(b.isos[0]); ts<=fin && out.length<400; ts+=86400000) out.push(tsToISODate(ts));
+      return out;
+    }
+  }
+  const un = parseFechasTexto(txt);
+  return un.ok ? un.isos : [];
+}
 function sancionRowToObj(r){
   // las notas emitidas con la primera versión (id = citación, con fecha de control) eran de "control médico"
   const motivoSancion = r.motivo_sancion || ((!String(r.id||"").startsWith("SAN|") && r.fecha_control) ? "control" : "ausencias");
@@ -6121,7 +6169,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
-          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} puedeVerSanciones={!!perms.sancionar} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} />}
