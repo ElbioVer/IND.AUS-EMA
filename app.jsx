@@ -3177,7 +3177,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
       return "<div class='cron-caso'><h4>"+e(c.motivo)+" · "+e(c.row.anio)+"</h4>"+
         (datos ? "<div class='ficha-grid' style='margin-bottom:8px'>"+datos+"</div>" : "")+
         "<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Registró</th></tr></thead><tbody>"+
-        c.movs.map(o=>"<tr><td style='white-space:nowrap;vertical-align:top'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='vertical-align:top'>"+e(o.tipoMov)+(o.origen==="medicina" ? " · Medicina Laboral" : "")+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td><td style='vertical-align:top'>"+e(o.autor||"—")+"</td></tr>").join("")+
+        c.movs.map(o=>"<tr><td style='white-space:nowrap;vertical-align:top'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='vertical-align:top'>"+e(o.tipoMov)+etiquetaOrigen(o)+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td><td style='vertical-align:top'>"+e(o.autor||"—")+"</td></tr>").join("")+
         "</tbody></table></div>";
     }).join("")+"</div>";
   }
@@ -3937,9 +3937,21 @@ async function persistCronicoCase(caseObj, patch, localFallback){
   if(error) throw error;
   return m;
 }
+/* ---- Derivaciones a "Control Laboral Cons. Ext." (clínicas externas) ----
+   Se guardan como movimientos del caso (observaciones con origen "derivacion": centro, fechaDeriv, devolucion), así no hace falta ninguna
+   tabla nueva y figuran en el historial de Crónicos, en la historia clínica y en el detalle del empleado. `texto` se arma solo. */
+const DERIV_NOMBRE = "Control Laboral Cons. Ext.";
+const DERIV_CENTROS = ["PAL","CEMLA","CEMI","Fitz Roy","Lavoris Cba"];
+function derivTexto(centro, fechaISO, devolucion){
+  return "Derivado a "+DERIV_NOMBRE+" — "+centro+(fechaISO ? " ("+dateKeyToLabel(fechaISO)+")" : "")+"\nDevolución de la clínica: "+(devolucion || "pendiente");
+}
+// Lo que escribió la Dra. (origen "medicina") solo lo puede modificar o eliminar quien lo registró; las derivaciones se editan desde Medicina Laboral.
+function mismoUsuario(a, b){ return !!a && !!b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); }
+function entradaBloqueada(o, usuario){ return !!o && o.origen==="medicina" && !mismoUsuario(o.autor, usuario); }
+function etiquetaOrigen(o){ return o && o.origen==="medicina" ? " · Medicina Laboral" : (o && o.origen==="derivacion" ? " · "+DERIV_NOMBRE : ""); }
 // Historial de movimientos de un caso (observaciones o acciones, según `field`): ordenable, y cada uno se puede editar o eliminar
-// (se ve igual para todos los usuarios).
-function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly}){
+// (se ve igual para todos los usuarios), salvo lo que escribió la Dra. (solo ella) y las derivaciones (se editan en Medicina Laboral).
+function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly, usuario}){
   const {sorted, sort, toggle} = useTableSort(c[field], {
     fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
   }, {key:"fecha", dir:"desc"});
@@ -3965,9 +3977,13 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
                 ) : o.texto}
                 {!editing && o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
               </td>
-              <td style={{verticalAlign:"top"}}>{o.autor || "—"}{o.origen==="medicina" && <div className="hint" style={{color:"var(--accent)", fontWeight:700}}>Medicina Laboral{o.fechaVisita ? " · "+dateKeyToLabel(o.fechaVisita) : ""}</div>}</td>
+              <td style={{verticalAlign:"top"}}>{o.autor || "—"}{o.origen==="medicina" && <div className="hint" style={{color:"var(--accent)", fontWeight:700}}>Medicina Laboral{o.fechaVisita ? " · "+dateKeyToLabel(o.fechaVisita) : ""}</div>}{o.origen==="derivacion" && <div className="hint" style={{color:"var(--accent)", fontWeight:700}}>{DERIV_NOMBRE}{o.centro ? " · "+o.centro : ""}</div>}</td>
               <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
-                {readOnly ? null : editing ? (
+                {readOnly ? null : o.origen==="derivacion" ? (
+                  <span className="hint">Se edita en Medicina Laboral</span>
+                ) : entradaBloqueada(o, usuario) ? (
+                  <span className="hint" title="Lo registró la Dra.: solo ella puede modificarlo o eliminarlo">Solo la autora puede modificarlo</span>
+                ) : editing ? (
                   <React.Fragment>
                     <button type="button" className="btn small" onClick={()=>onSaveEdit(c)} disabled={disabled}>Guardar</button>{" "}
                     <button type="button" className="btn secondary small" onClick={()=>setEditingObs(null)}>Cancelar</button>
@@ -4283,10 +4299,15 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     saveCase(caseObj, base=>({[field]:[...(base[field]||[]), entry]}));
     setObsDrafts(prev=>({...prev, [key]:""}));
   }
-  function startEditEntry(caseObj, field, o){ setEditingObs({caseId:caseObj.id, field, obsId:o.id, texto:o.texto}); }
+  function startEditEntry(caseObj, field, o){
+    if(entradaBloqueada(o, userRef.current) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Las derivaciones se editan desde Medicina Laboral." : "Lo registró la Dra.: solo ella puede modificarlo."); return; }
+    setEditingObs({caseId:caseObj.id, field, obsId:o.id, texto:o.texto});
+  }
   function saveEditEntry(caseObj){
     if(!editingObs) return;
     const {obsId, field} = editingObs;
+    const orig = (caseObj[field]||[]).find(o=>o.id===obsId);
+    if(orig && (entradaBloqueada(orig, userRef.current) || orig.origen==="derivacion")){ setEditingObs(null); return; }
     const texto = (editingObs.texto||"").trim();
     if(!texto){ window.alert("La "+NOMBRE_ENTRADA[field]+" no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
     const editor = userRef.current, ahora = Date.now();
@@ -4298,6 +4319,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     setEditingObs(null);
   }
   function deleteEntry(caseObj, field, o){
+    if(entradaBloqueada(o, userRef.current) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Las derivaciones se eliminan desde Medicina Laboral." : "Lo registró la Dra.: solo ella puede eliminarlo."); return; }
     if(!window.confirm("¿Eliminar esta "+NOMBRE_ENTRADA[field]+"?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
     saveCase(caseObj, base=>{
       const lista = base[field]||[];
@@ -4425,7 +4447,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       const box = t => t ? "<p class='box'>"+e(t)+"</p>" : "<p class='box none'>Sin datos cargados.</p>";
       const tramos = (c0.tramos||[]).map(t=>"<tr><td>"+fmtDateFromTs(t.desdeTs)+"</td><td>"+fmtDateFromTs(t.hastaTs)+"</td><td>"+t.dias+"</td><td>"+e(CAT_LABEL[t.cat]||t.cat)+"</td><td>"+e(t.label)+"</td></tr>").join("");
       // cada movimiento ocupa todo el ancho de la hoja: fecha arriba y el texto completo debajo (antes quedaba una columna casi vacía)
-      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<div class='mov'><div class='mfecha'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor||o.editadoTs ? " <span class='mmeta'>"+e((o.origen==="medicina" ? " · Medicina Laboral" : "")+(o.autor ? " · Registró: "+o.autor : "")+(o.editadoTs ? " · editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</span>" : "")+"</div><div class='mtexto'>"+e(o.texto)+"</div></div>").join("");
+      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<div class='mov'><div class='mfecha'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor||o.editadoTs ? " <span class='mmeta'>"+e(etiquetaOrigen(o)+(o.autor ? " · Registró: "+o.autor : "")+(o.editadoTs ? " · editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</span>" : "")+"</div><div class='mtexto'>"+e(o.texto)+"</div></div>").join("");
       return "<section class='hc'>"+
         "<div class='head'><div><div class='kicker'>HISTORIA CLÍNICA LABORAL</div><h1>"+e(c0.nombre||"Sin nombre")+"</h1><div class='sub'>Legajo "+e(c0.legajo)+" · Seguimiento de ausentismo</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
         "<h2>Datos del empleado</h2><table class='kv'>"+
@@ -4617,7 +4639,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         <td colSpan={nCols} style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Acciones — {c.nombre||c.legajo} (no se imprimen en la historia clínica)</div>
                           <ObservacionesHistory c={c} field="acciones" labelCol="Acción" editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} />
                         </td>
                       </tr>
                     )}
@@ -4626,7 +4648,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         <td colSpan={nCols} style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Observación / Evolución — {c.nombre||c.legajo}</div>
                           <ObservacionesHistory c={c} field="observaciones" labelCol="Movimiento" editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} />
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} />
                         </td>
                       </tr>
                     )}
@@ -4663,6 +4685,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState("");
   const [conEvolucion, setConEvolucion] = useState(false);
+  const [derivForm, setDerivForm] = useState({});    // formulario de derivación abierto por caso: {id|null, centro, fecha, devolucion}
   const userRef = useRef("");
   const aliveRef = useRef(true);
   const manualRef = useRef(new Map());
@@ -4916,6 +4939,73 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
+  // ---- derivaciones a Control Laboral Cons. Ext. (centro médico + devolución de la clínica) ----
+  const derivacionesDe = item => obsDe(item).filter(o=>o.origen==="derivacion").sort((a,b)=>a.ts-b.ts);
+  function abrirDeriv(item, o){
+    setDerivForm(p=>({...p, [item.key]: o ? {id:o.id, centro:o.centro||"", fecha:o.fechaDeriv||fechaISO, devolucion:o.devolucion||""} : {id:null, centro:"", fecha:fechaISO, devolucion:""}}));
+  }
+  function cerrarDeriv(item){ setDerivForm(p=>{ const n = {...p}; delete n[item.key]; return n; }); }
+  function cambiarDeriv(item, campo, valor){ setDerivForm(p=>({...p, [item.key]:{...(p[item.key]||{}), [campo]:valor}})); }
+  // casos (real y provisorios) donde está guardada una derivación: se corrige en todos para que no quede una copia vieja
+  const casosConObs = obsId => Array.from(manual.keys()).filter(id=>((manual.get(id)||{}).observaciones||[]).some(o=>o.id===obsId));
+  function aplicarManual(id, m){ if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(id, m); manualRef.current = n; setManual(n); } }
+  async function guardarDeriv(item){
+    const f = derivForm[item.key];
+    if(!puedeEditar || !f) return;
+    if(!f.centro){ setStatus("Elegí el centro médico al que se derivó."); return; }
+    if(!f.fecha || isoDateToTs(f.fecha)==null){ setStatus("Elegí la fecha de la derivación."); return; }
+    const devolucion = (f.devolucion||"").trim();
+    const texto = derivTexto(f.centro, f.fecha, devolucion);
+    const ahora = Date.now(), editor = userRef.current;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      if(f.id){
+        const ids = casosConObs(f.id);
+        for(const id of ids){
+          const mc = manual.get(id) || {};
+          await enCola(id, async ()=>{
+            const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+              const lista = base.observaciones||[];
+              if(!lista.some(o=>o.id===f.id)) return null;
+              return {observaciones: lista.map(o=> o.id===f.id ? {...o, centro:f.centro, fechaDeriv:f.fecha, devolucion, texto, editadoTs:ahora, editadoPor:editor} : o)};
+            }, manualRef.current.get(id));
+            aplicarManual(id, m);
+          });
+        }
+      }else{
+        const entry = {id:newObsId(), ts:ahora, texto, autor:editor, origen:"derivacion", centro:f.centro, fechaDeriv:f.fecha, devolucion};
+        const destId = item.dataId || item.casoId;
+        await enCola(destId, async ()=>{
+          const m = await persistCronicoCase({id:destId, legajo:item.legajo, anio:item.anio}, base=>({observaciones:[...(base.observaciones||[]), entry]}), manualRef.current.get(destId));
+          aplicarManual(destId, m);
+        });
+      }
+      cerrarDeriv(item);
+      setStatus(f.id ? "Derivación actualizada (también figura en Crónicos)" : "Derivación registrada (también figura en Crónicos)");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function eliminarDeriv(item){
+    const f = derivForm[item.key];
+    if(!puedeEditar || !f || !f.id) return;
+    if(!window.confirm("¿Eliminar esta derivación a "+f.centro+"?\n\nSe borra también de Crónicos, incluida la devolución cargada. No se puede deshacer.")) return;
+    setBusy(item.key); setStatus("Eliminando...");
+    try{
+      for(const id of casosConObs(f.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(o=>o.id===f.id)) return null;
+            return {observaciones: lista.filter(o=>o.id!==f.id)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      cerrarDeriv(item); setStatus("Derivación eliminada");
+    }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
   async function citarNuevamente(item){
     const rc = reCita[item.key] || {};
     if(!puedeEditar) return;
@@ -4956,12 +5046,13 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     const bloques = vistos.map(v=>{
       const it = itemDeCita(v);
       const notasDia = anotacionesDelDia(it);
-      const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO)).slice().sort((a,b)=>a.ts-b.ts);
+      const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO) && o.origen!=="derivacion").slice().sort((a,b)=>a.ts-b.ts);
       const cel = telefonoDe(it).tel;
       return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+(cel ? " · Cel. "+e(cel) : "")+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
         "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+(v.resultado ? " · Control art. 210: "+(v.resultado==="injustificada" ? "ausencia injustificada" : "ausencia justificada") : "")+"</div>"+
         "<div class='lbl'>Anotaciones de la jornada</div>"+
         (notasDia.length ? notasDia.map(o=>"<p class='txt'>"+e(o.texto)+" <span class='meta'>("+e(new Date(o.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}))+(o.autor ? " · "+e(o.autor) : "")+")</span></p>").join("") : "<p class='txt none'>Sin anotaciones registradas.</p>")+
+        (derivacionesDe(it).length ? "<div class='lbl'>Derivaciones a "+e(DERIV_NOMBRE)+"</div>"+derivacionesDe(it).map(o=>"<p class='txt'><b>"+e(o.centro||"—")+"</b> <span class='meta'>(derivado el "+e(o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR"))+")</span> — "+(o.devolucion ? e(o.devolucion) : "<i>devolución pendiente</i>")+"</p>").join("") : "")+
         (conEvolucion && previas.length ? "<div class='lbl'>Evolución previa (Crónicos)</div>"+previas.map(o=>"<p class='txt'><span class='meta'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor ? " · "+e(o.autor) : "")+" — </span>"+e(o.texto)+"</p>").join("") : "")+
         "</div>";
     }).join("");
@@ -4984,6 +5075,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     const cur = citaDe(item.casoId, item.legajo);
     const rc = reCita[item.key] || {fecha:"", nota:""};
     const ocupado = busy===item.key;
+    const derivs = derivacionesDe(item), df = derivForm[item.key];
     const sinCaso = esCasoManualId(item.dataId || item.casoId);   // todavía no figura como caso de Crónicos
     return (
       <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
@@ -5003,12 +5095,58 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
             <div style={{display:"flex", flexDirection:"column", gap:6}}>
               {obs.map(o=>(
                 <div key={o.id} style={{borderBottom:"1px solid var(--border)", paddingBottom:5}}>
-                  <div className="hint">{new Date(o.ts).toLocaleString("es-AR")}{o.autor ? " · "+o.autor : ""}{o.origen==="medicina" ? " · Medicina Laboral" : ""}</div>
+                  <div className="hint">{new Date(o.ts).toLocaleString("es-AR")}{o.autor ? " · "+o.autor : ""}{etiquetaOrigen(o)}</div>
                   <div style={{whiteSpace:"pre-wrap"}}>{o.texto}</div>
                 </div>
               ))}
             </div>
           ) : <div className="hint">Todavía no hay observaciones cargadas.</div>}
+        </div>
+        <div style={{borderTop:"1px solid var(--border)", paddingTop:8}}>
+          <div className="hint" style={{fontWeight:700, marginBottom:4}}>{DERIV_NOMBRE} — derivaciones a centros médicos</div>
+          {derivs.length ? (
+            <div style={{display:"flex", flexDirection:"column", gap:6, marginBottom:6}}>
+              {derivs.map(o=>(
+                <div key={o.id} style={{border:"1px solid var(--border)", borderRadius:8, padding:"6px 10px"}}>
+                  <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"}}>
+                    <b>{o.centro||"—"}</b>
+                    <span className="hint">derivado el {o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR")}{o.autor ? " · registró "+o.autor : ""}</span>
+                    <span style={{fontWeight:700, color: o.devolucion ? "var(--good)" : "var(--warning)"}}>{o.devolucion ? "Devolución recibida" : "Devolución pendiente"}</span>
+                    {puedeEditar && !(df && df.id===o.id) && <button type="button" className="btn secondary small" style={{marginLeft:"auto"}} onClick={()=>abrirDeriv(item, o)} disabled={ocupado}>{o.devolucion ? "Editar" : "Cargar devolución"}</button>}
+                  </div>
+                  {o.devolucion && <div style={{whiteSpace:"pre-wrap", marginTop:4}}>{o.devolucion}</div>}
+                  {o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
+                </div>
+              ))}
+            </div>
+          ) : <div className="hint" style={{marginBottom:6}}>Todavía no se derivó a ningún centro.</div>}
+          {puedeEditar && !df && <button type="button" className="btn secondary small" onClick={()=>abrirDeriv(item, null)} disabled={ocupado}>Derivar a {DERIV_NOMBRE}</button>}
+          {puedeEditar && df && (
+            <div style={{border:"1px solid var(--accent)", borderRadius:8, padding:10, display:"flex", flexDirection:"column", gap:8}}>
+              <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                <div className="field" style={{margin:0}}>
+                  <label>Centro médico</label>
+                  <select value={df.centro} onChange={e=>cambiarDeriv(item, "centro", e.target.value)} disabled={ocupado}>
+                    <option value="">Elegir…</option>
+                    {DERIV_CENTROS.concat(df.centro && !DERIV_CENTROS.includes(df.centro) ? [df.centro] : []).map(c=>(<option key={c} value={c}>{c}</option>))}
+                  </select>
+                </div>
+                <div className="field" style={{margin:0}}>
+                  <label>Fecha de la derivación</label>
+                  <input type="date" value={df.fecha} onChange={e=>cambiarDeriv(item, "fecha", e.target.value)} disabled={ocupado} />
+                </div>
+              </div>
+              <div>
+                <div className="hint" style={{fontWeight:700, marginBottom:4}}>Devolución de la clínica (pegala acá o escribila; se puede dejar en blanco y cargarla después)</div>
+                <textarea rows={6} style={{width:"100%"}} placeholder="Pegá o escribí acá lo que informó el centro médico…" value={df.devolucion} onChange={e=>cambiarDeriv(item, "devolucion", e.target.value)} disabled={ocupado} />
+              </div>
+              <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                <button type="button" className="btn small" onClick={()=>guardarDeriv(item)} disabled={ocupado || !df.centro}>{df.id ? "Guardar cambios" : "Registrar derivación"}</button>
+                <button type="button" className="btn secondary small" onClick={()=>cerrarDeriv(item)} disabled={ocupado}>Cancelar</button>
+                {df.id && <button type="button" className="btn secondary small" style={{color:"var(--bad)", marginLeft:"auto"}} onClick={()=>eliminarDeriv(item)} disabled={ocupado}>Eliminar derivación</button>}
+              </div>
+            </div>
+          )}
         </div>
         {puedeEditar && (
           <React.Fragment>
