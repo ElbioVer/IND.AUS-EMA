@@ -234,6 +234,18 @@ svg.chart{width:100%;max-width:640px;height:auto;display:block;overflow:visible;
 .cronico-row-warn td{background:color-mix(in srgb, var(--warning) 20%, var(--surface));}
 .cronico-row-alert td{background:color-mix(in srgb, var(--critical) 20%, var(--surface));}
 .cronicos-tab td input[type=text]{min-width:110px;padding:5px 7px;font-size:12.5px;}
+.cronicos-tab thead th{white-space:normal;vertical-align:bottom;line-height:1.25;}
+/* Legajo y Nombre fijos al desplazar la tabla hacia la derecha (64px = CRONICO_FZ_W en app.jsx) */
+.cronicos-tab .fz{position:sticky;z-index:3;background:var(--surface);}
+.cronicos-tab thead th.fz{z-index:4;}
+.cronicos-tab .fz1{left:0;}
+.cronicos-tab .fz2{left:64px;box-shadow:2px 0 3px -1px rgba(0,0,0,.25);}
+.cronicos-tab tr.cronico-row-warn td.fz{background:color-mix(in srgb, var(--warning) 20%, var(--surface));}
+.cronicos-tab tr.cronico-row-alert td.fz{background:color-mix(in srgb, var(--critical) 20%, var(--surface));}
+.sticky-head-proxy th{white-space:normal;vertical-align:bottom;line-height:1.25;}
+.sticky-head-proxy th.fz{position:sticky;z-index:4;background:var(--surface);}
+.sticky-head-proxy th.fz1{left:0;}
+.sticky-head-proxy th.fz2{left:64px;box-shadow:2px 0 3px -1px rgba(0,0,0,.25);}
 .login-form input{border:1px solid var(--border);background:var(--plane);color:var(--ink);border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit;width:100%;}
 .sim-result{display:flex;flex-direction:column;gap:14px;justify-content:center;}
 .sim-big{font-size:42px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;}

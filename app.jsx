@@ -3511,7 +3511,7 @@ function StickyTableHead({targetRef, columns, sortKey, sortDir, onSort}){
             <colgroup>{widths.map((w,i)=>(<col key={i} style={{width:w}} />))}</colgroup>
             <thead><tr>
               {columns.map(col=>(
-                <th key={col.key} className={col.align==="num"?"num":undefined} style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>onSort(col.key)}>
+                <th key={col.key} {...cronicoThProps(col)} onClick={()=>onSort(col.key)}>
                   {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
                 </th>
               ))}
@@ -3558,36 +3558,59 @@ function formatDigitsDMA(v){
   if(v.length<=4) return v.slice(0,2)+"/"+v.slice(2);
   return v.slice(0,2)+"/"+v.slice(2,4)+"/"+v.slice(4);
 }
+// Campo de fecha DD/MM/AAAA al escribir: solo deja números y separadores, va poniendo las barras (2710 -> 27/10) y, si se frena
+// un instante con día y mes (27/10), completa el año actual y lo deja seleccionado para que se pueda pisar escribiendo otro.
+function fechaDMAOnInput(el){
+  clearTimeout(el._autoYear);
+  const limpio = el.value.replace(/[^\d\/\-. ]/g, "");
+  const f = formatDigitsDMA(limpio);
+  if(f!==el.value) el.value = f;
+  if(/^\d{2}\/\d{2}$/.test(f) && normalizarFechaDMA(f).ok){
+    el._autoYear = setTimeout(()=>{
+      if(document.activeElement!==el || el.value!==f) return;
+      el.value = f+"/"+new Date().getFullYear();
+      try{ el.setSelectionRange(6, 10); }catch(_){}
+    }, 800);
+  }
+}
 function dmaToTs(v){
   const mt = String(v||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   return mt ? Date.UTC(+mt[3], +mt[2]-1, +mt[1]) : 0;
 }
 function newObsId(){ return "o"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+// `w` = ancho en px de la columna (los textos largos toman el resto); `fz` = columna fija al desplazar hacia la derecha (Legajo y Nombre).
+const CRONICO_FZ_W = 64;   // ancho de la columna fija Legajo (el Nombre queda pegado a su derecha: .fz2 en index.html usa el mismo valor)
 const CRONICO_COLUMNS = [
-  {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text"},
-  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text"},
-  {key:"telefono", label:"Teléfono de contacto", get:c=>c.telefonoContacto||"", sortType:"text"},
-  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text"},
-  {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text"},
-  {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text"},
-  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text"},
+  {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text", w:CRONICO_FZ_W, fz:1},
+  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text", w:180, fz:2},
+  {key:"telefono", label:"Teléfono de contacto", get:c=>c.telefonoContacto||"", sortType:"text", w:132},
+  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text", w:70},
+  {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text", w:90},
+  {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text", w:110},
+  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text", w:60},
   // Orden del Tipo: RES PTO, CRONICO, ACTUAL, PROC BAJA (y después los demás). Es también el orden inicial de la tabla,
   // con los días de mayor a menor dentro de cada tipo.
-  {key:"tipo", label:"Tipo", get:c=>{ const i = CRONICO_TIPO_ORDEN.indexOf(c.tipo||""); return i===-1 ? CRONICO_TIPO_ORDEN.length : i; }, sortType:"num", firstDir:"asc"},
-  {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num"},
-  {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num"},
-  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text"},
-  {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num"},
-  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text"},
-  {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text"},
-  {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text"},
-  {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num"},
-  {key:"acciones", label:"Acción", get:c=>c.acciones.length, sortType:"num"},
-  {key:"citado", label:"Medicina Laboral", get:c=>c.cita ? (c.cita.atendido ? 2 : 1) : 0, sortType:"num"},
+  {key:"tipo", label:"Tipo", get:c=>{ const i = CRONICO_TIPO_ORDEN.indexOf(c.tipo||""); return i===-1 ? CRONICO_TIPO_ORDEN.length : i; }, sortType:"num", firstDir:"asc", w:78},
+  {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num", w:122},
+  {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num", w:46},
+  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text", w:170},
+  {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num", w:84},
+  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text", w:122},
+  {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text", w:140},
+  {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text", w:140},
+  {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num", w:104},
+  {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num", w:220},
+  {key:"acciones", label:"Acción", get:c=>c.acciones.length, sortType:"num", w:200},
+  // al final, las tildes: Medicina Laboral y Sanción
+  {key:"citado", label:"Medicina Laboral", get:c=>c.cita ? (c.cita.atendido ? 2 : 1) : 0, sortType:"num", w:128},
   // solo para quien puede marcar sanciones (RRHH y Administrador): 1 marcada, 2 definida, 3 emitida
-  {key:"sancion", label:"Sanción", get:c=>c.sancionReg ? ({marcada:1, definida:2, emitida:3}[c.sancionReg.estado]||1) : 0, sortType:"num"},
-  {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num"}
+  {key:"sancion", label:"Sanción", get:c=>c.sancionReg ? ({marcada:1, definida:2, emitida:3}[c.sancionReg.estado]||1) : 0, sortType:"num", w:140}
 ];
+// atributos de un encabezado (th) de Crónicos: ancho, orden por clic y, en Legajo/Nombre, la fijación lateral
+function cronicoThProps(col){
+  const cls = [col.align==="num" ? "num" : "", col.fz ? "fz fz"+col.fz : ""].filter(Boolean).join(" ") || undefined;
+  return {className: cls, style:{cursor:"pointer", userSelect:"none", width:col.w, minWidth:col.w, ...(col.fz===1 ? {maxWidth:col.w} : {})}};
+}
 // Códigos de ausencia por motivos de salud: su "Razón" del ausentismo se carga sola como primera información del historial del caso.
 // (Se pueden agregar más códigos acá.)
 const CRONICOS_CODIGOS_SALUD = new Set(["AT","ET","EN","CAE"]);
@@ -4477,7 +4500,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
             <table>
               <thead><tr>
                 {columnasVisibles.map(col=>(
-                  <th key={col.key} className={col.align==="num"?"num":undefined} style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>handleSort(col.key)}>
+                  <th key={col.key} {...cronicoThProps(col)} onClick={()=>handleSort(col.key)}>
                     {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
                   </th>
                 ))}
@@ -4489,13 +4512,13 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                   return (
                   <React.Fragment key={c.id}>
                     <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
-                      <td>{c.legajo}</td>
-                      <td>{c.nombre||"—"}</td>
-                      <td style={{minWidth:150}}>
+                      <td className="fz fz1" style={{width:CRONICO_FZ_W, minWidth:CRONICO_FZ_W, maxWidth:CRONICO_FZ_W}}>{c.legajo}</td>
+                      <td className="fz fz2" style={{fontWeight:600}}>{c.nombre||"—"}</td>
+                      <td>
                         <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={locked}
                           onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                           onBlur={e=>{ const v = e.target.value.trim(); if(v!==(c.telefonoContacto||"")) commitField(c,"telefonoContacto", v); }}
-                          style={{width:140, fontSize:12.5, padding:"5px 6px"}} />
+                          style={{width:122, fontSize:12.5, padding:"5px 6px"}} />
                         {c.telefonoEditado && (
                           <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"telefonoContacto","") : undefined}
                             title={c.telefonoPlantel ? "Celular del plantel: "+c.telefonoPlantel : "El plantel no tiene celular cargado"}>
@@ -4508,10 +4531,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       <td>{c.gerencia||"—"}</td>
                       <td>{c.codpla||"—"}</td>
                       <td>{c.tipo}</td>
-                      <td style={{whiteSpace:"nowrap"}}>
+                      <td>
                         <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={locked}
                           onBlur={e=>{ const v=e.target.value; if(v) commitField(c,"inicioManualTs", isoDateToTs(v)); }}
-                          style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
+                          style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
                         {c.inicioManualTs!=null && (
                           <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"inicioManualTs", null) : undefined}>
                             {puedeEditar ? "editado a mano · restablecer" : "editado a mano"}
@@ -4524,15 +4547,29 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       <td>
                         <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={locked}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
-                          style={{width:130, fontSize:12.5, padding:"5px 6px"}} />
+                          style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
                       </td>
                       <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={locked} /></td>
                       <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={locked} /></td>
-                      <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} style={{width:110}}
-                        onChange={e=>{ const f = formatDigitsDMA(e.target.value); if(f!==e.target.value) e.target.value = f; }}
+                      <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} inputMode="numeric" autoComplete="off" style={{width:100, minWidth:100}}
+                        onChange={e=>fechaDMAOnInput(e.target)}
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
-                        onBlur={e=>commitPosibleAlta(c, e.target)} disabled={locked} /></td>
-                      <td style={{minWidth:220}}>
+                        onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={locked} /></td>
+                      <td style={{minWidth:200}}>
+                        {c.observaciones.length>0 && (
+                          <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
+                            {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
+                          </div>
+                        )}
+                        {puedeEditar && (
+                          <div style={{display:"flex", gap:4}}>
+                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={locked} />
+                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={locked}>+</button>
+                          </div>
+                        )}
+                        <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
+                      </td>
+                      <td style={{minWidth:180}}>
                         {c.acciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedAccId(expandedAccId===c.id?null:c.id)}>
                             {expandedAccId===c.id ? "Ocultar" : "Ver"} historial ({c.acciones.length})
@@ -4574,20 +4611,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                           {c.draInjustificada && <div className="hint" style={{color:"var(--bad)", marginTop:2}} title="En el control médico del art. 210 la Dra. no justificó la ausencia">La Dra.: ausencia injustificada</div>}
                         </td>
                       )}
-                      <td style={{minWidth:220}}>
-                        {c.observaciones.length>0 && (
-                          <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
-                            {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
-                          </div>
-                        )}
-                        {puedeEditar && (
-                          <div style={{display:"flex", gap:4}}>
-                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={locked} />
-                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={locked}>+</button>
-                          </div>
-                        )}
-                        <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
-                      </td>
                     </tr>
                     {expandedAccId===c.id && c.acciones.length>0 && (
                       <tr>
