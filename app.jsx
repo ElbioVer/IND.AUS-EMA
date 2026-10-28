@@ -318,11 +318,11 @@ function AuthGate(){
 const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","ranking","detalle_empleados","plantel"];
 const ROLES = {
   admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
-    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true},
-  rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. Puede citar a Medicina Laboral desde Crónicos (y ver ese menú, sin anotar). Gestión de Plantel solo con la carga.",
-    tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:true, sancionar:true},
+    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
+  rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. En Crónicos actualiza teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución, cita a Medicina Laboral (Consulta Médica Planta o Control Laboral Cons. Ext.) y marca «Sancionar»; en Sanciones define e imprime (sin editar lo definido ni quitar); en Medicina Laboral ve la ficha, busca y carga los resultados del Control Laboral Cons. Ext. Gestión de Plantel solo con la carga.",
+    tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, cronicosParcial:true, plantelCompleto:false, medicinaEditar:false, medicinaExt:true, citar:true, sancionar:true, sancionDefinir:true},
   medico: {label:"Servicio médico", desc:"Medicina Laboral (atiende, anota, cita e imprime el reporte de la jornada), Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión. Ve solo la empresa Propios y los motivos por defecto.",
-    tabs:["medicina_laboral","cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false, medicinaEditar:true, citar:true,
+    tabs:["medicina_laboral","cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false, medicinaEditar:true, medicinaExt:true, citar:true,
     // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
     soloPropios:true, motivosPorDefecto:true},
   gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
@@ -1116,6 +1116,27 @@ function FilterCardHead({title, open, onToggle, summary}){
       <h3 style={{margin:0}}>{title}</h3>
       {summary && <span className="hint" style={{margin:0}}>{summary}</span>}
       <span className="hint" style={{marginLeft:"auto", margin:"0 0 0 auto", fontWeight:700, color:"var(--accent)"}}>{open ? "▾ Retraer" : "▸ Expandir"}</span>
+    </div>
+  );
+}
+
+// Tarjeta que se contrae/expande (Medicina Laboral); arranca contraída y recuerda el estado al cambiar de menú. `right` queda siempre visible.
+function CollapsibleCard({id, title, summary, right, children}){
+  const [open, setOpen] = useKeptState("ml.open|"+id, false);
+  const toggle = ()=>setOpen(o=>!o);
+  return (
+    <div className="card table-card">
+      <div style={{display:"flex", alignItems:"center", gap:12, flexWrap:"wrap"}}>
+        <div role="button" tabIndex={0} aria-expanded={open} onClick={toggle}
+          onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); toggle(); } }}
+          style={{display:"flex", alignItems:"center", gap:10, cursor:"pointer", userSelect:"none", flex:"1 1 260px", flexWrap:"wrap"}}>
+          <h3 style={{margin:0}}>{title}</h3>
+          {summary && <span className="hint" style={{margin:0}}>{summary}</span>}
+          <span className="hint" style={{marginLeft:"auto", fontWeight:700, color:"var(--accent)"}}>{open ? "▾ Contraer" : "▸ Expandir"}</span>
+        </div>
+        {right}
+      </div>
+      {open && children}
     </div>
   );
 }
@@ -3641,19 +3662,26 @@ function telefonoContactoDe(manualCaso, celularPlantel){
    Una citación = un empleado/caso citado para un día. La puede crear RRHH/Administrador desde Crónicos (origen "rrhh") o la Dra.
    desde Medicina Laboral (origen "medicina", p. ej. un control para otro día). Se "atiende" (visto por la Dra.) y se puede anular. */
 const MEDICINA_TABLE = "medicina_laboral";
+// Tipos de control a los que se cita: Consulta Médica Planta (la ve la Dra. en planta) o Control Laboral Cons. Ext. (se deriva a un centro médico externo)
+const TIPOS_CONTROL = {planta:{label:"Consulta Médica Planta", corto:"Planta"}, externa:{label:"Control Laboral Cons. Ext.", corto:"Cons. Ext."}};
+const tipoControlLabel = k => (TIPOS_CONTROL[k]||{}).label || "";
 function citaRowToObj(r){
   return {id:r.id, casoId:r.caso_id, legajo:r.legajo, nombre:r.nombre||"", unidad:r.unidad||"", motivo:r.motivo||"", anio:r.anio||0,
     fecha:r.fecha, origen:r.origen||"rrhh", citadoPor:r.citado_por||"", citadoTs:Number(r.citado_ts)||0, nota:r.nota_cita||"",
     atendido:!!r.atendido, atendidoPor:r.atendido_por||"", atendidoTs:Number(r.atendido_ts)||0, anulada:!!r.anulada,
     // resultado del control médico (art. 210 LCT): "" | "justificada" | "injustificada". undefined = la columna todavía no existe en Supabase.
-    resultado: r.resultado===undefined ? undefined : (r.resultado||"")};
+    resultado: r.resultado===undefined ? undefined : (r.resultado||""),
+    // tipo de control: "planta" (Consulta Médica Planta) | "externa" (Control Laboral Cons. Ext.) | "" (sin definir). undefined = la columna todavía no existe.
+    tipoControl: r.tipo_control===undefined ? undefined : (r.tipo_control||"")};
 }
 function citaObjToRow(o){
   return {id:o.id, caso_id:o.casoId, legajo:o.legajo, nombre:o.nombre||"", unidad:o.unidad||"", motivo:o.motivo||"", anio:o.anio||0,
     fecha:o.fecha, origen:o.origen||"rrhh", citado_por:o.citadoPor||"", citado_ts:o.citadoTs||null, nota_cita:o.nota||"",
     atendido:!!o.atendido, atendido_por:o.atendidoPor||"", atendido_ts:o.atendidoTs||null, anulada:!!o.anulada, updated_at:new Date().toISOString(),
     // solo se envía si se conoce (así las citaciones siguen guardándose aunque todavía no se haya corrido supabase-migracion-medicina-sanciones.sql)
-    ...(o.resultado!==undefined ? {resultado:o.resultado||""} : {})};
+    ...(o.resultado!==undefined ? {resultado:o.resultado||""} : {}),
+    // solo se envía si se conoce (antes de correr supabase-migracion-roles-rrhh.sql la columna no existe)
+    ...(o.tipoControl ? {tipo_control:o.tipoControl} : {})};
 }
 // Eliminar una citación (solo el Administrador: lo hace cumplir una política de Supabase). Si el servidor no la elimina, avisa.
 async function deleteCita(id){
@@ -3878,6 +3906,7 @@ function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar}){
   const [leg, setLeg] = useState("");
   const [fecha, setFecha] = useState(defaultFecha||"");
   const [nota, setNota] = useState("");
+  const [tipo, setTipo] = useState("planta");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   useEffect(()=>{ if(!fecha && defaultFecha) setFecha(defaultFecha); }, [defaultFecha]);
@@ -3887,7 +3916,7 @@ function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar}){
     if(minFecha && fecha<minFecha){ setMsg("La fecha no puede ser anterior al "+dateKeyToLabel(minFecha)+"."); return; }
     setBusy(true); setMsg("Guardando...");
     try{
-      const r = await onCitar(emp, fecha, nota.trim());
+      const r = await onCitar(emp, fecha, nota.trim(), tipo);
       setMsg(r || "Citado.");
       if(!r || !/^Ya /.test(r)){ setLeg(""); setNota(""); }
     }catch(err){ setMsg("No se pudo citar: "+((err && err.message) ? err.message : String(err))); }
@@ -3900,6 +3929,9 @@ function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar}){
       <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end"}}>
         <div className="field"><label>Empleado</label><SearchSelect options={options} value={leg} onChange={setLeg} placeholder="Buscar legajo o nombre…" /></div>
         <div className="field"><label>Fecha de la citación</label><input type="date" value={fecha} min={minFecha||undefined} onChange={e=>setFecha(e.target.value)} /></div>
+        <div className="field"><label>Tipo de control</label>
+          <select value={tipo} onChange={e=>setTipo(e.target.value)}>{Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}</select>
+        </div>
         <div className="field"><label>Motivo de la cita (opcional)</label><input type="text" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Ej.: control, certificado…" style={{minWidth:220}} /></div>
         <button type="button" className="btn" onClick={go} disabled={busy || !emp || !fecha}>Citar</button>
         {msg && <span className="hint">{msg}</span>}
@@ -3945,13 +3977,19 @@ const DERIV_CENTROS = ["PAL","CEMLA","CEMI","Fitz Roy","Lavoris Cba"];
 function derivTexto(centro, fechaISO, devolucion){
   return "Derivado a "+DERIV_NOMBRE+" — "+centro+(fechaISO ? " ("+dateKeyToLabel(fechaISO)+")" : "")+"\nDevolución de la clínica: "+(devolucion || "pendiente");
 }
-// Lo que escribió la Dra. (origen "medicina") solo lo puede modificar o eliminar quien lo registró; las derivaciones se editan desde Medicina Laboral.
+// Lo que escribió la Dra. (origen "medicina") lo puede modificar o eliminar quien lo registró o el Administrador; las derivaciones se editan desde Medicina Laboral.
 function mismoUsuario(a, b){ return !!a && !!b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); }
-function entradaBloqueada(o, usuario){ return !!o && o.origen==="medicina" && !mismoUsuario(o.autor, usuario); }
+// opts: {admin} el Administrador puede modificar todo (también lo de la Dra.); {soloPropias} RRHH solo modifica lo que cargó él mismo.
+function entradaBloqueada(o, usuario, opts){
+  if(!o || (opts && opts.admin)) return false;
+  if(o.origen==="medicina") return !mismoUsuario(o.autor, usuario);
+  if(opts && opts.soloPropias) return !mismoUsuario(o.autor, usuario);
+  return false;
+}
 function etiquetaOrigen(o){ return o && o.origen==="medicina" ? " · Medicina Laboral" : (o && o.origen==="derivacion" ? " · "+DERIV_NOMBRE : ""); }
 // Historial de movimientos de un caso (observaciones o acciones, según `field`): ordenable, y cada uno se puede editar o eliminar
 // (se ve igual para todos los usuarios), salvo lo que escribió la Dra. (solo ella) y las derivaciones (se editan en Medicina Laboral).
-function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly, usuario}){
+function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly, usuario, permisos}){
   const {sorted, sort, toggle} = useTableSort(c[field], {
     fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
   }, {key:"fecha", dir:"desc"});
@@ -3981,8 +4019,8 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
               <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
                 {readOnly ? null : o.origen==="derivacion" ? (
                   <span className="hint">Se edita en Medicina Laboral</span>
-                ) : entradaBloqueada(o, usuario) ? (
-                  <span className="hint" title="Lo registró la Dra.: solo ella puede modificarlo o eliminarlo">Solo la autora puede modificarlo</span>
+                ) : entradaBloqueada(o, usuario, permisos) ? (
+                  <span className="hint" title={o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden modificarlo o eliminarlo" : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden modificarlo"}>{o.origen==="medicina" ? "Solo la autora o el Administrador" : "Lo cargó otro usuario"}</span>
                 ) : editing ? (
                   <React.Fragment>
                     <button type="button" className="btn small" onClick={()=>onSaveEdit(c)} disabled={disabled}>Guardar</button>{" "}
@@ -4002,7 +4040,7 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
     </table>
   );
 }
-function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar}){
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar, parcial, esAdmin}){
   const [dbReady, setDbReady] = useState(false);
   // Filtro de motivos: cada vez que se abre la app arranca en "Por defecto". Los cambios (ej. sumar VAC) son de esta pantalla:
   // se conservan mientras se navega entre menús, pero no se guardan en el servidor ni cambian lo que ven los demás.
@@ -4022,6 +4060,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [sortDir, setSortDir] = useKeptState("cron.sortDir", "asc");
   const scrollRef = useRef(null);
   const locked = !dbReady || !puedeEditar; // sin permiso de edición todo se ve, pero no se puede modificar
+  // RRHH (`parcial`) solo modifica: teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución (lo demás queda bloqueado)
+  const puedeGuardar = puedeEditar || !!parcial;
+  const lockedP = !dbReady || !puedeGuardar;
+  const permisosEntrada = {admin: !!esAdmin, soloPropias: !puedeEditar && !!parcial};
+  const [citaElegir, setCitaElegir] = useState(null);   // caso para el que se está eligiendo el tipo de control al citar
   const aliveRef = useRef(true);
   const saveQueueRef = useRef(new Map()); // id del caso -> cola de guardados (uno por vez, en orden)
   const userRef = useRef("");              // email del usuario, para firmar los movimientos
@@ -4166,7 +4209,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   }), [cases, casesManual, citas, fechaCita, pendientesPorLegajo, plantelCelulares, injustificadaPorLegajo, sanciones]);
 
   // Citar un empleado que todavía no figura en Crónicos (se carga a mano por nombre o legajo)
-  async function citarManual(emp, fecha, nota){
+  async function citarManual(emp, fecha, nota, tipoControl){
     if(!puedeCitar) return "No tenés permiso para citar.";
     const real = cases.find(c=>String(c.legajo).toUpperCase()===String(emp.legajo).toUpperCase()) || null;
     const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
@@ -4175,20 +4218,21 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
     const obj = await saveCita({id, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
       motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
-      fecha, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+      fecha, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl:tipoControl||""});
     setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
-    return "Citado para el "+dateKeyToLabel(fecha)+(real ? " (ya figura en Crónicos)." : ". Queda en Medicina Laboral.");
+    return "Citado"+(tipoControl ? " ("+tipoControlLabel(tipoControl)+")" : "")+" para el "+dateKeyToLabel(fecha)+(real ? " (ya figura en Crónicos)." : ". Queda en Medicina Laboral.");
   }
 
   // Citar / anular la citación a Medicina Laboral desde la lista de Crónicos
-  async function citar(c){
-    if(!puedeCitar || !fechaCita) return;
+  async function citar(c, tipoControl){
+    if(!puedeCitar || !fechaCita || !tipoControl) return;
+    setCitaElegir(null);
     setCitaBusy(c.id); setSaveStatus("Guardando...");
     try{
       const obj = await saveCita({id:c.id+"|"+fechaCita, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
-        fecha:fechaCita, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+        fecha:fechaCita, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl});
       setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
-      setSaveStatus("Citado a Medicina Laboral");
+      setSaveStatus("Citado a Medicina Laboral: "+tipoControlLabel(tipoControl));
     }catch(err){ setSaveStatus("No se pudo citar: "+(err && err.message ? err.message : String(err))); }
     setCitaBusy(null);
   }
@@ -4250,7 +4294,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   // seguidos del mismo caso se hacen uno después del otro. `patch` es un objeto, o una función
   // (estadoActual) => objeto cuando el cambio depende de lo que ya hay (agregar/editar/borrar observaciones).
   function saveCase(caseObj, patch){
-    if(!puedeEditar) return;
+    if(!puedeGuardar) return;
     const run = async ()=>{
       setSaveStatus("Guardando...");
       let m;
@@ -4300,14 +4344,14 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     setObsDrafts(prev=>({...prev, [key]:""}));
   }
   function startEditEntry(caseObj, field, o){
-    if(entradaBloqueada(o, userRef.current) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Las derivaciones se editan desde Medicina Laboral." : "Lo registró la Dra.: solo ella puede modificarlo."); return; }
+    if(entradaBloqueada(o, userRef.current, permisosEntrada) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Los resultados del Control Laboral Cons. Ext. se editan desde Medicina Laboral." : o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden modificarlo." : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden modificarlo."); return; }
     setEditingObs({caseId:caseObj.id, field, obsId:o.id, texto:o.texto});
   }
   function saveEditEntry(caseObj){
     if(!editingObs) return;
     const {obsId, field} = editingObs;
     const orig = (caseObj[field]||[]).find(o=>o.id===obsId);
-    if(orig && (entradaBloqueada(orig, userRef.current) || orig.origen==="derivacion")){ setEditingObs(null); return; }
+    if(orig && (entradaBloqueada(orig, userRef.current, permisosEntrada) || orig.origen==="derivacion")){ setEditingObs(null); return; }
     const texto = (editingObs.texto||"").trim();
     if(!texto){ window.alert("La "+NOMBRE_ENTRADA[field]+" no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
     const editor = userRef.current, ahora = Date.now();
@@ -4319,7 +4363,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     setEditingObs(null);
   }
   function deleteEntry(caseObj, field, o){
-    if(entradaBloqueada(o, userRef.current) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Las derivaciones se eliminan desde Medicina Laboral." : "Lo registró la Dra.: solo ella puede eliminarlo."); return; }
+    if(entradaBloqueada(o, userRef.current, permisosEntrada) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Los resultados del Control Laboral Cons. Ext. se eliminan desde Medicina Laboral." : o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden eliminarlo." : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden eliminarlo."); return; }
     if(!window.confirm("¿Eliminar esta "+NOMBRE_ENTRADA[field]+"?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
     saveCase(caseObj, base=>{
       const lista = base[field]||[];
@@ -4537,14 +4581,14 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       <td className="fz fz1" style={{width:CRONICO_FZ_W, minWidth:CRONICO_FZ_W, maxWidth:CRONICO_FZ_W}}>{c.legajo}</td>
                       <td className="fz fz2" style={{fontWeight:600}}>{c.nombre||"—"}</td>
                       <td>
-                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={locked}
+                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={lockedP}
                           onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                           onBlur={e=>{ const v = e.target.value.trim(); if(v!==(c.telefonoContacto||"")) commitField(c,"telefonoContacto", v); }}
                           style={{width:122, fontSize:12.5, padding:"5px 6px"}} />
                         {c.telefonoEditado && (
-                          <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"telefonoContacto","") : undefined}
+                          <div className="hint" style={puedeGuardar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeGuardar ? ()=>commitField(c,"telefonoContacto","") : undefined}
                             title={c.telefonoPlantel ? "Celular del plantel: "+c.telefonoPlantel : "El plantel no tiene celular cargado"}>
-                            {puedeEditar ? "distinto al plantel · restablecer" : "distinto al plantel"}
+                            {puedeGuardar ? "distinto al plantel · restablecer" : "distinto al plantel"}
                           </div>
                         )}
                       </td>
@@ -4567,7 +4611,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       <td>{c.motivoLabel||"—"}</td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
                       <td>
-                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={locked}
+                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={lockedP}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
                           style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
                       </td>
@@ -4576,17 +4620,17 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                       <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} inputMode="numeric" autoComplete="off" style={{width:100, minWidth:100}}
                         onChange={e=>fechaDMAOnInput(e.target)}
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
-                        onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={locked} /></td>
+                        onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={lockedP} /></td>
                       <td style={{minWidth:200}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
                             {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
                           </div>
                         )}
-                        {puedeEditar && (
+                        {puedeGuardar && (
                           <div style={{display:"flex", gap:4}}>
-                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={locked} />
-                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={locked}>+</button>
+                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={lockedP} />
+                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={lockedP}>+</button>
                           </div>
                         )}
                         <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
@@ -4611,12 +4655,21 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         ) : c.cita ? (
                           <label style={{cursor:puedeCitar?"pointer":"default", display:"flex", gap:6, alignItems:"center"}} title={"Citado "+(c.cita.origen==="medicina"?"por la Dra.":"desde Crónicos")+" — destildar para anular"}>
                             <input type="checkbox" checked onChange={()=>anularCita(c)} disabled={!puedeCitar || citaBusy===c.id || (c.cita.origen==="medicina" && !puedeEditar)} />
-                            <span style={{fontWeight:700}}>Citado {dateKeyToLabel(c.cita.fecha).slice(0,5)}</span>
+                            <span style={{fontWeight:700}}>Citado {dateKeyToLabel(c.cita.fecha).slice(0,5)}{c.cita.tipoControl ? " · "+TIPOS_CONTROL[c.cita.tipoControl].corto : ""}</span>
                           </label>
                         ) : puedeCitar ? (
-                          <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title={"Citar a Medicina Laboral para el "+dateKeyToLabel(fechaCita)}>
-                            <input type="checkbox" checked={false} onChange={()=>citar(c)} disabled={citaBusy===c.id || !fechaCita} /> Citar {dateKeyToLabel(fechaCita).slice(0,5)}
-                          </label>
+                          citaElegir===c.id ? (
+                            <div style={{display:"flex", flexDirection:"column", gap:4, alignItems:"flex-start"}}>
+                              <span className="hint" style={{fontWeight:700}}>Citar el {dateKeyToLabel(fechaCita).slice(0,5)} para:</span>
+                              <button type="button" className="btn small" onClick={()=>citar(c,"planta")} disabled={citaBusy===c.id}>{TIPOS_CONTROL.planta.label}</button>
+                              <button type="button" className="btn small" onClick={()=>citar(c,"externa")} disabled={citaBusy===c.id}>{TIPOS_CONTROL.externa.label}</button>
+                              <button type="button" className="btn secondary small" onClick={()=>setCitaElegir(null)}>Cancelar</button>
+                            </div>
+                          ) : (
+                            <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title={"Citar a Medicina Laboral para el "+dateKeyToLabel(fechaCita)+" (elegís Consulta Médica Planta o Control Laboral Cons. Ext.)"}>
+                              <input type="checkbox" checked={false} onChange={()=>setCitaElegir(c.id)} disabled={citaBusy===c.id || !fechaCita} /> Citar {dateKeyToLabel(fechaCita).slice(0,5)}
+                            </label>
+                          )
                         ) : "—"}
                         {!(c.cita && c.cita.atendido) && c.otraCita && <div className="hint" style={{marginTop:2}}>Ya citado el {dateKeyToLabel(c.otraCita.fecha).slice(0,5)}</div>}
                       </td>
@@ -4639,7 +4692,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         <td colSpan={nCols} style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Acciones — {c.nombre||c.legajo} (no se imprimen en la historia clínica)</div>
                           <ObservacionesHistory c={c} field="acciones" labelCol="Acción" editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} />
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} permisos={permisosEntrada} />
                         </td>
                       </tr>
                     )}
@@ -4648,7 +4701,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         <td colSpan={nCols} style={{background:"var(--plane)"}}>
                           <div className="hint" style={{marginBottom:4, fontWeight:700}}>Observación / Evolución — {c.nombre||c.legajo}</div>
                           <ObservacionesHistory c={c} field="observaciones" labelCol="Movimiento" editingObs={editingObs} setEditingObs={setEditingObs}
-                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} />
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={lockedP} readOnly={!puedeGuardar} usuario={userRef.current} permisos={permisosEntrada} />
                         </td>
                       </tr>
                     )}
@@ -4668,7 +4721,8 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
    Jornada de la Dra.: ausentes por salud del día (AT, ET, EN, CAE...), empleados citados (por RRHH desde Crónicos o por la Dra. en una
    visita anterior), ficha con la evolución cargada en Crónicos y sus propias anotaciones (que se guardan en Crónicos como observaciones),
    y el listado/reporte imprimible de todo lo visto en la jornada. */
-function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
+function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeCargarExt}){
+  const puedeExt = !!(puedeEditar || puedeCargarExt);   // cargar resultados del Control Laboral Cons. Ext. (Administrador, Servicio médico y RRHH)
   const [fechaSel, setFechaSel] = useKeptState("ml.fecha", null);
   const maxISO = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
   const minISO = parsed.minTs!=null ? tsToISODate(parsed.minTs) : "";
@@ -4752,6 +4806,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
   const [anDesde, setAnDesde] = useState("");
   const [anHasta, setAnHasta] = useState("");
   const [anSearch, setAnSearch] = useState("");
+  const [anTipo, setAnTipo] = useState("__todos");   // "__todos" | "planta" | "externa"
   const anotaciones = useMemo(()=>{
     const labelOf = new Map(parsed.idMotivoUniverse.map(m=>[String(m.key).toUpperCase(), m.label]));
     const motivoDeCaso = new Map(), datosDe = new Map(), resultadoDe = new Map();
@@ -4766,30 +4821,32 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     ids.forEach(id=>{
       const m = manual.get(id)||{}, leg = m.legajo || "", lk = leg.toUpperCase();
       (m.observaciones||[]).forEach(o=>{
-        if(o.origen!=="medicina" || (o.id && seen.has(o.id))) return;
+        if((o.origen!=="medicina" && o.origen!=="derivacion") || (o.id && seen.has(o.id))) return;
         if(o.id) seen.add(o.id);
         const pl = plantelPorLegajo.get(lk) || {}, dd = datosDe.get(lk) || {};
         let key = id; const pref = sanitizeIdSeg(leg)+"-";
         if(key.startsWith(pref)) key = key.slice(pref.length);
         key = key.replace(/-[^-]*$/, "");
         const motivo = motivoDeCaso.get(id) || (key==="MANUAL" ? "Citación manual" : (labelOf.get(key.toUpperCase()) || key));
-        const visita = o.fechaVisita || (o.ts ? tsToISODate(Math.floor(o.ts/86400000)*86400000) : "");
+        const ext = o.origen==="derivacion";
+        const visita = (ext ? o.fechaDeriv : o.fechaVisita) || (o.ts ? tsToISODate(Math.floor(o.ts/86400000)*86400000) : "");
         out.push({id:o.id||id+"|"+o.ts, visita, ts:o.ts||0, legajo:leg, nombre:pl.nombre||dd.nombre||"", unidad:pl.unidad||dd.unidad||"", motivo,
-          texto:o.texto||"", autor:o.autor||"", resultado:resultadoDe.get(lk+"|"+o.fechaVisita)||"", caso:id});
+          tipo: ext ? "externa" : "planta", centro: ext ? (o.centro||"") : "",
+          texto: ext ? (o.devolucion || "(resultado pendiente)") : (o.texto||""), autor:o.autor||"", resultado:resultadoDe.get(lk+"|"+visita)||"", caso:id});
       });
     });
     return out.sort((a,b)=> (a.visita<b.visita?-1:a.visita>b.visita?1:0) || a.ts-b.ts);
   }, [manual, citas, plantelPorLegajo, parsed]);
   const anFiltradas = useMemo(()=>{
     const qa = normTxt(anSearch);
-    return anotaciones.filter(a=>(!anDesde || a.visita>=anDesde) && (!anHasta || a.visita<=anHasta) &&
+    return anotaciones.filter(a=>(!anDesde || a.visita>=anDesde) && (!anHasta || a.visita<=anHasta) && (anTipo==="__todos" || a.tipo===anTipo) &&
       (!qa || normTxt(a.legajo).includes(qa) || normTxt(a.nombre).includes(qa) || normTxt(a.texto).includes(qa)));
-  }, [anotaciones, anDesde, anHasta, anSearch]);
+  }, [anotaciones, anDesde, anHasta, anSearch, anTipo]);
   const RESULTADO_TXT = {justificada:"Justificada", injustificada:"Injustificada"};
   function anotacionesAoa(){
-    const header = ["Fecha de la visita","Hora de registro","Legajo","Nombre","Unidad","Motivo - Razón","Anotación de la Dra.","Registró","Resultado del control (art. 210 LCT)","Caso"];
+    const header = ["Fecha del control","Hora de registro","Legajo","Nombre","Unidad","Motivo - Razón","Tipo de control","Centro médico","Resultado","Registró","Resultado del control (art. 210 LCT)","Caso"];
     const rows = anFiltradas.map(a=>[a.visita ? dateKeyToLabel(a.visita) : "", a.ts ? new Date(a.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "",
-      a.legajo, a.nombre, a.unidad, a.motivo, a.texto, a.autor, RESULTADO_TXT[a.resultado]||"", a.caso]);
+      a.legajo, a.nombre, a.unidad, a.motivo, tipoControlLabel(a.tipo), a.centro, a.texto, a.autor, RESULTADO_TXT[a.resultado]||"", a.caso]);
     return [header, ...rows];
   }
   function exportarAnotaciones(formato){
@@ -4797,12 +4854,12 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const stamp = new Date().toISOString().slice(0,10);
     if(formato==="csv"){
-      descargarArchivo("anotaciones-medicina-laboral-"+stamp+".csv", "﻿"+XLSX.utils.sheet_to_csv(ws, {FS:";"}), "text/csv;charset=utf-8");
+      descargarArchivo("resultados-control-laboral-"+stamp+".csv", "﻿"+XLSX.utils.sheet_to_csv(ws, {FS:";"}), "text/csv;charset=utf-8");
       return;
     }
-    ws["!cols"] = [{wch:14},{wch:10},{wch:9},{wch:30},{wch:22},{wch:34},{wch:90},{wch:26},{wch:18},{wch:18}];
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Anotaciones");
-    XLSX.writeFile(wb, "anotaciones-medicina-laboral-"+stamp+".xlsx");
+    ws["!cols"] = [{wch:14},{wch:10},{wch:9},{wch:30},{wch:22},{wch:34},{wch:26},{wch:14},{wch:90},{wch:26},{wch:18},{wch:18}];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Resultados");
+    XLSX.writeFile(wb, "resultados-control-laboral-"+stamp+".xlsx");
   }
 
   // Traspaso: cuando un empleado citado a mano ya figura como caso de Crónicos, lo que escribió la Dra. en su caso provisorio se copia
@@ -4868,7 +4925,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, ...(extra||{})}; };
   async function guardarCitaLocal(obj){ const saved = await saveCita(obj); setCitas(prev=>{ const n = new Map(prev); n.set(saved.id, saved); return n; }); return saved; }
   // Cita a un empleado que todavía no figura en Crónicos (o que sí figura): queda en los Citados del día elegido
-  async function citarManual(emp, fecha, nota){
+  async function citarManual(emp, fecha, nota, tipoControl){
     if(!puedeEditar) return "No tenés permiso para citar.";
     const real = realDe(emp.legajo);
     const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
@@ -4876,7 +4933,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
     await guardarCitaLocal({id:casoId+"|"+fecha, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
       motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
-      fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false});
+      fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl:tipoControl||""});
     return "Citado para el "+dateKeyToLabel(fecha)+(fecha===fechaISO ? ". Ya figura en los Citados de este día." : ".");
   }
   // Eliminar una citación errónea o de prueba (solo el Administrador). Las anotaciones de la Dra. no se tocan: están en el caso de Crónicos.
@@ -4951,7 +5008,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
   function aplicarManual(id, m){ if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(id, m); manualRef.current = n; setManual(n); } }
   async function guardarDeriv(item){
     const f = derivForm[item.key];
-    if(!puedeEditar || !f) return;
+    if(!puedeExt || !f) return;
     if(!f.centro){ setStatus("Elegí el centro médico al que se derivó."); return; }
     if(!f.fecha || isoDateToTs(f.fecha)==null){ setStatus("Elegí la fecha de la derivación."); return; }
     const devolucion = (f.devolucion||"").trim();
@@ -4981,14 +5038,14 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
         });
       }
       cerrarDeriv(item);
-      setStatus(f.id ? "Derivación actualizada (también figura en Crónicos)" : "Derivación registrada (también figura en Crónicos)");
+      setStatus(f.id ? "Resultado del control externo actualizado (también figura en Crónicos)" : "Resultado del control externo registrado (también figura en Crónicos)");
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
   async function eliminarDeriv(item){
     const f = derivForm[item.key];
     if(!puedeEditar || !f || !f.id) return;
-    if(!window.confirm("¿Eliminar esta derivación a "+f.centro+"?\n\nSe borra también de Crónicos, incluida la devolución cargada. No se puede deshacer.")) return;
+    if(!window.confirm("¿Eliminar este resultado del Control Laboral Cons. Ext. ("+f.centro+")?\n\nSe borra también de Crónicos, incluida la devolución cargada. No se puede deshacer.")) return;
     setBusy(item.key); setStatus("Eliminando...");
     try{
       for(const id of casosConObs(f.id)){
@@ -5002,7 +5059,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
           aplicarManual(id, m);
         });
       }
-      cerrarDeriv(item); setStatus("Derivación eliminada");
+      cerrarDeriv(item); setStatus("Resultado del control externo eliminado");
     }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
@@ -5013,8 +5070,8 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     if(rc.fecha < fechaISO){ setStatus("La nueva cita no puede ser anterior al día que estás viendo."); return; }
     setBusy(item.key); setStatus("Guardando...");
     try{
-      await guardarCitaLocal(citaNueva(item, rc.fecha, {nota:(rc.nota||"").trim()}));
-      setReCita(p=>({...p, [item.key]:{fecha:"", nota:""}}));
+      await guardarCitaLocal(citaNueva(item, rc.fecha, {nota:(rc.nota||"").trim(), tipoControl: rc.tipo || ((citaDe(item.casoId, item.legajo)||{}).tipoControl) || ""}));
+      setReCita(p=>({...p, [item.key]:{fecha:"", nota:"", tipo:""}}));
       setStatus("Citado para el "+dateKeyToLabel(rc.fecha));
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
@@ -5049,10 +5106,10 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
       const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO) && o.origen!=="derivacion").slice().sort((a,b)=>a.ts-b.ts);
       const cel = telefonoDe(it).tel;
       return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+(cel ? " · Cel. "+e(cel) : "")+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
-        "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+(v.resultado ? " · Control art. 210: "+(v.resultado==="injustificada" ? "ausencia injustificada" : "ausencia justificada") : "")+"</div>"+
+        "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.tipoControl ? " · "+e(tipoControlLabel(v.tipoControl)) : "")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+(v.resultado ? " · Control art. 210: "+(v.resultado==="injustificada" ? "ausencia injustificada" : "ausencia justificada") : "")+"</div>"+
         "<div class='lbl'>Anotaciones de la jornada</div>"+
         (notasDia.length ? notasDia.map(o=>"<p class='txt'>"+e(o.texto)+" <span class='meta'>("+e(new Date(o.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}))+(o.autor ? " · "+e(o.autor) : "")+")</span></p>").join("") : "<p class='txt none'>Sin anotaciones registradas.</p>")+
-        (derivacionesDe(it).length ? "<div class='lbl'>Derivaciones a "+e(DERIV_NOMBRE)+"</div>"+derivacionesDe(it).map(o=>"<p class='txt'><b>"+e(o.centro||"—")+"</b> <span class='meta'>(derivado el "+e(o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR"))+")</span> — "+(o.devolucion ? e(o.devolucion) : "<i>devolución pendiente</i>")+"</p>").join("") : "")+
+        (derivacionesDe(it).length ? "<div class='lbl'>Resultados de "+e(DERIV_NOMBRE)+"</div>"+derivacionesDe(it).map(o=>"<p class='txt'><b>"+e(o.centro||"—")+"</b> <span class='meta'>(derivado el "+e(o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR"))+")</span> — "+(o.devolucion ? e(o.devolucion) : "<i>devolución pendiente</i>")+"</p>").join("") : "")+
         (conEvolucion && previas.length ? "<div class='lbl'>Evolución previa (Crónicos)</div>"+previas.map(o=>"<p class='txt'><span class='meta'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor ? " · "+e(o.autor) : "")+" — </span>"+e(o.texto)+"</p>").join("") : "")+
         "</div>";
     }).join("");
@@ -5073,7 +5130,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
     const m = manual.get(item.dataId) || manual.get(item.casoId) || {};
     const obs = obsDe(item).sort((a,b)=>b.ts-a.ts);
     const cur = citaDe(item.casoId, item.legajo);
-    const rc = reCita[item.key] || {fecha:"", nota:""};
+    const rc = reCita[item.key] || {fecha:"", nota:"", tipo:""};
     const ocupado = busy===item.key;
     const derivs = derivacionesDe(item), df = derivForm[item.key];
     const sinCaso = esCasoManualId(item.dataId || item.casoId);   // todavía no figura como caso de Crónicos
@@ -5087,7 +5144,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
           <div><span className="hint">Opinión médica</span><div>{m.opinionMedica||"—"}</div></div>
           <div><span className="hint">Táctico empleado</span><div>{m.tactoEmpleado||"—"}</div></div>
           <div><span className="hint">Posible alta</span><div>{m.posibleAlta||"—"}</div></div>
-          {cur && <div><span className="hint">Citación</span><div>{cur.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH"}{cur.nota ? " — "+cur.nota : ""}</div></div>}
+          {cur && <div><span className="hint">Citación</span><div>{cur.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH"}{cur.tipoControl ? " · "+tipoControlLabel(cur.tipoControl) : ""}{cur.nota ? " — "+cur.nota : ""}</div></div>}
         </div>
         <div>
           <div className="hint" style={{fontWeight:700, marginBottom:4}}>Evolución / Observaciones (las mismas de Crónicos)</div>
@@ -5103,25 +5160,25 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
           ) : <div className="hint">Todavía no hay observaciones cargadas.</div>}
         </div>
         <div style={{borderTop:"1px solid var(--border)", paddingTop:8}}>
-          <div className="hint" style={{fontWeight:700, marginBottom:4}}>{DERIV_NOMBRE} — derivaciones a centros médicos</div>
+          <div className="hint" style={{fontWeight:700, marginBottom:4}}>{DERIV_NOMBRE} — resultados por centro médico{cur && cur.tipoControl==="externa" ? " (citado para este control)" : ""}</div>
           {derivs.length ? (
             <div style={{display:"flex", flexDirection:"column", gap:6, marginBottom:6}}>
               {derivs.map(o=>(
                 <div key={o.id} style={{border:"1px solid var(--border)", borderRadius:8, padding:"6px 10px"}}>
                   <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"}}>
                     <b>{o.centro||"—"}</b>
-                    <span className="hint">derivado el {o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR")}{o.autor ? " · registró "+o.autor : ""}</span>
-                    <span style={{fontWeight:700, color: o.devolucion ? "var(--good)" : "var(--warning)"}}>{o.devolucion ? "Devolución recibida" : "Devolución pendiente"}</span>
-                    {puedeEditar && !(df && df.id===o.id) && <button type="button" className="btn secondary small" style={{marginLeft:"auto"}} onClick={()=>abrirDeriv(item, o)} disabled={ocupado}>{o.devolucion ? "Editar" : "Cargar devolución"}</button>}
+                    <span className="hint">control del {o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR")}{o.autor ? " · registró "+o.autor : ""}</span>
+                    <span style={{fontWeight:700, color: o.devolucion ? "var(--good)" : "var(--warning)"}}>{o.devolucion ? "Resultado recibido" : "Resultado pendiente"}</span>
+                    {puedeExt && !(df && df.id===o.id) && <button type="button" className="btn secondary small" style={{marginLeft:"auto"}} onClick={()=>abrirDeriv(item, o)} disabled={ocupado}>{o.devolucion ? "Editar" : "Cargar devolución"}</button>}
                   </div>
                   {o.devolucion && <div style={{whiteSpace:"pre-wrap", marginTop:4}}>{o.devolucion}</div>}
                   {o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
                 </div>
               ))}
             </div>
-          ) : <div className="hint" style={{marginBottom:6}}>Todavía no se derivó a ningún centro.</div>}
-          {puedeEditar && !df && <button type="button" className="btn secondary small" onClick={()=>abrirDeriv(item, null)} disabled={ocupado}>Derivar a {DERIV_NOMBRE}</button>}
-          {puedeEditar && df && (
+          ) : <div className="hint" style={{marginBottom:6}}>Todavía no hay resultados cargados de controles en centros externos.</div>}
+          {puedeExt && !df && <button type="button" className="btn secondary small" onClick={()=>abrirDeriv(item, null)} disabled={ocupado}>Cargar resultado de {DERIV_NOMBRE}</button>}
+          {puedeExt && df && (
             <div style={{border:"1px solid var(--accent)", borderRadius:8, padding:10, display:"flex", flexDirection:"column", gap:8}}>
               <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
                 <div className="field" style={{margin:0}}>
@@ -5132,18 +5189,18 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
                   </select>
                 </div>
                 <div className="field" style={{margin:0}}>
-                  <label>Fecha de la derivación</label>
+                  <label>Fecha del control</label>
                   <input type="date" value={df.fecha} onChange={e=>cambiarDeriv(item, "fecha", e.target.value)} disabled={ocupado} />
                 </div>
               </div>
               <div>
-                <div className="hint" style={{fontWeight:700, marginBottom:4}}>Devolución de la clínica (pegala acá o escribila; se puede dejar en blanco y cargarla después)</div>
+                <div className="hint" style={{fontWeight:700, marginBottom:4}}>Resultado / devolución de la clínica (pegalo acá o escribilo; se puede dejar en blanco y cargarlo después)</div>
                 <textarea rows={6} style={{width:"100%"}} placeholder="Pegá o escribí acá lo que informó el centro médico…" value={df.devolucion} onChange={e=>cambiarDeriv(item, "devolucion", e.target.value)} disabled={ocupado} />
               </div>
               <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-                <button type="button" className="btn small" onClick={()=>guardarDeriv(item)} disabled={ocupado || !df.centro}>{df.id ? "Guardar cambios" : "Registrar derivación"}</button>
+                <button type="button" className="btn small" onClick={()=>guardarDeriv(item)} disabled={ocupado || !df.centro}>{df.id ? "Guardar cambios" : "Registrar resultado"}</button>
                 <button type="button" className="btn secondary small" onClick={()=>cerrarDeriv(item)} disabled={ocupado}>Cancelar</button>
-                {df.id && <button type="button" className="btn secondary small" style={{color:"var(--bad)", marginLeft:"auto"}} onClick={()=>eliminarDeriv(item)} disabled={ocupado}>Eliminar derivación</button>}
+                {df.id && puedeEditar && <button type="button" className="btn secondary small" style={{color:"var(--bad)", marginLeft:"auto"}} onClick={()=>eliminarDeriv(item)} disabled={ocupado}>Eliminar resultado</button>}
               </div>
             </div>
           )}
@@ -5172,6 +5229,10 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
             <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
               <span className="hint" style={{fontWeight:700}}>Citar nuevamente:</span>
               <input type="date" value={rc.fecha} min={fechaISO} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, fecha:e.target.value}}))} style={{fontSize:12.5, padding:"5px 6px"}} disabled={ocupado} />
+              <select value={rc.tipo || (cur && cur.tipoControl) || ""} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, tipo:e.target.value}}))} disabled={ocupado} title="Tipo de control">
+                <option value="">Tipo de control…</option>
+                {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+              </select>
               <input type="text" placeholder="Motivo de la cita (opcional)" value={rc.nota} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, nota:e.target.value}}))} style={{minWidth:220}} disabled={ocupado} />
               <button type="button" className="btn secondary small" onClick={()=>citarNuevamente(item)} disabled={ocupado || !rc.fecha}>Citar</button>
             </div>
@@ -5198,7 +5259,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
                   <tr>
                     <td>{it.legajo}</td><td>{it.nombre||"—"}</td><td>{it.unidad||"—"}</td><td>{it.motivo||"—"}</td>
                     {mostrarDias && <td className="num">{it.dias!=null ? fmt(it.dias) : "—"}</td>}
-                    <td>{ct ? (ct.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH") : "—"}{ct && ct.nota ? <div className="hint">{ct.nota}</div> : null}</td>
+                    <td>{ct ? (ct.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH") : "—"}{ct && ct.tipoControl ? <div style={{fontWeight:700, fontSize:12, color:"var(--accent)"}}>{tipoControlLabel(ct.tipoControl)}</div> : null}{ct && ct.nota ? <div className="hint">{ct.nota}</div> : null}</td>
                     <td>{ct && ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓ Visto {ct.atendidoTs ? new Date(ct.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span> : ct ? <span style={{color:"var(--warning)", fontWeight:700}}>Pendiente</span> : "—"}
                       {ct && ct.resultado && <div style={{fontWeight:700, fontSize:12, color: ct.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{ct.resultado==="injustificada" ? "Ausencia injustificada" : "Ausencia justificada"}</div>}</td>
                     <td style={{whiteSpace:"nowrap"}}><button type="button" className="btn secondary small" onClick={()=>setOpenKey(abierto ? null : titulo+"|"+it.key)}>{abierto ? "Cerrar ficha" : (puedeEditar ? "Ver ficha / Atender" : "Ver ficha")}</button>
@@ -5241,20 +5302,18 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
         {renderTabla(itemsCitados, "citados", "No hay empleados citados para este día.", false)}
       </div>
 
-      <div className="card table-card">
-        <h3>Ausentes por salud — {dateKeyToLabel(fechaISO)} ({itemsAusentes.length})</h3>
+      <CollapsibleCard id="ausentes" title={"Ausentes por salud — "+dateKeyToLabel(fechaISO)} summary={"("+itemsAusentes.length+")"}>
         <div className="caption">Ausencias por motivos de salud ({Array.from(CRONICOS_CODIGOS_SALUD).join(", ")}) del día. Desde acá se puede abrir la ficha, anotar y marcar como visto.</div>
         {renderTabla(itemsAusentes, "ausentes", "No hay ausentes por salud este día.", true)}
-      </div>
+      </CollapsibleCard>
 
-      <div className="card table-card">
-        <div style={{display:"flex", alignItems:"center", gap:12, flexWrap:"wrap"}}>
-          <h3 style={{margin:0}}>Vistos en la jornada — {dateKeyToLabel(fechaISO)} ({vistos.length})</h3>
-          <label className="motivo-check" style={{cursor:"pointer", marginLeft:"auto"}}>
+      <CollapsibleCard id="vistos" title={"Vistos en la jornada — "+dateKeyToLabel(fechaISO)} summary={"("+vistos.length+")"}
+        right={<React.Fragment>
+          <label className="motivo-check" style={{cursor:"pointer"}}>
             <input type="checkbox" checked={conEvolucion} onChange={e=>setConEvolucion(e.target.checked)} /> Incluir evolución previa en el reporte
           </label>
           <button type="button" className="btn" onClick={imprimirJornada} disabled={!vistos.length}>Imprimir reporte de la jornada</button>
-        </div>
+        </React.Fragment>}>
         <div className="overflow-x">
           <table>
             <thead><tr><th>Hora</th><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th><th>Anotaciones de la jornada</th></tr></thead>
@@ -5274,29 +5333,35 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
             </tbody>
           </table>
         </div>
-      </div>
+      </CollapsibleCard>
 
       {puedeEditar && (
-        <div className="card table-card">
-          <h3>Anotaciones de la Dra. — historial completo ({fmt(anFiltradas.length)}{anFiltradas.length!==anotaciones.length ? " de "+fmt(anotaciones.length) : ""})</h3>
-          <div className="caption">Todas las anotaciones que registró la Dra. en Medicina Laboral, de todas las fechas, para consultarlas o exportarlas (por ejemplo, para migrarlas a otro sistema como historia clínica). Se exporta lo que muestran los filtros, en orden cronológico.</div>
+        <CollapsibleCard id="resultados" title="Resultados de Control Laboral" summary={"("+fmt(anFiltradas.length)+(anFiltradas.length!==anotaciones.length ? " de "+fmt(anotaciones.length) : "")+")"}>
+          <div className="caption">Todo lo registrado en Medicina Laboral, de todas las fechas: lo que anotó la Dra. en la Consulta Médica Planta y los resultados de los Controles Laborales en centros externos (Cons. Ext.), para consultarlos o exportarlos (por ejemplo, para migrarlos a otro sistema como historia clínica). Se exporta lo que muestran los filtros, en orden cronológico.</div>
           <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end", margin:"8px 0"}}>
-            <div className="field"><label>Visitas desde</label><input type="date" value={anDesde} onChange={e=>setAnDesde(e.target.value)} /></div>
+            <div className="field"><label>Controles desde</label><input type="date" value={anDesde} onChange={e=>setAnDesde(e.target.value)} /></div>
             <div className="field"><label>Hasta</label><input type="date" value={anHasta} onChange={e=>setAnHasta(e.target.value)} /></div>
+            <div className="field"><label>Tipo de control</label>
+              <select value={anTipo} onChange={e=>setAnTipo(e.target.value)}>
+                <option value="__todos">Todos</option>
+                {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+              </select>
+            </div>
             <div className="field"><label>Buscar</label><input type="text" placeholder="Legajo, nombre o texto…" value={anSearch} onChange={e=>setAnSearch(e.target.value)} style={{minWidth:200}} /></div>
-            {(anDesde || anHasta || anSearch) && <button type="button" className="btn secondary" onClick={()=>{ setAnDesde(""); setAnHasta(""); setAnSearch(""); }}>Quitar filtros</button>}
+            {(anDesde || anHasta || anSearch || anTipo!=="__todos") && <button type="button" className="btn secondary" onClick={()=>{ setAnDesde(""); setAnHasta(""); setAnSearch(""); setAnTipo("__todos"); }}>Quitar filtros</button>}
             <button type="button" className="btn" onClick={()=>exportarAnotaciones("xlsx")} disabled={!anFiltradas.length}>Exportar a Excel</button>
             <button type="button" className="btn secondary" onClick={()=>exportarAnotaciones("csv")} disabled={!anFiltradas.length}>Exportar CSV</button>
           </div>
           <div className="overflow-x">
             <table>
-              <thead><tr><th>Fecha de la visita</th><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th><th>Anotación</th><th>Registró</th><th>Control art. 210</th></tr></thead>
+              <thead><tr><th>Fecha del control</th><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th><th>Tipo de control</th><th>Resultado</th><th>Registró</th><th>Control art. 210</th></tr></thead>
               <tbody>
-                {!anFiltradas.length && <tr><td colSpan="8" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{anotaciones.length ? "Ninguna anotación con estos filtros." : "Todavía no hay anotaciones de la Dra."}</td></tr>}
+                {!anFiltradas.length && <tr><td colSpan="9" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{anotaciones.length ? "Ningún resultado con estos filtros." : "Todavía no hay resultados cargados."}</td></tr>}
                 {anFiltradas.slice().reverse().slice(0,300).map(a=>(
                   <tr key={a.id}>
                     <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>{a.visita ? dateKeyToLabel(a.visita) : "—"}<div className="hint">{a.ts ? new Date(a.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</div></td>
                     <td style={{verticalAlign:"top"}}>{a.legajo}</td><td style={{verticalAlign:"top"}}>{a.nombre||"—"}</td><td style={{verticalAlign:"top"}}>{a.unidad||"—"}</td><td style={{verticalAlign:"top"}}>{a.motivo||"—"}</td>
+                    <td style={{verticalAlign:"top", minWidth:150}}><b>{tipoControlLabel(a.tipo)}</b>{a.centro ? <div className="hint">{a.centro}</div> : null}</td>
                     <td style={{whiteSpace:"pre-wrap", minWidth:260}}>{a.texto}</td>
                     <td style={{verticalAlign:"top"}}>{a.autor||"—"}</td>
                     <td style={{verticalAlign:"top"}}>{a.resultado ? <b style={{color: a.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{RESULTADO_TXT[a.resultado]}</b> : "—"}</td>
@@ -5306,7 +5371,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
             </table>
           </div>
           {anFiltradas.length>300 && <div className="hint" style={{marginTop:6}}>Se muestran las 300 más recientes; la exportación incluye todas las que cumplen los filtros ({fmt(anFiltradas.length)}).</div>}
-        </div>
+        </CollapsibleCard>
       )}
     </div>
   );
@@ -5318,7 +5383,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar}){
    las notas en PDF (cada una con el nombre del empleado y la sanción). RRHH ve la lista pero no define ni emite. */
 function localISO(ts){ const d = new Date(ts); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
 const SANCION_ESTADOS = {marcada:{txt:"Pendiente de definir", color:"var(--warning)"}, definida:{txt:"Definida: lista para emitir", color:"var(--accent)"}, emitida:{txt:"Emitida", color:"var(--good)"}};
-function SancionesTab({plantel, puedeDefinir}){
+function SancionesTab({plantel, puedeDefinir, esAdmin}){
   const [sanciones, setSanciones] = useState(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -5366,6 +5431,7 @@ function SancionesTab({plantel, puedeDefinir}){
 
   function abrir(r){
     if(openId===r.id){ setOpenId(null); return; }
+    if(!esAdmin && r.estado!=="marcada") return;   // RRHH define, pero no edita lo ya definido
     setOpenId(r.id);
     // las notas viejas traían la fecha de ausencia escrita (ej. "26/10/2026"): si se entiende, se pasa a fecha
     const legacy = !(r.fechas||[]).length && r.fechaAusencia ? parseFechasTexto(r.fechaAusencia) : null;
@@ -5375,7 +5441,7 @@ function SancionesTab({plantel, puedeDefinir}){
       nInterno:r.nInterno||"", lugar:r.lugar||"Florida", fechaEmision:r.fechaEmision||localISO(Date.now())});
   }
   async function guardarDefinicion(r){
-    if(!puedeDefinir) return;
+    if(!puedeDefinir || (!esAdmin && r.estado!=="marcada")) return;
     const d = draft;
     if(!d.motivoSancion){ setStatus("Elegí el motivo de la sanción."); return; }
     if(d.motivoSancion==="control" && !d.fechaControl){ setStatus("Indicá la fecha del control médico."); return; }
@@ -5411,7 +5477,7 @@ function SancionesTab({plantel, puedeDefinir}){
     }catch(err){ setStatus("Se generó la nota pero no se pudo registrar la emisión: "+((err && err.message) ? err.message : String(err))); }
   }
   async function quitar(r){
-    if(!puedeDefinir) return;
+    if(!esAdmin) return;   // solo el Administrador quita sanciones de la lista
     if(!window.confirm("¿Quitar la sanción de "+(r.nombre||r.legajo)+" de la lista? Se borra la marca y lo definido. No se puede deshacer.")) return;
     setBusy(r.id);
     try{ await deleteSancion(r.id); setSanciones(p=>{ const n = new Map(p); n.delete(r.id); return n; }); setStatus("Sanción quitada de la lista"); }
@@ -5450,7 +5516,7 @@ function SancionesTab({plantel, puedeDefinir}){
       <div className="card table-card">
         <h3>Sanciones ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
         <div className="caption">
-          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el motivo (ausencias injustificadas, o encontrarse en condiciones laborales al momento del control médico) y el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)—, y revisás las fechas; con todas definidas, se emiten las notas en PDF." : "El Administrador define el tipo de sanción y emite las notas."}
+          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el motivo (ausencias injustificadas, o encontrarse en condiciones laborales al momento del control médico) y el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)—, y revisás las fechas; con todas definidas, se emiten las notas en PDF."+(esAdmin ? "" : " Una vez definida, la definición no se edita ni se quita desde acá (solo el Administrador).") : "El Administrador define el tipo de sanción y emite las notas."}
         </div>
         <div className="overflow-x">
           <table>
@@ -5474,10 +5540,10 @@ function SancionesTab({plantel, puedeDefinir}){
                       <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
                         {puedeDefinir && (
                           <React.Fragment>
-                            <button type="button" className="btn secondary small" onClick={()=>abrir(r)}>{abierto ? "Cerrar" : (r.estado==="marcada" ? "Definir" : "Editar definición")}</button>{" "}
+                            {(esAdmin || r.estado==="marcada") && <button type="button" className="btn secondary small" onClick={()=>abrir(r)}>{abierto ? "Cerrar" : (r.estado==="marcada" ? "Definir" : "Editar definición")}</button>}{" "}
                             {r.estado==="definida" && <button type="button" className="btn small" onClick={()=>emitir([r])} disabled={busy===r.id}>Emitir PDF</button>}
                             {r.estado==="emitida" && <button type="button" className="btn secondary small" onClick={()=>emitir([r])} disabled={busy===r.id}>Reimprimir PDF</button>}{" "}
-                            <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>quitar(r)} disabled={busy===r.id}>Quitar</button>
+                            {esAdmin && <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>quitar(r)} disabled={busy===r.id}>Quitar</button>}
                           </React.Fragment>
                         )}
                       </td>
@@ -6332,9 +6398,9 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} puedeVerSanciones={!!perms.sancionar} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
-          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
-          {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} />}
-          {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
+          {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} />}
+          {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
         </React.Fragment>
       )}
