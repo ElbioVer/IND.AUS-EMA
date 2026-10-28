@@ -378,8 +378,8 @@ function RoleGate({userId, userEmail, onSignOut}){
 // Administración de perfiles (solo Administrador). Los usuarios nuevos se crean en Supabase (Authentication → Users) y nacen como "Gerencias".
 // Elección de las Unidades de Negocio de un Visor (lista desplegable con tildes).
 function UnidadesPicker({options, selected, onChange}){
-  const sel = new Set(selected);
-  const lista = Array.from(new Set([...options, ...selected])).sort((a,b)=>a.localeCompare(b, "es"));
+  const sel = new Set(selected.map(unidadBase));
+  const lista = Array.from(new Set([...options, ...sel])).sort((a,b)=>a.localeCompare(b, "es"));
   const resumen = !sel.size ? "Sin unidad (no ve datos)" : sel.size<=2 ? Array.from(sel).join(", ") : sel.size+" unidades";
   return (
     <details>
@@ -419,7 +419,7 @@ function UsuariosTab({userId, unidadesDisponibles}){
     if(row.user_id===userId || !ROLES[rol]) return;
     setMsg("Guardando...");
     const {error} = await supabaseClient.from("perfiles").update({rol}).eq("user_id", row.user_id);
-    if(error){ setMsg("Error al guardar: "+error.message); return; }
+    if(error){ setMsg("Error al guardar: "+error.message+(/perfiles_rol_check/.test(error.message||"") ? " — falta correr supabase-migracion-visor.sql en el SQL Editor de Supabase (habilita el perfil Visor)." : "")); return; }
     setRows(rs=>rs.map(r=> r.user_id===row.user_id ? {...r, rol} : r));
     setMsg("Guardado: "+row.email+" → "+ROLES[rol].label);
   }
@@ -518,6 +518,8 @@ function findColByAliases(headerRow, aliases){
   return -1;
 }
 const RANKING_DEFAULT_PRESIDENCIA_INCLUDE = new Set(["ENF","NO JUST"]);
+// Nombre base de una Unidad de Negocio: el plantel escribe algunas como "Lectura (o)" y el ausentismo como "Lectura"; para el Visor son la misma unidad.
+function unidadBase(u){ return String(u==null ? "" : u).replace(/\s*\(o\)\s*$/i, "").trim(); }
 const UNIT_ORDER = ["Distribucion y Logistica","Operaciones Comerciales","Servicios Electricos","Lectura","Interior","Indirectos"];
 function unitOrderIndex(name){ const i = UNIT_ORDER.indexOf(name); return i===-1 ? UNIT_ORDER.length : i; }
 const DEFAULT_MOTIVO_TABLE = [
@@ -5809,8 +5811,8 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const perms = ROLES[rol] || ROLES.gerencias;
   // Visor: solo se trabaja con las filas de su(s) Unidad(es) de Negocio (el servidor ya no le manda las demás; acá se vuelve a filtrar por seguridad)
   // y su caché local es aparte (por usuario y por unidades), para que nunca mezcle datos de otros perfiles del mismo navegador.
-  const unidadesSet = perms.visor ? new Set((unidades||[]).map(u=>String(u).trim()).filter(Boolean)) : null;
-  const enAlcance = row => !unidadesSet || unidadesSet.has(String(row.unidad||"").trim());
+  const unidadesSet = perms.visor ? new Set((unidades||[]).map(unidadBase).filter(Boolean)) : null;
+  const enAlcance = row => !unidadesSet || unidadesSet.has(unidadBase(row.unidad));
   const cachePrefix = unidadesSet ? "v:"+userId+":"+Array.from(unidadesSet).sort().join("|")+":" : "";
   const visorSinUnidad = !!unidadesSet && unidadesSet.size===0;
   const verResumen = perms.tabs.includes("resumen"); // las tarjetas de ausentismo de arriba pertenecen al Resumen
@@ -5840,8 +5842,8 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const unidadesDisponibles = useMemo(()=>{
     if(!perms.esAdmin) return [];
     const s = new Set();
-    if(parsedRaw) parsedRaw.records.forEach(r=>{ const u = (r.unidad||"").trim(); if(u) s.add(u); });
-    plantel.forEach(pl=>{ const u = (pl.unidad||"").trim(); if(u) s.add(u); });
+    if(parsedRaw) parsedRaw.records.forEach(r=>{ const u = unidadBase(r.unidad); if(u) s.add(u); });
+    plantel.forEach(pl=>{ const u = unidadBase(pl.unidad); if(u) s.add(u); });   // sin el "(o)" del plantel: es la misma unidad
     return Array.from(s).sort((a,b)=>a.localeCompare(b, "es"));
   }, [parsedRaw, plantel]);
   const [cuatriSel, setCuatriSel] = useState("");
