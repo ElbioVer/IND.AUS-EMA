@@ -4721,7 +4721,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
    Jornada de la Dra.: ausentes por salud del día (AT, ET, EN, CAE...), empleados citados (por RRHH desde Crónicos o por la Dra. en una
    visita anterior), ficha con la evolución cargada en Crónicos y sus propias anotaciones (que se guardan en Crónicos como observaciones),
    y el listado/reporte imprimible de todo lo visto en la jornada. */
-function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeCargarExt}){
+function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeCargarExt, esAdmin}){
   const puedeExt = !!(puedeEditar || puedeCargarExt);   // cargar resultados del Control Laboral Cons. Ext. (Administrador, Servicio médico y RRHH)
   const [fechaSel, setFechaSel] = useKeptState("ml.fecha", null);
   const maxISO = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
@@ -4740,6 +4740,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
   const [search, setSearch] = useState("");
   const [conEvolucion, setConEvolucion] = useState(false);
   const [derivForm, setDerivForm] = useState({});    // formulario de derivación abierto por caso: {id|null, centro, fecha, devolucion}
+  const [editObs, setEditObs] = useState(null);      // anotación de la evolución que se está editando: {id, texto}
   const userRef = useRef("");
   const aliveRef = useRef(true);
   const manualRef = useRef(new Map());
@@ -5042,6 +5043,53 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
+  // ---- editar / eliminar una anotación de la evolución desde la ficha (la de la Dra.: ella o el Administrador; las demás: Administrador y Servicio médico) ----
+  const puedeModObs = o => puedeEditar && o.origen!=="derivacion" && o.origen!=="razon" && !entradaBloqueada(o, userRef.current, {admin:!!esAdmin});
+  async function guardarEdicionObs(item){
+    if(!editObs) return;
+    const o = obsDe(item).find(x=>x.id===editObs.id);
+    const texto = (editObs.texto||"").trim();
+    if(!o || !puedeModObs(o)) { setEditObs(null); return; }
+    if(!texto){ setStatus("La anotación no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
+    const ahora = Date.now(), editor = userRef.current;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      for(const id of casosConObs(o.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(x=>x.id===o.id)) return null;
+            return {observaciones: lista.map(x=> x.id===o.id ? {...x, texto, editadoTs:ahora, editadoPor:editor} : x)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      setEditObs(null); setStatus("Anotación corregida (también en Crónicos)");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function eliminarObs(item, o){
+    if(!puedeModObs(o)) return;
+    if(!window.confirm("¿Eliminar esta anotación?\n\n«"+o.texto+"»\n\nSe borra también de Crónicos, para todos los usuarios. No se puede deshacer.")) return;
+    setBusy(item.key); setStatus("Eliminando...");
+    try{
+      for(const id of casosConObs(o.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(x=>x.id===o.id)) return null;
+            return {observaciones: lista.filter(x=>x.id!==o.id)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      if(editObs && editObs.id===o.id) setEditObs(null);
+      setStatus("Anotación eliminada");
+    }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
   async function eliminarDeriv(item){
     const f = derivForm[item.key];
     if(!puedeEditar || !f || !f.id) return;
@@ -5152,8 +5200,26 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
             <div style={{display:"flex", flexDirection:"column", gap:6}}>
               {obs.map(o=>(
                 <div key={o.id} style={{borderBottom:"1px solid var(--border)", paddingBottom:5}}>
-                  <div className="hint">{new Date(o.ts).toLocaleString("es-AR")}{o.autor ? " · "+o.autor : ""}{etiquetaOrigen(o)}</div>
-                  <div style={{whiteSpace:"pre-wrap"}}>{o.texto}</div>
+                  <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+                    <div className="hint">{new Date(o.ts).toLocaleString("es-AR")}{o.autor ? " · "+o.autor : ""}{etiquetaOrigen(o)}</div>
+                    {puedeModObs(o) && !(editObs && editObs.id===o.id) && (
+                      <span style={{marginLeft:"auto", whiteSpace:"nowrap"}}>
+                        <button type="button" className="btn secondary small" onClick={()=>setEditObs({id:o.id, texto:o.texto})} disabled={ocupado}>Editar</button>{" "}
+                        <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>eliminarObs(item, o)} disabled={ocupado}>Eliminar</button>
+                      </span>
+                    )}
+                  </div>
+                  {editObs && editObs.id===o.id ? (
+                    <div style={{display:"flex", flexDirection:"column", gap:6, marginTop:4}}>
+                      <textarea rows={Math.min(14, Math.max(4, String(editObs.texto||"").split("\n").length+1))} style={{width:"100%"}} value={editObs.texto} autoFocus
+                        onChange={e=>setEditObs({...editObs, texto:e.target.value})} onKeyDown={e=>{ if(e.key==="Escape") setEditObs(null); }} disabled={ocupado} />
+                      <div style={{display:"flex", gap:8}}>
+                        <button type="button" className="btn small" onClick={()=>guardarEdicionObs(item)} disabled={ocupado}>Guardar cambios</button>
+                        <button type="button" className="btn secondary small" onClick={()=>setEditObs(null)} disabled={ocupado}>Cancelar</button>
+                      </div>
+                    </div>
+                  ) : <div style={{whiteSpace:"pre-wrap"}}>{o.texto}</div>}
+                  {!(editObs && editObs.id===o.id) && o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
                 </div>
               ))}
             </div>
@@ -6399,7 +6465,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} puedeVerSanciones={!!perms.sancionar} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
-          {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} />}
+          {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
         </React.Fragment>
