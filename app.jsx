@@ -325,6 +325,9 @@ const ROLES = {
     tabs:["medicina_laboral","cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false, medicinaEditar:true, medicinaExt:true, citar:true,
     // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
     soloPropios:true, motivosPorDefecto:true},
+  // Visor: solo mira, y solo la(s) Unidad(es) de Negocio que le asigna el Administrador (tabla perfiles, columna `unidades`).
+  visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Evolución mensual, Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
+    tabs:["resumen","cuadro_diario","evolucion","ranking","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
   gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
     tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
 };
@@ -334,7 +337,9 @@ function RoleGate({userId, userEmail, onSignOut}){
   const load = useCallback(async ()=>{
     setPerfil(undefined);
     try{
-      const {data, error} = await supabaseClient.from("perfiles").select("rol,email").eq("user_id", userId).maybeSingle();
+      let {data, error} = await supabaseClient.from("perfiles").select("rol,email,unidades").eq("user_id", userId).maybeSingle();
+      // si todavía no se corrió supabase-migracion-visor.sql la columna `unidades` no existe: se lee el perfil sin ella
+      if(error && /unidades|42703/i.test((error.message||"")+" "+(error.code||""))) ({data, error} = await supabaseClient.from("perfiles").select("rol,email").eq("user_id", userId).maybeSingle());
       if(error){
         const txt = (error.message||"")+" "+(error.code||"");
         // todavía no se creó la tabla de perfiles (no se corrió el SQL de permisos): se sigue como hasta ahora, con aviso
@@ -367,19 +372,47 @@ function RoleGate({userId, userEmail, onSignOut}){
       </div>
     );
   }
-  return <App userEmail={userEmail} userId={userId} rol={perfil.rol} permisosSinActivar={!!perfil.legacy} onSignOut={onSignOut} />;
+  return <App userEmail={userEmail} userId={userId} rol={perfil.rol} unidades={Array.isArray(perfil.unidades) ? perfil.unidades : []} permisosSinActivar={!!perfil.legacy} onSignOut={onSignOut} />;
 }
 
 // Administración de perfiles (solo Administrador). Los usuarios nuevos se crean en Supabase (Authentication → Users) y nacen como "Gerencias".
-function UsuariosTab({userId}){
+// Elección de las Unidades de Negocio de un Visor (lista desplegable con tildes).
+function UnidadesPicker({options, selected, onChange}){
+  const sel = new Set(selected);
+  const lista = Array.from(new Set([...options, ...selected])).sort((a,b)=>a.localeCompare(b, "es"));
+  const resumen = !sel.size ? "Sin unidad (no ve datos)" : sel.size<=2 ? Array.from(sel).join(", ") : sel.size+" unidades";
+  return (
+    <details>
+      <summary style={{cursor:"pointer", fontWeight:600, color: sel.size ? undefined : "var(--bad)"}}>{resumen}</summary>
+      <div style={{display:"flex", flexDirection:"column", gap:4, padding:"6px 2px", maxHeight:220, overflowY:"auto"}}>
+        {lista.map(u=>(
+          <label key={u} className="motivo-check" style={{cursor:"pointer"}}>
+            <input type="checkbox" checked={sel.has(u)} onChange={()=>{ const n = new Set(sel); if(n.has(u)) n.delete(u); else n.add(u); onChange(Array.from(n)); }} /> {u}
+          </label>
+        ))}
+        {!lista.length && <span className="hint">Todavía no hay datos cargados para listar unidades.</span>}
+      </div>
+    </details>
+  );
+}
+function UsuariosTab({userId, unidadesDisponibles}){
   const [rows, setRows] = useState(null);
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState("");
   const load = useCallback(async ()=>{
-    const {data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at").order("email");
+    let {data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at,unidades").order("email");
+    // sin la migración del Visor (supabase-migracion-visor.sql) la columna `unidades` no existe todavía
+    if(error && /unidades|42703/i.test((error.message||"")+" "+(error.code||""))) ({data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at").order("email"));
     if(error){ setError(error.message); return; }
     setError(null); setRows(data||[]);
   }, []);
+  async function guardarUnidades(row, unidades){
+    setMsg("Guardando...");
+    const {error} = await supabaseClient.from("perfiles").update({unidades}).eq("user_id", row.user_id);
+    if(error){ setMsg("Error al guardar las unidades: "+error.message+(/unidades|column/i.test(error.message||"") ? " — ¿corriste supabase-migracion-visor.sql?" : "")); return; }
+    setRows(rs=>rs.map(r=> r.user_id===row.user_id ? {...r, unidades} : r));
+    setMsg("Guardado: "+row.email+" → "+(unidades.length ? unidades.join(", ") : "sin unidad"));
+  }
   useEffect(()=>{ load(); }, [load]);
   const sort = useTableSort(rows||[], {email:{get:r=>r.email, type:"text"}, rol:{get:r=>(ROLES[r.rol]||{}).label||r.rol, type:"text"}});
   async function cambiarRol(row, rol){
@@ -402,9 +435,10 @@ function UsuariosTab({userId}){
               <thead><tr>
                 <SortTh k="email" label="Usuario (correo)" sort={sort.sort} toggle={sort.toggle} />
                 <SortTh k="rol" label="Perfil" sort={sort.sort} toggle={sort.toggle} />
+                <th>Unidades de Negocio (Visor)</th>
               </tr></thead>
               <tbody>
-                {!rows.length && <tr><td colSpan="2" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin usuarios.</td></tr>}
+                {!rows.length && <tr><td colSpan="3" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin usuarios.</td></tr>}
                 {sort.sorted.map(r=>(
                   <tr key={r.user_id}>
                     <td>{r.email}{r.user_id===userId ? " (vos)" : ""}</td>
@@ -412,6 +446,11 @@ function UsuariosTab({userId}){
                       <select value={r.rol} disabled={r.user_id===userId} onChange={e=>cambiarRol(r, e.target.value)}>
                         {Object.keys(ROLES).map(k=>(<option key={k} value={k}>{ROLES[k].label}</option>))}
                       </select>
+                    </td>
+                    <td style={{minWidth:230}}>
+                      {r.rol==="visor"
+                        ? <UnidadesPicker options={unidadesDisponibles||[]} selected={Array.isArray(r.unidades) ? r.unidades : []} onChange={u=>guardarUnidades(r, u)} />
+                        : <span className="hint">—</span>}
                     </td>
                   </tr>
                 ))}
@@ -2369,7 +2408,7 @@ const CUADRO_AUDIT_COLS = ["Legajo","Nombre","Empresa","Tipo contratación","Est
 function cuadroAuditRow(r){ return [r.legajo, r.nombre, r.empresa, r.tipoContrat||"", r.estado, r.idMotivo, r.motivo]; }
 function dateKeyToLabel(dk){ const p = (dk||"").split("-"); return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : (dk||""); }
 
-function CuadroDiarioTab({parsed}){
+function CuadroDiarioTab({parsed, soloUnidades}){
   // Sin filtros globales (mes, gerencia, empresa, motivos): el cuadro es la foto de UN día completo.
   const base = useMemo(()=> parsed.records.filter(r=>r.valid && r.cat!=="BAJA"), [parsed]);
   const dateKeys = useMemo(()=> Array.from(new Set(base.map(r=>r.dateKey))).sort().reverse(), [base]);
@@ -2416,13 +2455,13 @@ function CuadroDiarioTab({parsed}){
       const get = k => c[k] || [];
       const total = CUADRO_ACTIVOS.reduce((a,k)=>a.concat(get(k)), []);
       return {unit:u, label:CUADRO_UNIT_LABEL[u]||u, recs:{presProp:get("presProp"), presContr:get("presContr"), ap:get("ap"), anp:get("anp"), ce:get("ce"), vac:get("vac"), total, sub:get("sub")}};
-    });
+    }).filter(row=>!soloUnidades || soloUnidades.has(row.unit));   // Visor: solo la(s) unidad(es) asignadas
     const totalRecs = {};
     CUADRO_COLS.forEach(col=>{ totalRecs[col.key] = rows.reduce((a,row)=>a.concat(row.recs[col.key]), []); });
     // Total Plantel Contratados: todos los propios con tipo "Eventual" (P+AP+ANP+CE+V), cualquiera sea su estado del día
     const contratados = totalRecs.total.filter(r=>normTxt(r.tipoContrat)==="eventual");
     return {rows, totalRecs, contratados, unmapped:Array.from(unmapped), sinTipo};
-  }, [dayRecords]);
+  }, [dayRecords, soloUnidades]);
 
   const rowSort = useTableSort(model.rows, CUADRO_SORT_COLS);
 
@@ -2844,8 +2883,10 @@ function ComiteAusentismo({comiteRecords, monthKeys, excludedMotivos, plantel}){
   );
 }
 
-function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo, comiteRecords, monthKeys, excludedMotivos}){
-  const [vista, setVista] = useKeptState("rk.vista", "ranking"); // "ranking" | "comite"
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo, soloRanking, comiteRecords, monthKeys, excludedMotivos}){
+  const [vistaGuardada, setVista] = useKeptState("rk.vista", "ranking"); // "ranking" | "comite"
+  // soloRanking (Visor): solo el Ranking de empleados (con el filtro Id Motivo); sin Comité de ausentismo ni filtro de Agrupador presidencia
+  const vista = soloRanking ? "ranking" : vistaGuardada;
   const [unitFilter, setUnitFilter] = useState("__all");
   const [soloVigentes, setSoloVigentes] = useState(true);
   const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
@@ -2881,16 +2922,16 @@ function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniv
 
   return (
     <div className="tabpanel">
-      <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+      {!soloRanking && <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
         <button type="button" className={"btn"+(vista==="ranking" ? "" : " secondary")} onClick={()=>setVista("ranking")}>Ranking de empleados</button>
         <button type="button" className={"btn"+(vista==="comite" ? "" : " secondary")} onClick={()=>setVista("comite")}>Comité de ausentismo</button>
-      </div>
+      </div>}
       {vista==="comite" && <ComiteAusentismo comiteRecords={comiteRecords||[]} monthKeys={monthKeys||[]} excludedMotivos={excludedMotivos} plantel={plantel} />}
       {vista==="ranking" && !ocultarFiltrosMotivo && <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
         <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={idIncluded} onChange={setIdIncluded}
           defaultKeys={idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
-        <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
-          defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />
+        {!soloRanking && <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
+          defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />}
       </div>}
       {vista==="ranking" && <div className="card table-card">
         <h3>Ranking de empleados</h3>
@@ -3011,7 +3052,8 @@ const ANUAL_GRID_CSS = `
 .ygrid-leg span{display:inline-flex;align-items:center;gap:6px;}
 .ygrid-leg i{display:inline-block;width:20px;height:14px;border:1px solid #777;}
 `;
-function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones}){
+function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones, soloFicha}){
+  // soloFicha (Visor): solo la ficha del empleado, el calendario anual y el detalle (sin gráfico, sin historial de Crónicos ni nada de Medicina Laboral)
   const employeeOptions = useMemo(()=>{
     const map = new Map();
     parsed.records.forEach(r=>{
@@ -3254,7 +3296,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
       alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo.");
       return;
     }
-    if(conCronicos){
+    if(conCronicos && !soloFicha){
       win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title></head><body style="font-family:Arial,sans-serif;margin:24px">Preparando el historial de Crónicos…</body></html>');
       try{
         html += "\n" + await historialCronicosHtml();
@@ -3301,10 +3343,10 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
           <input type="checkbox" checked={agrupar} onChange={e=>setAgrupar(e.target.checked)} />
           Agrupar días consecutivos (inicio y fin)
         </label>
-        <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Agrega al final de la hoja lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
+        {!soloFicha && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Agrega al final de la hoja lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
           <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
           Incluir historial de Crónicos (últimos 12 meses)
-        </label>
+        </label>}
         <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
       </div>
 
@@ -3344,7 +3386,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
           </div>
         )}
 
-        <div className="card chart-card">
+        {!soloFicha && <div className="card chart-card">
           <h3>Días por categoría</h3>
           <p className="desc">Cantidad de filas del período elegido — no depende del filtro de Id Motivo de abajo.</p>
           <EmployeeBarChart items={[
@@ -3354,7 +3396,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
             {label:"Ausente No Pago", value:cardVals.anp, color:"#F0605D"},
             {label:"Sanciones", value:cardVals.sanciones, color:"#E8508C"}
           ]} />
-        </div>
+        </div>}
       </div>
 
       {!motivosPorDefecto && <div className="no-print">
@@ -5763,8 +5805,14 @@ function SimuladorTab({rankingUnits, objetivo}){
 }
 
 /* ===================== app ===================== */
-function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
+function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const perms = ROLES[rol] || ROLES.gerencias;
+  // Visor: solo se trabaja con las filas de su(s) Unidad(es) de Negocio (el servidor ya no le manda las demás; acá se vuelve a filtrar por seguridad)
+  // y su caché local es aparte (por usuario y por unidades), para que nunca mezcle datos de otros perfiles del mismo navegador.
+  const unidadesSet = perms.visor ? new Set((unidades||[]).map(u=>String(u).trim()).filter(Boolean)) : null;
+  const enAlcance = row => !unidadesSet || unidadesSet.has(String(row.unidad||"").trim());
+  const cachePrefix = unidadesSet ? "v:"+userId+":"+Array.from(unidadesSet).sort().join("|")+":" : "";
+  const visorSinUnidad = !!unidadesSet && unidadesSet.size===0;
   const verResumen = perms.tabs.includes("resumen"); // las tarjetas de ausentismo de arriba pertenecen al Resumen
   const [fileName, setFileName] = useState(null);
   const [error, setError] = useState(null);
@@ -5788,6 +5836,14 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const plantelActive = plantel.length>0;
   // datos de ausentismo con el nombre de empresa unificado según el plantel (ver withCanonEmpresa)
   const parsed = useMemo(()=> withCanonEmpresa(parsedRaw, plantel), [parsedRaw, plantel]);
+  // Unidades de Negocio existentes (para que el Administrador asigne las de cada Visor)
+  const unidadesDisponibles = useMemo(()=>{
+    if(!perms.esAdmin) return [];
+    const s = new Set();
+    if(parsedRaw) parsedRaw.records.forEach(r=>{ const u = (r.unidad||"").trim(); if(u) s.add(u); });
+    plantel.forEach(pl=>{ const u = (pl.unidad||"").trim(); if(u) s.add(u); });
+    return Array.from(s).sort((a,b)=>a.localeCompare(b, "es"));
+  }, [parsedRaw, plantel]);
   const [cuatriSel, setCuatriSel] = useState("");
   const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
   const [cloudLoading, setCloudLoading] = useState(true);
@@ -5892,12 +5948,14 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
       try{
         // 1) primero, lo que ya quedó guardado en este navegador de la vez pasada — se ve al instante, sin red.
         const [cachedAusRows, cachedAusSync, cachedPlantelRows, cachedPlantelSync] = await Promise.all([
-          idbGet("ausentismo_rows"), idbGet("ausentismo_lastSync"), idbGet("plantel_rows"), idbGet("plantel_lastSync")
+          idbGet(cachePrefix+"ausentismo_rows"), idbGet(cachePrefix+"ausentismo_lastSync"), idbGet(cachePrefix+"plantel_rows"), idbGet(cachePrefix+"plantel_lastSync")
         ]);
         if(cancelled) return;
         let ausRows = cachedAusRows || [];
         let plantelRows = cachedPlantelRows || [];
         let prevAggregate = null;
+        plantelRows = plantelRows.filter(enAlcance);
+        ausRows = ausRows.filter(enAlcance);
         if(plantelRows.length){
           setPlantel(plantelRows.map(plantelRowToRecord));
           setPlantelUpdatedAt(new Date());
@@ -5918,15 +5976,15 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
         ]);
         if(cancelled) return;
 
-        if(newPlantelRows.length){
-          plantelRows = mergeRawRowsById(plantelRows, newPlantelRows, "legajo");
+        if(newPlantelRows.filter(enAlcance).length){
+          plantelRows = mergeRawRowsById(plantelRows, newPlantelRows.filter(enAlcance), "legajo");
           setPlantel(plantelRows.map(plantelRowToRecord));
           setPlantelUpdatedAt(new Date());
-          idbSet("plantel_rows", plantelRows);
-          idbSet("plantel_lastSync", maxUpdatedAt(newPlantelRows, cachedPlantelSync));
+          idbSet(cachePrefix+"plantel_rows", plantelRows);
+          idbSet(cachePrefix+"plantel_lastSync", maxUpdatedAt(newPlantelRows, cachedPlantelSync));
         }
-        if(newAusRows.length){
-          ausRows = mergeRawRowsById(ausRows, newAusRows, "id");
+        if(newAusRows.filter(enAlcance).length){
+          ausRows = mergeRawRowsById(ausRows, newAusRows.filter(enAlcance), "id");
           const records = ausRows.map(ausRowToRecord);
           const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
           const nextAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
@@ -5952,8 +6010,8 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
           } else {
             applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
           }
-          idbSet("ausentismo_rows", ausRows);
-          idbSet("ausentismo_lastSync", maxUpdatedAt(newAusRows, cachedAusSync));
+          idbSet(cachePrefix+"ausentismo_rows", ausRows);
+          idbSet(cachePrefix+"ausentismo_lastSync", maxUpdatedAt(newAusRows, cachedAusSync));
         }
         if(!cancelled){ setServerState("ok"); setRetryInfo(0); }
       }catch(err){
@@ -6325,6 +6383,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
         )}
       </div>
 
+      {visorSinUnidad && <div className="warn-banner no-print">Tu usuario es Visor pero todavía no tiene una Unidad de Negocio asignada: no se muestran datos. Pedile al Administrador que te asigne una (menú «Usuarios y permisos»).</div>}
       {permisosSinActivar && <div className="warn-banner no-print">Los permisos por perfil todavía no están activados: ejecutá <b>supabase-permisos-roles.sql</b> en el SQL Editor de Supabase. Mientras tanto todos los usuarios tienen acceso total.</div>}
       {cloudError && <div className="warn-banner no-print">{cloudError}</div>}
       {uploadNotice &&<div className="warn-banner no-print">{uploadNotice}</div>}
@@ -6476,16 +6535,16 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
 
           {shownTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} verFiltros={perms.filtros} />}
           {shownTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} verFiltros={perms.filtros} />}
-          {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} />}
+          {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} soloUnidades={unidadesSet} />}
           {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
-          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
-          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto} puedeVerSanciones={!!perms.sancionar} />}
+          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} soloRanking={!!perms.visor} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
-          {shownTab==="usuarios" && <UsuariosTab userId={userId} />}
+          {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
         </React.Fragment>
       )}
     </div>
