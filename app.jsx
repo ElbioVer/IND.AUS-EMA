@@ -1582,12 +1582,29 @@ function SortTh({label, k, sort, toggle, className, style}){
   );
 }
 
+// Índice del plantel (legajo en mayúsculas -> registro) para los informes de detalle; lo provee App (PlantelAuditCtx). Se arma una vez por cada lista de plantel.
+const PlantelAuditCtx = React.createContext(null);
+let _plantelIdxFor = null, _plantelIdx = null;
+function plantelIndexOf(plantel){
+  if(_plantelIdxFor!==plantel){ _plantelIdxFor = plantel; _plantelIdx = new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p])); }
+  return _plantelIdx;
+}
+// Estado del empleado y fecha de egreso según el PLANTEL: Activo / Egresado (baja ya ocurrida) / Baja programada (fecha futura) / Sin plantel.
+function estadoEgresoPlantel(idx, legajo){
+  const p = idx ? idx.get(String(legajo||"").toUpperCase()) : null;
+  if(!p) return ["Sin plantel", "—"];
+  if(p.bajaTs==null) return ["Activo", "—"];
+  return [p.bajaTs<=Date.now() ? "Egresado" : "Baja programada", fmtDateFromTs(p.bajaTs)];
+}
 function AuditModal({title, rows, onClose, cols, rowToArr}){
-  const columns = cols || AUDIT_COLS;
-  const toArr = rowToArr || auditRowArr;
+  const pIdx = React.useContext(PlantelAuditCtx);
+  // informe estándar (filas del ausentismo): se le suman el estado del empleado y su fecha de egreso, tomados del plantel
+  const estandar = !cols && !rowToArr;
+  const columns = cols || (estandar ? AUDIT_COLS.concat(["Estado empleado","Fecha de egreso"]) : AUDIT_COLS);
+  const toArr = rowToArr || (estandar ? (r=>auditRowArr(r).concat(estadoEgresoPlantel(pIdx, r.legajo))) : auditRowArr);
   const [copied, setCopied] = useState("idle");
   const [sort, setSort] = useState(null); // {i: índice de columna, dir}
-  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows]);
+  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows, pIdx]);
   const sortedPrepared = useMemo(()=>{
     if(!sort) return prepared;
     const dir = sort.dir==="asc" ? 1 : -1;
@@ -6270,6 +6287,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
   const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
 
   return (
+    <PlantelAuditCtx.Provider value={plantelIndexOf(plantel)}>
     <div className="app">
       <div className="masthead no-print">
         <div className="masthead-text">
@@ -6471,6 +6489,7 @@ function App({userEmail, userId, rol, permisosSinActivar, onSignOut}){
         </React.Fragment>
       )}
     </div>
+    </PlantelAuditCtx.Provider>
   );
 }
 
