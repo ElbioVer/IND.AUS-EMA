@@ -3664,20 +3664,20 @@ function newObsId(){ return "o"+Date.now().toString(36)+Math.random().toString(3
 const CRONICO_FZ_W = 64;   // ancho de la columna fija Legajo (el Nombre queda pegado a su derecha: .fz2 en index.html usa el mismo valor)
 const CRONICO_COLUMNS = [
   {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text", w:CRONICO_FZ_W, fz:1},
-  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text", w:180, fz:2},
+  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text", w:140, fz:2, max:true},
   {key:"telefono", label:"Teléfono de contacto", get:c=>c.telefonoContacto||"", sortType:"text", w:132},
-  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text", w:70},
+  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text", w:90, max:true, extra:true},
   {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text", w:90},
   {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text", w:110},
-  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text", w:60},
+  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text", w:60, extra:true},
   // Orden del Tipo: RES PTO, CRONICO, ACTUAL, PROC BAJA (y después los demás). Es también el orden inicial de la tabla,
   // con los días de mayor a menor dentro de cada tipo.
   {key:"tipo", label:"Tipo", get:c=>{ const i = CRONICO_TIPO_ORDEN.indexOf(c.tipo||""); return i===-1 ? CRONICO_TIPO_ORDEN.length : i; }, sortType:"num", firstDir:"asc", w:78},
   {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num", w:122},
   {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num", w:46},
-  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text", w:170},
+  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text", w:170, max:true},
   {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num", w:84},
-  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text", w:122},
+  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text", w:122, extra:true},
   {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text", w:140},
   {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text", w:140},
   {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num", w:104},
@@ -3688,10 +3688,13 @@ const CRONICO_COLUMNS = [
   // solo para quien puede marcar sanciones (RRHH y Administrador): 1 marcada, 2 definida, 3 emitida
   {key:"sancion", label:"Sanción", get:c=>c.sancionReg ? ({marcada:1, definida:2, emitida:3}[c.sancionReg.estado]||1) : 0, sortType:"num", w:140}
 ];
+// Columnas que se pueden retraer / expandir juntas (como agrupar columnas en Excel): las marcadas `extra: true` (Grupo, Codpla, Notificar Res. Puesto).
+// "Motivo - Razón" se muestra sin el código y la raya del Id Motivo ("CAE — Con aviso Enfermedad - ..." -> "Con aviso Enfermedad - ...").
+function motivoSinCodigo(label){ return String(label||"").replace(/^\S+\s+[—–]\s+/, ""); }
 // atributos de un encabezado (th) de Crónicos: ancho, orden por clic y, en Legajo/Nombre, la fijación lateral
 function cronicoThProps(col){
   const cls = [col.align==="num" ? "num" : "", col.fz ? "fz fz"+col.fz : ""].filter(Boolean).join(" ") || undefined;
-  return {className: cls, style:{cursor:"pointer", userSelect:"none", width:col.w, minWidth:col.w, ...(col.fz===1 ? {maxWidth:col.w} : {})}};
+  return {className: cls, style:{cursor:"pointer", userSelect:"none", width:col.w, minWidth:col.w, ...(col.fz===1 || col.max ? {maxWidth:col.w} : {})}};
 }
 // Códigos de ausencia por motivos de salud: su "Razón" del ausentismo se carga sola como primera información del historial del caso.
 // (Se pueden agregar más códigos acá.)
@@ -4122,6 +4125,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [tipoFilter, setTipoFilter] = useKeptState("cron.tipo", "__all");
   const [saludFilter, setSaludFilter] = useKeptState("cron.salud", "__all"); // "__all" | "__salud" (AT/ET/EN/CAE) | un código
   const [unidadSel, setUnidadSel] = useKeptState("cron.unidad", null);       // null = todas las unidades; si no, Set con las elegidas
+  const [colsExtra, setColsExtra] = useKeptState("cron.colsExtra", false);     // columnas agrupables (Grupo, Codpla, Notificar Res. Puesto): false = retraídas
   const [saveStatus, setSaveStatus] = useState("");
   const [sortKey, setSortKey] = useKeptState("cron.sortKey", "tipo");
   const [sortDir, setSortDir] = useKeptState("cron.sortDir", "asc");
@@ -4211,7 +4215,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     injustificadas.forEach(ct=>{ const k = String(ct.legajo).toUpperCase(); if(!m.has(k)) m.set(k, ct); });
     return m;
   }, [injustificadas]);
-  const columnasVisibles = puedeSancionar ? CRONICO_COLUMNS : CRONICO_COLUMNS.filter(c=>c.key!=="sancion");
+  const columnasVisibles = CRONICO_COLUMNS.filter(c=>(puedeSancionar || c.key!=="sancion") && (colsExtra || !c.extra));
   const nCols = columnasVisibles.length;
   // Marcar con una tilde a quien corresponde sancionar por ausencias injustificadas (RRHH y Administrador). Queda "marcada" y figura en el menú
   // Sanciones, donde el Administrador define el tipo de sanción y emite la nota. Las fechas de las ausencias salen del caso (si son más de 10, solo la última;
@@ -4622,6 +4626,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                 <input type="date" value={fechaCita} min={citaFecha||undefined} onChange={e=>{ if(e.target.value) setCitaFechaSel(e.target.value); }} style={{fontSize:12.5, padding:"5px 6px"}} disabled={!citaFecha} />
               </label>
             )}
+            <button type="button" className="btn secondary" onClick={()=>setColsExtra(v=>!v)} aria-expanded={colsExtra} title="Muestra u oculta juntas las columnas Grupo, Codpla y Notificar Res. Puesto">{colsExtra ? "[−] Ocultar Grupo · Codpla · Notif. Res. Puesto" : "[+] Mostrar Grupo · Codpla · Notif. Res. Puesto"}</button>
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
             <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
@@ -4646,7 +4651,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                   <React.Fragment key={c.id}>
                     <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
                       <td className="fz fz1" style={{width:CRONICO_FZ_W, minWidth:CRONICO_FZ_W, maxWidth:CRONICO_FZ_W}}>{c.legajo}</td>
-                      <td className="fz fz2" style={{fontWeight:600}}>{c.nombre||"—"}</td>
+                      <td className="fz fz2" style={{fontWeight:600}}><div style={{maxWidth:132, overflowWrap:"anywhere"}}>{c.nombre||"—"}</div></td>
                       <td>
                         <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={lockedP}
                           onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
@@ -4659,10 +4664,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                           </div>
                         )}
                       </td>
-                      <td>{c.grupo||"—"}</td>
+                      {colsExtra && <td><div style={{maxWidth:82, overflowWrap:"anywhere"}}>{c.grupo||"—"}</div></td>}
                       <td>{c.sindicato||"—"}</td>
                       <td>{c.gerencia||"—"}</td>
-                      <td>{c.codpla||"—"}</td>
+                      {colsExtra && <td>{c.codpla||"—"}</td>}
                       <td>{c.tipo}</td>
                       <td>
                         <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={locked}
@@ -4675,13 +4680,13 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         )}
                       </td>
                       <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
-                      <td>{c.motivoLabel||"—"}</td>
+                      <td><div style={{maxWidth:162, overflowWrap:"anywhere"}}>{motivoSinCodigo(c.motivoLabel)||"—"}</div></td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
-                      <td>
+                      {colsExtra && <td>
                         <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={lockedP}
                           onChange={e=>commitField(c,"notificar", e.target.value||"")}
                           style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
-                      </td>
+                      </td>}
                       <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={locked} /></td>
                       <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={locked} /></td>
                       <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} inputMode="numeric" autoComplete="off" style={{width:100, minWidth:100}}
