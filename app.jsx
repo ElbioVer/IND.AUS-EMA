@@ -3629,16 +3629,25 @@ function normalizarFechaDMA(raw, hoy){
   else if(/^\d{8}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=+s.slice(4); }
   else if(/^\d{6}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=2000+(+s.slice(4)); }
   else if(/^\d{4}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=yearNow; }
+  else if(/^[\d\/\-.\s]+$/.test(s) && [4,6,8].includes(s.replace(/\D/g,"").length)){   // barras mal puestas (ej. 27/102026): se toman los números
+    const dg = s.replace(/\D/g,"");
+    d=+dg.slice(0,2); m=+dg.slice(2,4); y = dg.length===8 ? +dg.slice(4) : (dg.length===6 ? 2000+(+dg.slice(4)) : yearNow);
+  }
   else return {ok:false};
   if(!(m>=1 && m<=12) || !(y>=1900 && y<=2100) || !(d>=1 && d<=daysInMonth(m,y))) return {ok:false};
   return {ok:true, value: pad2(d)+"/"+pad2(m)+"/"+y};
 }
-// mientras se escribe solo con números, va poniendo las barras: 15102026 -> 15/10/2026
+// Mientras se escribe va poniendo las barras: 15102026 -> 15/10/2026, y también si ya hay una barra y se sigue escribiendo (27/10 + 2026 -> 27/10/2026).
+// Si la persona pone la barra a mano después de un solo dígito (5/3/2026) se respeta lo escrito: lo termina de entender normalizarFechaDMA.
 function formatDigitsDMA(v){
-  if(!/^\d+$/.test(v) || v.length>8) return v;
-  if(v.length<=2) return v;
-  if(v.length<=4) return v.slice(0,2)+"/"+v.slice(2);
-  return v.slice(0,2)+"/"+v.slice(2,4)+"/"+v.slice(4);
+  const s = String(v==null ? "" : v);
+  const partes = s.split(/[\/\-. ]+/);
+  if(partes.length>1 && partes.slice(0,-1).some(x=>x.length===1)) return s;
+  const d = s.replace(/\D/g, "").slice(0, 8);
+  if(!d) return s;
+  if(d.length<=2) return d;
+  if(d.length<=4) return d.slice(0,2)+"/"+d.slice(2);
+  return d.slice(0,2)+"/"+d.slice(2,4)+"/"+d.slice(4);
 }
 // Campo de fecha DD/MM/AAAA al escribir: solo deja números y separadores, va poniendo las barras (2710 -> 27/10) y, si se frena
 // un instante con día y mes (27/10), completa el año actual y lo deja seleccionado para que se pueda pisar escribiendo otro.
@@ -3732,13 +3741,27 @@ const tipoControlLabel = k => (TIPOS_CONTROL[k]||{}).label || "";
 // Modalidad del control médico: presencial (viene a Medicina Laboral) o telefónica (la Dra. se comunica por teléfono con el empleado)
 const MODALIDADES = {presencial:{label:"Presencial", corto:"Presencial"}, telefonica:{label:"Telefónica (comunicación por teléfono)", corto:"📞 Telefónico"}};
 const modalidadCorto = k => (MODALIDADES[k]||{}).corto || "";
-// Agenda de la Dra.: turnos cada 30 minutos. El rango se cambia acá (el último turno empieza 30 min antes de AGENDA_FIN).
+// Agenda de la Dra.: turnos cada 15 minutos (AGENDA_PASO). El rango se cambia acá (el último turno empieza AGENDA_PASO minutos antes de AGENDA_FIN).
+const AGENDA_PASO = 15;
 const AGENDA_INICIO = "07:00", AGENDA_FIN = "18:00";
 const AGENDA_SLOTS = (()=>{
   const [h0, m0] = AGENDA_INICIO.split(":").map(Number), [h1, m1] = AGENDA_FIN.split(":").map(Number), out = [];
-  for(let m=h0*60+m0; m<h1*60+m1; m+=30) out.push(pad2(Math.floor(m/60))+":"+pad2(m%60));
+  for(let m=h0*60+m0; m<h1*60+m1; m+=AGENDA_PASO) out.push(pad2(Math.floor(m/60))+":"+pad2(m%60));
   return out;
 })();
+// semanas (de lunes a domingo) de un mes: lista de filas de 7 con la fecha ISO de cada día o null; y mes anterior/siguiente ("AAAA-MM")
+function semanasDelMes(y, m){
+  const dias = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const offset = (new Date(Date.UTC(y, m-1, 1)).getUTCDay() + 6) % 7;
+  const celdas = [];
+  for(let i=0;i<offset;i++) celdas.push(null);
+  for(let d=1; d<=dias; d++) celdas.push(y+"-"+pad2(m)+"-"+pad2(d));
+  while(celdas.length%7) celdas.push(null);
+  const out = [];
+  for(let i=0;i<celdas.length;i+=7) out.push(celdas.slice(i, i+7));
+  return out;
+}
+function mesDesplazado(y, m, delta){ const d = new Date(Date.UTC(y, m-1+delta, 1)); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1); }
 // hora -> citaciones vigentes de ese día (para mostrar cuántos hay ya en cada turno)
 function agendaOcupacion(citas, fecha){
   const m = new Map();
@@ -3748,7 +3771,7 @@ function agendaOcupacion(citas, fecha){
 function SelectHora({value, onChange, ocupacion, disabled}){
   const extra = value && !AGENDA_SLOTS.includes(value) ? [value] : [];
   return (
-    <select value={value||""} onChange={e=>onChange(e.target.value)} disabled={disabled} title="Turno de la agenda (cada 30 minutos)">
+    <select value={value||""} onChange={e=>onChange(e.target.value)} disabled={disabled} title="Turno de la agenda (cada 15 minutos)">
       <option value="">Sin horario</option>
       {AGENDA_SLOTS.concat(extra).map(h=>{ const n = ocupacion && ocupacion.get(h) ? ocupacion.get(h).length : 0; return (<option key={h} value={h}>{h}{n ? " — "+n+" citado"+(n>1 ? "s" : "") : ""}</option>); })}
     </select>
@@ -4040,7 +4063,7 @@ function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar, citas}){
         <div className="field"><label>Tipo de control</label>
           <select value={tipo} onChange={e=>setTipo(e.target.value)}>{Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}</select>
         </div>
-        <div className="field"><label>Horario (turno de 30 min)</label><SelectHora value={hora} onChange={setHora} ocupacion={agendaOcupacion(citas, fecha)} /></div>
+        <div className="field"><label>Horario (turno de 15 min)</label><SelectHora value={hora} onChange={setHora} ocupacion={agendaOcupacion(citas, fecha)} /></div>
         <div className="field"><label>Modalidad</label><SelectModalidad value={modalidad} onChange={setModalidad} /></div>
         <div className="field"><label>Motivo de la cita (opcional)</label><input type="text" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Ej.: control, certificado…" style={{minWidth:220}} /></div>
         <button type="button" className="btn" onClick={go} disabled={busy || !emp || !fecha}>Citar</button>
@@ -4866,6 +4889,8 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
   const [conEvolucion, setConEvolucion] = useState(false);
   const [derivForm, setDerivForm] = useState({});    // formulario de derivación abierto por caso: {id|null, centro, fecha, devolucion}
   const [editObs, setEditObs] = useState(null);      // anotación de la evolución que se está editando: {id, texto}
+  const [agendaVista, setAgendaVista] = useKeptState("ml.agendaVista", "dia");   // "dia" | "mes"
+  const [agendaMes, setAgendaMes] = useKeptState("ml.agendaMes", null);          // "AAAA-MM" del calendario; null = el mes del día que se está viendo
   const userRef = useRef("");
   const aliveRef = useRef(true);
   const manualRef = useRef(new Map());
@@ -5252,11 +5277,14 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
     if(!puedeEditar) return;
     if(!rc.fecha || isoDateToTs(rc.fecha)==null){ setStatus("Elegí la fecha de la nueva cita."); return; }
     if(rc.fecha < fechaISO){ setStatus("La nueva cita no puede ser anterior al día que estás viendo."); return; }
+    // si ya tiene una citación vigente ese día no se reemplaza (se perdería lo cargado): se cambia el horario desde su ficha ese día
+    const previa = citas.get((item.dataId||item.casoId)+"|"+rc.fecha);
+    if(previa && !previa.anulada){ setStatus("Ya tiene una citación el "+dateKeyToLabel(rc.fecha)+(previa.hora ? " a las "+previa.hora+" hs" : "")+". Para cambiar el horario, abrí su ficha ese día (en Medicina Laboral, elegí esa fecha o tocá el día en la Agenda → Mes)."); return; }
     setBusy(item.key); setStatus("Guardando...");
     try{
       await guardarCitaLocal(citaNueva(item, rc.fecha, {nota:(rc.nota||"").trim(), tipoControl: rc.tipo || ((citaDe(item.casoId, item.legajo)||{}).tipoControl) || "", hora: rc.hora||"", modalidad: rc.modalidad==="telefonica" ? "telefonica" : ""}));
       setReCita(p=>({...p, [item.key]:{fecha:"", nota:"", tipo:"", hora:"", modalidad:"presencial"}}));
-      setStatus("Citado para el "+dateKeyToLabel(rc.fecha));
+      setStatus("Citado para el "+dateKeyToLabel(rc.fecha)+(rc.hora ? " a las "+rc.hora+" hs" : "")+(rc.modalidad==="telefonica" ? " (control telefónico)" : "")+". Ya figura en la agenda de ese día.");
     }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
     setBusy(null);
   }
@@ -5266,6 +5294,28 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
   const horasFueraDeRango = Array.from(agendaPorHora.keys()).filter(h=>!AGENDA_SLOTS.includes(h)).sort();
   const sinHoraDelDia = citasDelDia.filter(c=>!c.hora);
   const nTelDelDia = citasDelDia.filter(c=>c.modalidad==="telefonica").length;
+  // citaciones vigentes por día (para el calendario del mes): cantidad, telefónicas y ya atendidas
+  const citasPorFecha = useMemo(()=>{
+    const m = new Map();
+    citas.forEach(c=>{ if(c.anulada) return; const o = m.get(c.fecha) || {n:0, tel:0, ok:0}; o.n++; if(c.modalidad==="telefonica") o.tel++; if(c.atendido) o.ok++; m.set(c.fecha, o); });
+    return m;
+  }, [citas]);
+  const mesAg = (()=>{ const [y, m] = (agendaMes || fechaISO.slice(0,7)).split("-").map(Number); return {y, m}; })();
+  const horasAgenda = Array.from(new Set(AGENDA_SLOTS.map(h=>+h.slice(0,2))));
+  const minutosAgenda = Array.from(new Set(AGENDA_SLOTS.map(h=>h.slice(3)))).sort();
+  // nombres de los citados de un turno (tocar abre su ficha, más abajo en Citados)
+  function chipsAgenda(lst){
+    return lst.map(ct=>{
+      const it = itemDeCita(ct);
+      return (
+        <span key={ct.id} style={{display:"inline-flex", gap:6, alignItems:"center", marginRight:12, flexWrap:"wrap"}}>
+          <button type="button" className="cell-link" onClick={()=>setOpenKey("citados|"+it.key)}>{ct.nombre||ct.legajo}</button>
+          <span className="hint" style={{margin:0}}>{ct.tipoControl ? TIPOS_CONTROL[ct.tipoControl].corto : ""}{ct.modalidad==="telefonica" ? " · "+modalidadCorto("telefonica") : ""}</span>
+          {ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓</span> : controlExtResuelto(ct, obsDe(it)) ? <span style={{color:"var(--good)", fontWeight:700}} title="Control externo resuelto">✓</span> : null}
+        </span>
+      );
+    });
+  }
   function imprimirAgenda(){
     const e = escHtml;
     const filas = [];
@@ -5279,7 +5329,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
       const it = itemDeCita(ct);
       return "<tr><td class=\"h\">"+e(h)+"</td><td><b>"+e(ct.nombre||"Sin nombre")+"</b><br>Legajo "+e(ct.legajo)+"</td><td>"+e(it.unidad||"—")+"</td><td>"+e(it.motivo||"—")+"</td><td>"+e(ct.tipoControl ? tipoControlLabel(ct.tipoControl) : "—")+"</td><td"+(ct.modalidad==="telefonica" ? " class=\"tel\"" : "")+">"+e(ct.modalidad==="telefonica" ? "Telefónico" : "Presencial")+"</td><td>"+e(telefonoDe(it).tel||"—")+"</td><td>"+e(ct.nota||"")+"</td></tr>";
     }).join("");
-    const html = "<h1>Agenda de Medicina Laboral — "+e(dateKeyToLabel(fechaISO))+"</h1><div class=\"sub\">"+citasDelDia.length+" citado(s) · turnos de 30 minutos"+(nTelDelDia ? " · "+nTelDelDia+" control(es) telefónico(s)" : "")+"</div>"+
+    const html = "<h1>Agenda de Medicina Laboral — "+e(dateKeyToLabel(fechaISO))+"</h1><div class=\"sub\">"+citasDelDia.length+" citado(s) · turnos de 15 minutos"+(nTelDelDia ? " · "+nTelDelDia+" control(es) telefónico(s)" : "")+"</div>"+
       "<table><thead><tr><th>Hora</th><th>Empleado</th><th>Unidad</th><th>Motivo - Razón</th><th>Tipo de control</th><th>Modalidad</th><th>Teléfono</th><th>Motivo de la cita</th></tr></thead><tbody>"+(body || "<tr><td colspan=\"8\">No hay citados para este día.</td></tr>")+"</tbody></table>"+
       "<div class=\"foot\">Documento confidencial. Emitido el "+e(new Date().toLocaleString("es-AR"))+".</div>";
     const win = window.open("", "_blank");
@@ -5541,40 +5591,83 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
       {puedeEditar && <CitarEmpleadoBox options={empOptions} minFecha={minISO} defaultFecha={fechaISO} onCitar={citarManual} citas={citas} />}
       {loadError && <div className="warn-banner">No se pudieron leer los datos de Medicina Laboral ({loadError}). ¿Ya corriste supabase-migracion-medicina-laboral.sql en Supabase?</div>}
 
-      <CollapsibleCard id="agenda" defaultOpen title={"Agenda — "+dateKeyToLabel(fechaISO)} summary={"("+citasDelDia.length+" citado"+(citasDelDia.length===1 ? "" : "s")+(nTelDelDia ? " · "+nTelDelDia+" telefónico"+(nTelDelDia===1 ? "" : "s") : "")+")"}
-        right={<button type="button" className="btn secondary small" onClick={imprimirAgenda} disabled={!citasDelDia.length}>Imprimir agenda</button>}>
-        <div className="caption">Turnos de 30 minutos ({AGENDA_INICIO} a {AGENDA_FIN}). Tocá un nombre para abrir su ficha (más abajo, en Citados). El horario se elige al citar y se puede cambiar desde la ficha.</div>
-        <div className="overflow-x">
-          <table>
-            <thead><tr><th style={{width:70}}>Hora</th><th>Citados</th></tr></thead>
-            <tbody>
-              {AGENDA_SLOTS.concat(horasFueraDeRango).map(h=>{
-                const lst = agendaPorHora.get(h) || [];
-                return (
-                  <tr key={h}>
-                    <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top", color: lst.length ? undefined : "var(--muted)"}}>{h}</td>
-                    <td>{lst.length ? lst.map(ct=>{ const it = itemDeCita(ct); return (
-                      <span key={ct.id} style={{display:"inline-flex", gap:6, alignItems:"center", marginRight:14}}>
-                        <button type="button" className="cell-link" onClick={()=>setOpenKey("citados|"+it.key)}>{ct.nombre||ct.legajo}</button>
-                        <span className="hint" style={{margin:0}}>{ct.tipoControl ? TIPOS_CONTROL[ct.tipoControl].corto : ""}{ct.modalidad==="telefonica" ? " · "+modalidadCorto("telefonica") : ""}</span>
-                        {ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓</span> : controlExtResuelto(ct, obsDe(it)) ? <span style={{color:"var(--good)", fontWeight:700}} title="Control externo resuelto">✓</span> : null}
-                      </span>); }) : <span className="hint">libre</span>}</td>
-                  </tr>
-                );
-              })}
-              {sinHoraDelDia.length>0 && (
-                <tr>
-                  <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>Sin horario</td>
-                  <td>{sinHoraDelDia.map(ct=>{ const it = itemDeCita(ct); return (
-                    <span key={ct.id} style={{display:"inline-flex", gap:6, alignItems:"center", marginRight:14}}>
-                      <button type="button" className="cell-link" onClick={()=>setOpenKey("citados|"+it.key)}>{ct.nombre||ct.legajo}</button>
-                      <span className="hint" style={{margin:0}}>{ct.tipoControl ? TIPOS_CONTROL[ct.tipoControl].corto : ""}{ct.modalidad==="telefonica" ? " · "+modalidadCorto("telefonica") : ""}</span>
-                    </span>); })}</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      <CollapsibleCard id="agenda" defaultOpen title={"Agenda — "+(agendaVista==="mes" ? MESES[mesAg.m-1]+" "+mesAg.y : dateKeyToLabel(fechaISO))}
+        summary={agendaVista==="mes" ? "" : "("+citasDelDia.length+" citado"+(citasDelDia.length===1 ? "" : "s")+(nTelDelDia ? " · "+nTelDelDia+" telefónico"+(nTelDelDia===1 ? "" : "s") : "")+")"}
+        right={<React.Fragment>
+          <button type="button" className={"btn small"+(agendaVista==="dia" ? "" : " secondary")} onClick={()=>setAgendaVista("dia")}>Día</button>
+          <button type="button" className={"btn small"+(agendaVista==="mes" ? "" : " secondary")} onClick={()=>{ setAgendaMes(null); setAgendaVista("mes"); }}>Mes</button>
+          {agendaVista==="dia" && <button type="button" className="btn secondary small" onClick={imprimirAgenda} disabled={!citasDelDia.length}>Imprimir agenda</button>}
+        </React.Fragment>}>
+        {agendaVista==="mes" ? (
+          <div>
+            <div className="caption">Tocá un día para abrir su agenda. En cada día: cantidad de citados, 📞 los telefónicos y ✓ los ya atendidos.</div>
+            <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", margin:"6px 0 8px"}}>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(mesDesplazado(mesAg.y, mesAg.m, -1))} aria-label="Mes anterior">◂</button>
+              <b style={{minWidth:150, textAlign:"center"}}>{MESES[mesAg.m-1]} {mesAg.y}</b>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(mesDesplazado(mesAg.y, mesAg.m, 1))} aria-label="Mes siguiente">▸</button>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(fechaISO.slice(0,7))}>Mes del día elegido</button>
+            </div>
+            <div className="overflow-x">
+              <table style={{tableLayout:"fixed", minWidth:560}}>
+                <thead><tr>{["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"].map(d=>(<th key={d} style={{textAlign:"center"}}>{d}</th>))}</tr></thead>
+                <tbody>
+                  {semanasDelMes(mesAg.y, mesAg.m).map((sem, i)=>(
+                    <tr key={i}>
+                      {sem.map((iso, j)=>{
+                        if(!iso) return <td key={j} style={{border:"1px solid var(--border)", background:"var(--plane)"}}></td>;
+                        const info = citasPorFecha.get(iso);
+                        const sel = iso===fechaISO;
+                        return (
+                          <td key={j} onClick={()=>{ setFechaSel(iso); setAgendaVista("dia"); }} role="button" tabIndex={0} title={"Abrir la agenda del "+dateKeyToLabel(iso)}
+                            onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); setFechaSel(iso); setAgendaVista("dia"); } }}
+                            style={{cursor:"pointer", verticalAlign:"top", height:62, padding:"6px 8px", border:"1px solid var(--border)", opacity: j>=5 && !info ? .6 : 1,
+                              outline: sel ? "2px solid var(--accent)" : "none", outlineOffset:-2, background: info ? "color-mix(in srgb, var(--accent) 10%, var(--surface))" : undefined}}>
+                            <div style={{fontWeight:700}}>{+iso.slice(8)}</div>
+                            {info && <div style={{fontSize:12, lineHeight:1.35}}><b>{info.n}</b> citado{info.n===1 ? "" : "s"}{info.tel ? <span> · 📞{info.tel}</span> : null}{info.ok ? <span style={{color:"var(--good)"}}> · ✓{info.ok}</span> : null}</div>}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="caption">Turnos de {AGENDA_PASO} minutos ({AGENDA_INICIO} a {AGENDA_FIN}). Tocá un nombre para abrir su ficha (más abajo, en Citados). El horario se elige al citar y se puede cambiar desde la ficha. Con «Mes» ves el calendario completo.</div>
+            <div className="overflow-x">
+              <table style={{tableLayout:"fixed", minWidth:640}}>
+                <thead><tr><th style={{width:64}}>Hora</th>{minutosAgenda.map(mm=>(<th key={mm}>:{mm}</th>))}</tr></thead>
+                <tbody>
+                  {horasAgenda.map(hh=>(
+                    <tr key={hh}>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>{pad2(hh)}:00</td>
+                      {minutosAgenda.map(mm=>{
+                        const h = pad2(hh)+":"+mm, lst = agendaPorHora.get(h) || [];
+                        return (<td key={mm} style={{verticalAlign:"top", fontSize:12.5, background: lst.length ? "color-mix(in srgb, var(--accent) 10%, var(--surface))" : undefined}}>
+                          {AGENDA_SLOTS.includes(h) ? (lst.length ? chipsAgenda(lst) : <span className="hint">libre</span>) : null}
+                        </td>);
+                      })}
+                    </tr>
+                  ))}
+                  {horasFueraDeRango.length>0 && (
+                    <tr>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>Otros horarios</td>
+                      <td colSpan={minutosAgenda.length}>{horasFueraDeRango.map(h=>(<span key={h} style={{marginRight:14}}><b>{h}</b> {chipsAgenda(agendaPorHora.get(h)||[])}</span>))}</td>
+                    </tr>
+                  )}
+                  {sinHoraDelDia.length>0 && (
+                    <tr>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>Sin horario</td>
+                      <td colSpan={minutosAgenda.length}>{chipsAgenda(sinHoraDelDia)}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </CollapsibleCard>
 
       <div className="card table-card">
