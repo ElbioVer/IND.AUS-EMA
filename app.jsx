@@ -3726,6 +3726,12 @@ const MEDICINA_TABLE = "medicina_laboral";
 // Tipos de control a los que se cita: Consulta Médica Planta (la ve la Dra. en planta) o Control Laboral Cons. Ext. (se deriva a un centro médico externo)
 const TIPOS_CONTROL = {planta:{label:"Consulta Médica Planta", corto:"Planta"}, externa:{label:"Control Laboral Cons. Ext.", corto:"Cons. Ext."}};
 const tipoControlLabel = k => (TIPOS_CONTROL[k]||{}).label || "";
+// Un Control Laboral Cons. Ext. queda "resuelto" (deja de figurar como Pendiente) cuando ya se cargó el resultado de la clínica (después de citar)
+// y se marcó el resultado del control (justificada / injustificada). `observaciones` = movimientos del caso (se buscan los de origen "derivacion").
+function controlExtResuelto(cita, observaciones){
+  return !!cita && cita.tipoControl==="externa" && !!cita.resultado &&
+    (observaciones||[]).some(o=>o.origen==="derivacion" && !!o.devolucion && (o.ts||0)>=(cita.citadoTs||0));
+}
 function citaRowToObj(r){
   return {id:r.id, casoId:r.caso_id, legajo:r.legajo, nombre:r.nombre||"", unidad:r.unidad||"", motivo:r.motivo||"", anio:r.anio||0,
     fecha:r.fecha, origen:r.origen||"rrhh", citadoPor:r.citado_por||"", citadoTs:Number(r.citado_ts)||0, nota:r.nota_cita||"",
@@ -4711,7 +4717,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         {!puedeEditar && c.acciones.length===0 && "—"}
                       </td>
                       <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
-                        {c.cita && c.cita.atendido ? (
+                        {c.cita && !c.cita.atendido && controlExtResuelto(c.cita, c.observaciones) ? (
+                          <span style={{color:"var(--good)", fontWeight:700}} title="Ya se cargó el resultado del centro médico y se marcó justificada / injustificada">✓ Resuelto (control externo)</span>
+                        ) : c.cita && c.cita.atendido ? (
                           <span style={{color:"var(--good)", fontWeight:700}}>✓ Atendido{c.cita.atendidoTs ? " "+new Date(c.cita.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span>
                         ) : c.cita ? (
                           <label style={{cursor:puedeCitar?"pointer":"default", display:"flex", gap:6, alignItems:"center"}} title={"Citado "+(c.cita.origen==="medicina"?"por la Dra.":"desde Crónicos")+" — destildar para anular"}>
@@ -5237,7 +5245,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
   // ---- ficha de un empleado ----
   function renderFicha(item){
     const m = manual.get(item.dataId) || manual.get(item.casoId) || {};
-    const obs = obsDe(item).sort((a,b)=>b.ts-a.ts);
+    const obs = obsDe(item).filter(o=>o.origen!=="derivacion").sort((a,b)=>b.ts-a.ts);   // los resultados del control externo se ven en su propio bloque (no se repiten acá)
     const cur = citaDe(item.casoId, item.legajo);
     const rc = reCita[item.key] || {fecha:"", nota:"", tipo:""};
     const ocupado = busy===item.key;
@@ -5256,7 +5264,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
           {cur && <div><span className="hint">Citación</span><div>{cur.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH"}{cur.tipoControl ? " · "+tipoControlLabel(cur.tipoControl) : ""}{cur.nota ? " — "+cur.nota : ""}</div></div>}
         </div>
         <div>
-          <div className="hint" style={{fontWeight:700, marginBottom:4}}>Evolución / Observaciones (las mismas de Crónicos)</div>
+          <div className="hint" style={{fontWeight:700, marginBottom:4}}>Evolución / Observaciones (las mismas de Crónicos, sin los resultados de controles externos: están más abajo)</div>
           {obs.length ? (
             <div style={{display:"flex", flexDirection:"column", gap:6}}>
               {obs.map(o=>(
@@ -5387,7 +5395,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
                     <td>{it.legajo}</td><td>{it.nombre||"—"}</td><td>{it.unidad||"—"}</td><td>{it.motivo||"—"}</td>
                     {mostrarDias && <td className="num">{it.dias!=null ? fmt(it.dias) : "—"}</td>}
                     <td>{ct ? (ct.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH") : "—"}{ct && ct.tipoControl ? <div style={{fontWeight:700, fontSize:12, color:"var(--accent)"}}>{tipoControlLabel(ct.tipoControl)}</div> : null}{ct && ct.nota ? <div className="hint">{ct.nota}</div> : null}</td>
-                    <td>{ct && ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓ Visto {ct.atendidoTs ? new Date(ct.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span> : ct ? <span style={{color:"var(--warning)", fontWeight:700}}>Pendiente</span> : "—"}
+                    <td>{ct && ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓ Visto {ct.atendidoTs ? new Date(ct.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span> : ct && controlExtResuelto(ct, obsDe(it)) ? <span style={{color:"var(--good)", fontWeight:700}} title="Ya se cargó el resultado del centro médico y se marcó justificada / injustificada">✓ Resuelto (control externo)</span> : ct ? <span style={{color:"var(--warning)", fontWeight:700}}>Pendiente</span> : "—"}
                       {ct && ct.resultado && <div style={{fontWeight:700, fontSize:12, color: ct.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{ct.resultado==="injustificada" ? "Ausencia injustificada" : "Ausencia justificada"}</div>}</td>
                     <td style={{whiteSpace:"nowrap"}}><button type="button" className="btn secondary small" onClick={()=>setOpenKey(abierto ? null : titulo+"|"+it.key)}>{abierto ? "Cerrar ficha" : (puedeEditar ? "Ver ficha / Atender" : "Ver ficha")}</button>
                       {puedeEliminar && ct && <React.Fragment>{" "}<button type="button" className="btn secondary small" style={{color:"var(--bad)"}} title="Eliminar esta citación (solo Administrador)" onClick={()=>eliminarCita(ct)} disabled={busy===ct.id}>Eliminar</button></React.Fragment>}</td>
