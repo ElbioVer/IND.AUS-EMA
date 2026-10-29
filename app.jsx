@@ -4206,14 +4206,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [citas, setCitas] = useState(new Map());       // citaciones a Medicina Laboral (id -> cita)
   const [citaBusy, setCitaBusy] = useState(null);      // caso cuya citación se está guardando
   const [sanciones, setSanciones] = useState(new Map()); // notas de sanción ya emitidas (id de la citación -> registro)
-  // Día que se cita desde esta pantalla. Por defecto el último día cargado (el "hoy" de la información), pero se puede elegir una fecha
-  // posterior (la Dra. no viene todos los días): `fechaCita`. La columna "Medicina Laboral" muestra la citación de ESE día.
+  // La fecha de la citación se elige POR EMPLEADO (calendario del formulario de la columna Medicina Laboral). `citaFecha` = último día cargado:
+  // es la fecha mínima (no se cita para días anteriores) y la que se propone; la columna muestra la próxima citación vigente de cada empleado.
   const citaFecha = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
-  const [citaFechaSel, setCitaFechaSel] = useKeptState("cron.citaFecha", null);
-  const fechaCita = citaFechaSel && citaFechaSel>=citaFecha ? citaFechaSel : citaFecha;
+  const fechaCita = citaFecha;
   const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
-  const ocupacionCita = useMemo(()=> agendaOcupacion(citas, fechaCita), [citas, fechaCita]);   // turnos ya ocupados el día que se está citando
-  const [citaForm, setCitaForm] = useState({tipo:"planta", hora:"", modalidad:"presencial"});    // datos de la citación que se está armando
+  const [citaForm, setCitaForm] = useState({fecha:"", tipo:"planta", hora:"", modalidad:"presencial"});    // datos de la citación que se está armando (fecha vacía = el último día cargado)
 
   // Lee de Supabase todos los casos (lo guardado por cualquier usuario) y las citaciones a Medicina Laboral.
   async function loadFromServer(){
@@ -4258,16 +4256,16 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
 
   const plantelCelulares = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p.celular||""])), [plantel]);
   const celularPlantelDe = legajo => plantelCelulares.get(String(legajo||"").toUpperCase()) || "";
-  // citaciones pendientes (no anuladas ni atendidas, de hoy en adelante) por legajo: para avisar si ya está citado para otro día
+  // citaciones vigentes (no anuladas, de hoy en adelante) por legajo, ordenadas por fecha y horario: la columna muestra la próxima de cada empleado
   const pendientesPorLegajo = useMemo(()=>{
     const m = new Map();
     citas.forEach(ct=>{
-      if(ct.anulada || ct.atendido || !citaFecha || ct.fecha<citaFecha) return;
+      if(ct.anulada || !citaFecha || ct.fecha<citaFecha) return;
       const k = String(ct.legajo).toUpperCase();
       if(!m.has(k)) m.set(k, []);
       m.get(k).push(ct);
     });
-    m.forEach(arr=>arr.sort((a,b)=>a.fecha<b.fecha?-1:1));
+    m.forEach(arr=>arr.sort((a,b)=> a.fecha<b.fecha ? -1 : a.fecha>b.fecha ? 1 : String(a.hora||"99:99").localeCompare(String(b.hora||"99:99"))));
     return m;
   }, [citas, citaFecha]);
 
@@ -4330,19 +4328,16 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       telefonoContacto: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).tel,
       telefonoEditado: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).editado,
       telefonoPlantel: celularPlantelDe(c.legajo),
-      // citación vigente de este caso para el día elegido (también si se cargó a mano antes de que el empleado figurara en Crónicos)
+      // próxima citación vigente de este caso (la pendiente más cercana; si no hay, la ya atendida), también si se cargó a mano antes de que el empleado figurara en Crónicos
       cita: (()=>{
-        let ct = citas.get(c.id+"|"+fechaCita);
-        if(!ct || ct.anulada) ct = citas.get(manualCaseId(c.legajo, fechaCita)+"|"+fechaCita);
-        return ct && !ct.anulada ? ct : null;
+        const mias = (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).filter(ct=>ct.casoId===c.id || ct.casoId===manualCaseId(c.legajo, ct.fecha));
+        return mias.find(ct=>!ct.atendido) || mias[0] || null;
       })(),
       // sanción: registro de este caso (marcada / definida / emitida) y si la Dra. consideró injustificada la ausencia en el control médico
       sancionReg: sanciones.get(sancionId(c.id)) || null,
-      draInjustificada: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return !!ct && ct.fecha>=tsToISODate(inicioManualTs!=null ? inicioManualTs : c.inicioTs); })(),
-      // otra citación pendiente de este empleado para un día distinto del elegido (solo para avisarlo)
-      otraCita: (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).find(ct=>ct.fecha!==fechaCita) || null
+      draInjustificada: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return !!ct && ct.fecha>=tsToISODate(inicioManualTs!=null ? inicioManualTs : c.inicioTs); })()
     };
-  }), [cases, casesManual, citas, fechaCita, pendientesPorLegajo, plantelCelulares, injustificadaPorLegajo, sanciones]);
+  }), [cases, casesManual, citas, pendientesPorLegajo, plantelCelulares, injustificadaPorLegajo, sanciones]);
 
   // Citar un empleado que todavía no figura en Crónicos (se carga a mano por nombre o legajo)
   async function citarManual(emp, fecha, nota, tipoControl, hora, modalidad){
@@ -4360,15 +4355,21 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   }
 
   // Citar / anular la citación a Medicina Laboral desde la lista de Crónicos
-  async function citar(c, tipoControl, hora, modalidad){
-    if(!puedeCitar || !fechaCita || !tipoControl) return;
+  // `fecha` = el día elegido para ESTE empleado (si no se elige otro, el de "Citar para el día")
+  async function citar(c, tipoControl, hora, modalidad, fecha){
+    const f = fecha || fechaCita;
+    if(!puedeCitar || !f || !tipoControl) return;
+    if(citaFecha && f<citaFecha){ setSaveStatus("La fecha de la citación no puede ser anterior al "+dateKeyToLabel(citaFecha)+"."); return; }
+    // si ya tiene una citación vigente ese día no se pisa
+    const previa = [citas.get(c.id+"|"+f), citas.get(manualCaseId(c.legajo, f)+"|"+f)].find(x=>x && !x.anulada);
+    if(previa){ setSaveStatus((c.nombre||c.legajo)+" ya tiene una citación el "+dateKeyToLabel(f)+(previa.hora ? " a las "+previa.hora+" hs" : "")+"."); return; }
     setCitaElegir(null);
     setCitaBusy(c.id); setSaveStatus("Guardando...");
     try{
-      const obj = await saveCita({id:c.id+"|"+fechaCita, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
-        fecha:fechaCita, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl, hora:hora||"", modalidad: modalidad==="telefonica" ? "telefonica" : ""});
+      const obj = await saveCita({id:c.id+"|"+f, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
+        fecha:f, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl, hora:hora||"", modalidad: modalidad==="telefonica" ? "telefonica" : ""});
       setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
-      setSaveStatus("Citado a Medicina Laboral: "+tipoControlLabel(tipoControl)+(hora ? " a las "+hora : "")+(modalidad==="telefonica" ? " (control telefónico)" : ""));
+      setSaveStatus("Citado a Medicina Laboral el "+dateKeyToLabel(f)+": "+tipoControlLabel(tipoControl)+(hora ? " a las "+hora+" hs" : "")+(modalidad==="telefonica" ? " (control telefónico)" : ""));
     }catch(err){ setSaveStatus("No se pudo citar: "+(err && err.message ? err.message : String(err))); }
     setCitaBusy(null);
   }
@@ -4685,12 +4686,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
               {Array.from(CRONICOS_CODIGOS_SALUD).map(k=>(<option key={k} value={k}>Solo {k} ({saludCount[k]||0})</option>))}
             </select>
             <MultiSelect label="Unidad de negocio" options={unidadOptions} selected={unidadSel} onChange={setUnidadSel} allLabel="Todas las unidades" />
-            {puedeCitar && (
-              <label style={{display:"inline-flex", gap:6, alignItems:"center", fontSize:13}} title="La Dra. no viene todos los días: elegí para qué día se cita al tildar «Citar» en la columna Medicina Laboral">
-                Citar para el día
-                <input type="date" value={fechaCita} min={citaFecha||undefined} onChange={e=>{ if(e.target.value) setCitaFechaSel(e.target.value); }} style={{fontSize:12.5, padding:"5px 6px"}} disabled={!citaFecha} />
-              </label>
-            )}
             <button type="button" className="btn secondary" onClick={()=>setColsExtra(v=>!v)} aria-expanded={colsExtra} title="Muestra u oculta juntas las columnas Grupo, Codpla y Notificar Res. Puesto">{colsExtra ? "[−] Ocultar Grupo · Codpla · Notif. Res. Puesto" : "[+] Mostrar Grupo · Codpla · Notif. Res. Puesto"}</button>
             <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
             <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
@@ -4787,7 +4782,21 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         {!puedeEditar && c.acciones.length===0 && "—"}
                       </td>
                       <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
-                        {c.cita && !c.cita.atendido && controlExtResuelto(c.cita, c.observaciones) ? (
+                        {citaElegir===c.id && puedeCitar ? (
+                          <div style={{display:"flex", flexDirection:"column", gap:4, alignItems:"flex-start", minWidth:200}}>
+                            <span className="hint" style={{fontWeight:700}}>Citar a {c.nombre||c.legajo} el día:</span>
+                            <input type="date" value={citaForm.fecha || fechaCita} min={citaFecha||undefined} title="Día de la citación de este empleado (calendario)" onChange={e=>{ if(e.target.value) setCitaForm(f=>({...f, fecha:e.target.value, hora:""})); }} style={{fontSize:12.5, padding:"5px 6px"}} />
+                            <select value={citaForm.tipo} onChange={e=>setCitaForm(f=>({...f, tipo:e.target.value}))} title="Tipo de control">
+                              {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+                            </select>
+                            <SelectHora value={citaForm.hora} onChange={h=>setCitaForm(f=>({...f, hora:h}))} ocupacion={agendaOcupacion(citas, citaForm.fecha || fechaCita)} />
+                            <SelectModalidad value={citaForm.modalidad} onChange={m=>setCitaForm(f=>({...f, modalidad:m}))} />
+                            <div style={{display:"flex", gap:6}}>
+                              <button type="button" className="btn small" onClick={()=>citar(c, citaForm.tipo, citaForm.hora, citaForm.modalidad, citaForm.fecha || fechaCita)} disabled={citaBusy===c.id}>Citar</button>
+                              <button type="button" className="btn secondary small" onClick={()=>setCitaElegir(null)}>Cancelar</button>
+                            </div>
+                          </div>
+                        ) : c.cita && !c.cita.atendido && controlExtResuelto(c.cita, c.observaciones) ? (
                           <span style={{color:"var(--good)", fontWeight:700}} title="Ya se cargó el resultado del centro médico y se marcó justificada / injustificada">✓ Resuelto (control externo)</span>
                         ) : c.cita && c.cita.atendido ? (
                           <span style={{color:"var(--good)", fontWeight:700}}>✓ Atendido{c.cita.atendidoTs ? " "+new Date(c.cita.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span>
@@ -4800,26 +4809,11 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                           {(c.cita.hora || c.cita.modalidad==="telefonica") && <div className="hint" style={{marginTop:2, fontWeight:700}}>{[c.cita.hora ? c.cita.hora+" hs" : "", c.cita.modalidad==="telefonica" ? modalidadCorto("telefonica") : ""].filter(Boolean).join(" · ")}</div>}
                           </div>
                         ) : puedeCitar ? (
-                          citaElegir===c.id ? (
-                            <div style={{display:"flex", flexDirection:"column", gap:4, alignItems:"flex-start", minWidth:200}}>
-                              <span className="hint" style={{fontWeight:700}}>Citar el {dateKeyToLabel(fechaCita).slice(0,5)}:</span>
-                              <select value={citaForm.tipo} onChange={e=>setCitaForm(f=>({...f, tipo:e.target.value}))} title="Tipo de control">
-                                {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
-                              </select>
-                              <SelectHora value={citaForm.hora} onChange={h=>setCitaForm(f=>({...f, hora:h}))} ocupacion={ocupacionCita} />
-                              <SelectModalidad value={citaForm.modalidad} onChange={m=>setCitaForm(f=>({...f, modalidad:m}))} />
-                              <div style={{display:"flex", gap:6}}>
-                                <button type="button" className="btn small" onClick={()=>citar(c, citaForm.tipo, citaForm.hora, citaForm.modalidad)} disabled={citaBusy===c.id}>Citar</button>
-                                <button type="button" className="btn secondary small" onClick={()=>setCitaElegir(null)}>Cancelar</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title={"Citar a Medicina Laboral para el "+dateKeyToLabel(fechaCita)+" (elegís Consulta Médica Planta o Control Laboral Cons. Ext.)"}>
-                              <input type="checkbox" checked={false} onChange={()=>{ setCitaForm(f=>({...f, hora:""})); setCitaElegir(c.id); }} disabled={citaBusy===c.id || !fechaCita} /> Citar {dateKeyToLabel(fechaCita).slice(0,5)}
-                            </label>
-                          )
+                          <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title="Citar a Medicina Laboral: elegís el día en un calendario, el tipo de control, el turno y la modalidad">
+                            <input type="checkbox" checked={false} onChange={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }} disabled={citaBusy===c.id || !fechaCita} /> Citar
+                          </label>
                         ) : "—"}
-                        {!(c.cita && c.cita.atendido) && c.otraCita && <div className="hint" style={{marginTop:2}}>Ya citado el {dateKeyToLabel(c.otraCita.fecha).slice(0,5)}</div>}
+                        {puedeCitar && c.cita && citaElegir!==c.id && <div style={{marginTop:2}}><button type="button" className="cell-link" onClick={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }}>+ citar otra fecha</button></div>}
                       </td>
                       {puedeSancionar && (
                         <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
