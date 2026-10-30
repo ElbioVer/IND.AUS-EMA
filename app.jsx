@@ -4571,7 +4571,9 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
         + (notas ? "<tr class='nota'><td colspan='"+NCOLS+"'>"+notas+"</td></tr>" : "")
         + "</tbody><tbody class='sep'><tr><td colspan='"+NCOLS+"'></td></tr></tbody>";
     }).join("");
-    const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos — "+new Date().toLocaleDateString("es-AR")+"</p>"+
+    // el total se informa separado: Servicios Eléctricos (SSEE, "Servicios Electricos" con o sin el "(o)" del plantel) y el resto de las unidades
+    const nSSEE = sorted.filter(c=>normTxt(unidadBase(c.unidad))==="servicios electricos").length;
+    const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos (SSEE "+nSSEE+"; Resto "+(sorted.length-nSSEE)+") — "+new Date().toLocaleDateString("es-AR")+"</p>"+
       "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th></tr></thead>"+rows+"</table>";
     const win = window.open("", "_blank");
     if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
@@ -5579,7 +5581,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
       <div className="card controls">
         <div className="field">
           <label>Día</label>
-          <input type="date" value={fechaISO} min={minISO} max={maxISO} onChange={e=>{ if(e.target.value) setFechaSel(e.target.value); }} />
+          <input type="date" value={fechaISO} min={minISO} onChange={e=>{ if(e.target.value) setFechaSel(e.target.value); }} />
         </div>
         <div className="field">
           <label>Buscar</label>
@@ -5636,10 +5638,10 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
           </div>
         ) : (
           <div>
-            <div className="caption">Turnos de {AGENDA_PASO} minutos ({AGENDA_INICIO} a {AGENDA_FIN}). Tocá un nombre para abrir su ficha (más abajo, en Citados). El horario se elige al citar y se puede cambiar desde la ficha. Con «Mes» ves el calendario completo.</div>
+            <div className="caption">Podés ver cualquier día, también los posteriores al último archivo cargado (elegilo en «Día» o desde «Mes»). Turnos de {AGENDA_PASO} minutos ({AGENDA_INICIO} a {AGENDA_FIN}). Tocá un nombre para abrir su ficha (más abajo, en Citados). El horario se elige al citar y se puede cambiar desde la ficha. Con «Mes» ves el calendario completo.</div>
             <div className="overflow-x">
               <table style={{tableLayout:"fixed", minWidth:640}}>
-                <thead><tr><th style={{width:64}}>Hora</th>{minutosAgenda.map(mm=>(<th key={mm}>:{mm}</th>))}</tr></thead>
+                <thead><tr><th style={{width:100}}>Hora</th>{minutosAgenda.map(mm=>(<th key={mm}>:{mm}</th>))}</tr></thead>
                 <tbody>
                   {horasAgenda.map(hh=>(
                     <tr key={hh}>
