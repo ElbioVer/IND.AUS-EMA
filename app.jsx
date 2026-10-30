@@ -4322,13 +4322,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
       acciones: Array.isArray(manual.acciones) ? manual.acciones : [],
       // texto de la última acción: para el listado impreso
       accion: (Array.isArray(manual.acciones) && manual.acciones.length) ? manual.acciones.slice().sort((a,b)=>a.ts-b.ts)[manual.acciones.length-1].texto : "",
-      // + lo cargado en Medicina Laboral en el caso provisorio (<legajo>-MANUAL-<año>) si todavía no se copió a este caso: se ve igual, sin repetir
-      observaciones: (()=>{
-        const base = Array.isArray(manual.observaciones) ? manual.observaciones : [];
-        const pref = sanitizeIdSeg(c.legajo)+"-MANUAL-", vistos = new Set(base.map(o=>o.id)), extra = [];
-        casesManual.forEach((m, id)=>{ if(esCasoManualId(id) && id.startsWith(pref)) (m.observaciones||[]).forEach(o=>{ if(!vistos.has(o.id)){ vistos.add(o.id); extra.push(o); } }); });
-        return extra.length ? base.concat(extra) : base;
-      })(),
+      observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : [],
       razonSembrada: !!manual.razonSembrada,
       // teléfono de contacto: el cargado acá o, si no hay, el celular del plantel
       telefonoContacto: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).tel,
@@ -4563,9 +4557,16 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     const e = escHtml;
     const NCOLS = 15;
     const rows = sorted.map(c=>{
-      const ultima = c.observaciones.length ? c.observaciones.slice().sort((a,b)=>a.ts-b.ts)[c.observaciones.length-1] : null;
-      const notas = (c.accion ? "<p class='linea'><b>Acción:</b> "+e(c.accion)+"</p>" : "")
-        + (ultima ? "<p class='linea'><b>Última observación ("+e(new Date(ultima.ts).toLocaleDateString("es-AR"))+"):</b> "+e(ultima.texto)+"</p>" : "");
+      // Lo cargado como resultado de un control en un centro externo (Control Laboral Cons. Ext.) va aparte, justo después de los datos del empleado;
+      // la "Última observación" es la última de lo demás (incluye lo que escribe la Dra.), así el resultado no sale repetido.
+      const porFecha = arr => arr.slice().sort((a,b)=>a.ts-b.ts);
+      const resultados = porFecha(c.observaciones.filter(o=>o.origen==="derivacion"));
+      const resultado = resultados.length ? resultados[resultados.length-1] : null;
+      const otras = porFecha(c.observaciones.filter(o=>o.origen!=="derivacion"));
+      const ultima = otras.length ? otras[otras.length-1] : null;
+      const notas = (resultado ? "<p class='linea'><b>Resultado médico — "+e(DERIV_NOMBRE)+" · "+e(resultado.centro||"—")+" ("+e(resultado.fechaDeriv ? dateKeyToLabel(resultado.fechaDeriv) : new Date(resultado.ts).toLocaleDateString("es-AR"))+"):</b> "+(resultado.devolucion ? e(resultado.devolucion) : "<i>resultado pendiente de carga</i>")+"</p>" : "")
+        + (c.accion ? "<p class='linea'><b>Acción:</b> "+e(c.accion)+"</p>" : "")
+        + (ultima ? "<p class='linea'><b>Última observación ("+e(new Date(ultima.ts).toLocaleDateString("es-AR"))+(ultima.origen==="medicina" ? " · Dra." : "")+"):</b> "+e(ultima.texto)+"</p>" : "");
       return "<tbody class='caso'><tr class='dato'><td class='id'>"+e(c.legajo)+"</td><td class='id'>"+e(c.nombre||"—")+"</td><td class='id'>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td></tr>"
         + (notas ? "<tr class='nota'><td colspan='"+NCOLS+"'>"+notas+"</td></tr>" : "")
         + "</tbody><tbody class='sep'><tr><td colspan='"+NCOLS+"'></td></tr></tbody>";
@@ -4760,29 +4761,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                         onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={lockedP} /></td>
                       <td style={{minWidth:200}}>
-                        {(()=>{
-                          // lo más reciente de Medicina Laboral, a la vista (completo en "Ver historial")
-                          const ult = origen => c.observaciones.filter(o=>o.origen===origen).sort((a,b)=>b.ts-a.ts)[0];
-                          const dra = ult("medicina"), ext = ult("derivacion");
-                          const clamp = {whiteSpace:"pre-wrap", display:"-webkit-box", WebkitLineClamp:4, WebkitBoxOrient:"vertical", overflow:"hidden", fontSize:12.5};
-                          const abrir = ()=>setExpandedId(c.id);
-                          return (
-                            <React.Fragment>
-                              {dra && (
-                                <div onClick={abrir} title="Tocá para ver el historial completo" style={{cursor:"pointer", borderLeft:"3px solid var(--accent)", padding:"2px 6px", marginBottom:5}}>
-                                  <div className="hint" style={{margin:0, fontWeight:700}}>Dra. · {new Date(dra.ts).toLocaleDateString("es-AR")}{dra.fechaVisita ? " (visita "+dateKeyToLabel(dra.fechaVisita).slice(0,5)+")" : ""}</div>
-                                  <div style={clamp}>{dra.texto}</div>
-                                </div>
-                              )}
-                              {ext && (
-                                <div onClick={abrir} title="Tocá para ver el historial completo" style={{cursor:"pointer", borderLeft:"3px solid var(--good)", padding:"2px 6px", marginBottom:5}}>
-                                  <div className="hint" style={{margin:0, fontWeight:700}}>Control Cons. Ext. · {ext.centro||"—"}{ext.fechaDeriv ? " · "+dateKeyToLabel(ext.fechaDeriv).slice(0,5) : ""}</div>
-                                  {ext.devolucion ? <div style={clamp}>{ext.devolucion}</div> : <div style={{color:"var(--warning)", fontWeight:700, fontSize:12.5}}>Resultado pendiente</div>}
-                                </div>
-                              )}
-                            </React.Fragment>
-                          );
-                        })()}
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
                             {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
@@ -4842,7 +4820,6 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                             <input type="checkbox" checked={false} onChange={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }} disabled={citaBusy===c.id || !fechaCita} /> Citar
                           </label>
                         ) : "—"}
-                        {c.cita && c.cita.resultado && citaElegir!==c.id && <div style={{marginTop:2, fontWeight:700, fontSize:12, color: c.cita.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{c.cita.resultado==="injustificada" ? "Ausencia injustificada" : "Ausencia justificada"}</div>}
                         {puedeCitar && c.cita && citaElegir!==c.id && <div style={{marginTop:2}}><button type="button" className="cell-link" onClick={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }}>+ citar otra fecha</button></div>}
                       </td>
                       {puedeSancionar && (
