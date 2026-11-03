@@ -6274,19 +6274,42 @@ async function slCopiar(htmlStr, text){
 }
 
 /* ---- selector de gerencias (una, varias, todas o ninguna) ---- */
-function SlGerencias({all, counts, value, onChange}){
+// sin la columna motivo_omision (falta supabase-migracion-sanciones-lote-omision.sql) se guarda igual todo lo demás
+let slSinColOmision = false;
+async function slUpsertItems(rows){
+  const limpiar = rs => rs.map(r=>{ const {motivo_omision, ...x} = r; return x; });
+  let {error} = await supabaseClient.from(SL_T.items).upsert(slSinColOmision ? limpiar(rows) : rows);
+  if(error && /motivo_omision/i.test((error.message||"")+" "+(error.details||""))){ slSinColOmision = true; ({error} = await supabaseClient.from(SL_T.items).upsert(limpiar(rows))); }
+  return {error, sinColumna: slSinColOmision && rows.some(r=>r.motivo_omision)};
+}
+// motivo por el que no se sanciona (al quitar la tilde): campo para escribirlo y, una vez cargado, texto en rojo como «dado de baja»
+function SlOmision({it, onSave}){
+  const [edit, setEdit] = useState(!it.motivo_omision);
+  const [txt, setTxt] = useState(it.motivo_omision||"");
+  useEffect(()=>{ setTxt(it.motivo_omision||""); if(!it.motivo_omision) setEdit(true); }, [it.motivo_omision]);
+  if(edit) return (
+    <input type="text" value={txt} placeholder="Motivo de la omisión" title="Por qué no se sanciona (Enter para guardar)"
+      style={{display:"block", width:170, marginTop:4, fontSize:12, padding:"4px 6px", borderColor:"var(--critical)"}}
+      onChange={e=>setTxt(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+      onBlur={()=>{ const v = txt.trim(); if(v!==(it.motivo_omision||"")) onSave(v); if(v) setEdit(false); }} />
+  );
+  return <div className="hint" style={{color:"var(--critical)", fontWeight:700, cursor:"pointer", maxWidth:170, whiteSpace:"normal"}} title="Tocá para cambiar el motivo" onClick={()=>setEdit(true)}>Omitida: {it.motivo_omision}</div>;
+}
+// selector con tildes (una, varias, todas o ninguna): Gerencias, Empresa, Sector y Sanción. Todos con el mismo ancho.
+const SL_FILTRO_W = 220;
+function SlMulti({label, all, counts, value, onChange}){
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(()=>{ const h = e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", h); return ()=>document.removeEventListener("mousedown", h); }, []);
   const sel = value==null ? all : value.filter(x=>all.includes(x));
-  const label = value==null || sel.length===all.length ? "Todas" : !sel.length ? "Ninguna" : sel.length===1 ? sel[0] : sel.length+" de "+all.length;
+  const txt = value==null || sel.length===all.length ? "Todas" : !sel.length ? "Ninguna" : sel.length===1 ? sel[0] : sel.length+" de "+all.length;
   const toggle = (g, on) => { const n = on ? [...sel, g] : sel.filter(x=>x!==g); onChange(n.length===all.length ? null : n); };
   return (
-    <div className="field" ref={ref} style={{position:"relative"}}>
-      <label>Gerencias</label>
-      <button type="button" className="btn secondary small" style={{minWidth:180, textAlign:"left"}} onClick={()=>setOpen(o=>!o)}>{label} ▾</button>
+    <div className="field" ref={ref} style={{position:"relative", width:SL_FILTRO_W, flex:"0 0 "+SL_FILTRO_W+"px"}}>
+      <label>{label}</label>
+      <button type="button" className="btn secondary small" style={{width:"100%", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={sel.join(", ")} onClick={()=>setOpen(o=>!o)}>{txt} ▾</button>
       {open && (
-        <div className="card" style={{position:"absolute", top:"100%", left:0, zIndex:40, marginTop:4, padding:10, minWidth:260, maxHeight:320, overflowY:"auto", display:"flex", flexDirection:"column", gap:6}}>
+        <div className="card" style={{position:"absolute", top:"100%", left:0, zIndex:40, marginTop:4, padding:10, minWidth:SL_FILTRO_W+40, maxWidth:"min(380px, 90vw)", maxHeight:340, overflowY:"auto", display:"flex", flexDirection:"column", gap:6}}>
           <div style={{display:"flex", gap:6}}>
             <button type="button" className="btn secondary small" onClick={()=>onChange(null)}>Todas</button>
             <button type="button" className="btn secondary small" onClick={()=>onChange([])}>Ninguna</button>
@@ -6368,15 +6391,15 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     const now = new Date().toISOString();
     const rows = itemsRef.current.filter(x=>ids.includes(x.id)).map(x=>({...x, editado_por:userRef.current, updated_at:now}));
     if(!rows.length) return;
-    const {error} = await supabaseClient.from(SL_T.items).upsert(rows);
+    const {error, sinColumna} = await slUpsertItems(rows);
     if(error){ ids.forEach(i=>dirty.current.add(i)); if(aliveRef.current) say("No se pudo guardar: "+error.message); }
-    else if(aliveRef.current) say("Cambios guardados");
+    else if(aliveRef.current) say(sinColumna ? "Cambios guardados, salvo el motivo de la omisión: falta correr supabase-migracion-sanciones-lote-omision.sql en Supabase." : "Cambios guardados");
   }
   // guarda ya (sin esperar) un grupo de cambios — se usa al marcar envíos
   async function guardarItemsYa(patches){
     const now = new Date().toISOString();
     const rows = itemsRef.current.filter(x=>patches[x.id]).map(x=>({...x, ...patches[x.id], editado_por:userRef.current, updated_at:now}));
-    if(rows.length){ const {error} = await supabaseClient.from(SL_T.items).upsert(rows); if(error) throw error; }
+    if(rows.length){ const {error} = await slUpsertItems(rows); if(error) throw error; }
     setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
   }
   const loteDirty = useRef(null); const loteT = useRef(null);
@@ -6504,12 +6527,14 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   }
 
   /* ---- filas del lote ---- */
+  // empresa de cada legajo: del plantel o, si no está, de las filas de ausentismo (nombres ya unificados por withCanonEmpresa)
+  const empresaRec = useMemo(()=>{ const m = new Map(); ((parsed && parsed.records) || []).forEach(r=>{ if(r.empresa) m.set(slLeg(r.legajo), r.empresa); }); return m; }, [parsed]);
   const filas = useMemo(()=> itemsLote.map(it=>{
     const inf = infoLegajo(it.legajo);
     const p = plantelIdx.get(slLeg(it.legajo));
-    return {it, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now())};
+    return {it, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now()), empresa:(p && p.empresa) || empresaRec.get(slLeg(it.legajo)) || "(sin empresa)"};
   }).sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")),
-  [itemsLote, histIdx, plantelIdx]);
+  [itemsLote, histIdx, plantelIdx, empresaRec]);
   const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
   const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
   const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
@@ -6637,13 +6662,18 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
 function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio}){
   const [q, setQ] = useKeptState("sl.q", "");
   const [gers, setGers] = useKeptState("sl.gers", null);
-  const [sector, setSector] = useKeptState("sl.sector", "");
-  const [tipo, setTipo] = useKeptState("sl.tipo", "");
+  const [sectores, setSectores] = useKeptState("sl.sectores", null);
+  const [tipos, setTipos] = useKeptState("sl.tipos", null);
+  const [emps, setEmps] = useKeptState("sl.empresas", "__def");   // "__def" = por defecto, solo «Propios»
   const [orden, setOrden] = useKeptState("sl.orden", null);
   const [abierto, setAbierto] = useState({});
-  const gerAll = Array.from(new Set(filas.map(f=>f.it.gerencia||"(sin gerencia)"))).sort((a,b)=>a.localeCompare(b,"es"));
-  const gerCount = {}; filas.forEach(f=>{ const g = f.it.gerencia||"(sin gerencia)"; gerCount[g] = (gerCount[g]||0)+1; });
-  const sectores = Array.from(new Set(filas.map(f=>f.it.sector||""))).filter(Boolean).sort((a,b)=>a.localeCompare(b,"es"));
+  // opciones y cantidades de cada filtro (null = todas)
+  const opciones = get => { const c = {}; filas.forEach(f=>{ const v = get(f); c[v] = (c[v]||0)+1; }); return {all:Object.keys(c).sort((a,b)=>a.localeCompare(b,"es")), counts:c}; };
+  const gerO = opciones(f=>f.it.gerencia||"(sin gerencia)"), secO = opciones(f=>f.it.sector||"(sin sector)"), empO = opciones(f=>f.empresa||"(sin empresa)");
+  const tipO = (()=>{ const o = opciones(f=>f.it.sancion||""); o.all = SL_TODAS.filter(s=>o.counts[s]); return o; })();
+  const propios = empO.all.find(e=>normTxt(e)==="propios");
+  const empSel = emps==="__def" ? (propios ? [propios] : null) : emps;
+  const pasa = (sel, v) => sel==null || sel.includes(v);
   // orden por columna: 1er clic ascendente, 2º descendente, 3º (Legajo) «como Excel» en texto, luego vuelve al orden por gerencia y sector
   const SORTS = {legajo:f=>+f.it.legajo||f.it.legajo, legajoTxt:f=>String(f.it.legajo), nombre:f=>normTxt(f.it.nombre), fechas:f=>(f.it.fechas||[])[0]||"",
     ultima:f=>f.ultima ? f.ultima.fecha_creado||"" : "", dias:f=>f.diasAnio||0, sancion:f=>SL_TODAS.indexOf(f.it.sancion)*100+slDias(f.it), num:f=>f.it.n_interno ? (+f.it.n_interno||f.it.n_interno) : null};
@@ -6653,7 +6683,11 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
   if(orden && SORTS[orden.key]){ const fn = SORTS[orden.key], m = orden.dir==="desc" ? -1 : 1, cf = orden.key==="legajoTxt" ? cmpTxt : cmp;
     ordenadas = filas.map((f,i)=>({f,i,v:fn(f)})).sort((a,b)=>{ const c = cf(a.v,b.v); return (a.v==null||b.v==null) ? c||a.i-b.i : (c*m)||a.i-b.i; }).map(x=>x.f); }
   const qn = normTxt(q);
-  const vista = ordenadas.filter(f=>(gers==null || gers.includes(f.it.gerencia||"(sin gerencia)")) && (!sector || f.it.sector===sector) && (!tipo || f.it.sancion===tipo) && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn)));
+  const vista = ordenadas.filter(f=>pasa(gers, f.it.gerencia||"(sin gerencia)") && pasa(sectores, f.it.sector||"(sin sector)") && pasa(tipos, f.it.sancion||"") && pasa(empSel, f.empresa||"(sin empresa)")
+    && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn)));
+  // tildados que los filtros dejan afuera de la pantalla: igual reciben número y nota (se avisa)
+  const enVista = new Set(vista.map(f=>f.it.id));
+  const ocultosTildados = enLote.filter(f=>!enVista.has(f.it.id)).length;
   const th = (k, label, right) => {
     const cur = orden && orden.key; const on = cur===k || (k==="legajo" && cur==="legajoTxt"); const dir = on ? orden.dir : null;
     const next = !on ? {key:k, dir:"asc"} : (dir==="asc" && cur!=="legajoTxt") ? {key:k, dir:"desc"} : (k==="legajo" && cur==="legajo") ? {key:"legajoTxt", dir:"asc"} : null;
@@ -6669,26 +6703,39 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
   const sinNum = enLote.filter(f=>!f.it.n_interno).length;
   const cnt = SL_TODAS.map(s=>[s, enLote.filter(f=>f.it.sancion===s).length]).filter(([s,n])=>n>0 || SL_ESC.includes(s));
   const ordenLabel = {legajoTxt:"Legajo como Excel (texto)", legajo:"Legajo", nombre:"Empleado", fechas:"Fechas", ultima:"Última sanción firmada", dias:"Días susp. 12 m", sancion:"Sanción", num:"N° interno"};
+  const omitidasSinMotivo = filas.filter(f=>!f.it.incluir && !f.it.motivo_omision).length;
   return (
     <React.Fragment>
+      {/* fila omitida: se atenúa todo menos la tilde y el legajo (donde va el motivo, en rojo) */}
+      <style>{".sl-off > td:nth-child(n+3){opacity:.5}"}</style>
       {bloqueados.length>0 && <div className="warn-banner" style={{flexDirection:"column", alignItems:"flex-start"}}>
         <span>{bloqueados.length} empleado{bloqueados.length>1?"s":""} superaría{bloqueados.length>1?"n":""} los {SL_LIMITE_DIAS} días de suspensión firmados en 12 meses. No se {bloqueados.length>1?"les":"le"} emite nota: corresponde evaluar la desvinculación por cúmulo de sanciones.</span>
         <span style={{fontWeight:400}}>{bloqueados.map(f=>f.it.legajo+" "+f.it.nombre+" ("+f.diasAnio+" + "+slDias(f.it)+" = "+(f.diasAnio+slDias(f.it))+")").join(" · ")}</span>
       </div>}
       <div className="card controls">
-        <div className="hint" style={{flexBasis:"100%"}}><b style={{color:"var(--ink)"}}>{enLote.length}</b> con nota · {cnt.map(([s,n])=>n+" "+s).join(" · ")}{bloqueados.length ? " · "+bloqueados.length+" bloqueados por tope" : ""}{sinNum ? " · "+sinNum+" sin N° interno" : ""}</div>
+        <div className="hint" style={{flexBasis:"100%"}}><b style={{color:"var(--ink)"}}>{enLote.length}</b> con nota · {cnt.map(([s,n])=>n+" "+s).join(" · ")}{bloqueados.length ? " · "+bloqueados.length+" bloqueados por tope" : ""}{sinNum ? " · "+sinNum+" sin N° interno" : ""}{filas.length-enLote.length-bloqueados.length>0 ? " · "+(filas.length-enLote.length-bloqueados.length)+" omitidas" : ""}{omitidasSinMotivo ? <span style={{color:"var(--critical)", fontWeight:700}}>{" · "+omitidasSinMotivo+" sin motivo de omisión"}</span> : null}</div>
         <div className="field" style={{flex:"1 1 200px"}}><label>Buscar legajo o nombre</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Ej.: 9957 o Cifarelli" /></div>
-        <SlGerencias all={gerAll} counts={gerCount} value={gers} onChange={setGers} />
-        <div className="field"><label>Sector</label><select value={sector} onChange={e=>setSector(e.target.value)}><option value="">Todos</option>{sectores.map(s=>(<option key={s}>{s}</option>))}</select></div>
-        <div className="field"><label>Sanción</label><select value={tipo} onChange={e=>setTipo(e.target.value)}><option value="">Todas</option>{SL_TODAS.map(s=>(<option key={s}>{s}</option>))}</select></div>
-        <div className="field"><label>N° interno inicial</label><input type="number" style={{width:110}} value={lote.start_num||""} onChange={e=>updLote({start_num:e.target.value})} placeholder="Ej.: 3501" /></div>
-        <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados, en el orden de la tabla">Numerar lote</button>
-        <div className="field" style={{flex:"1 1 320px"}}><label>Texto especial (columna del Excel/CSV)</label><input type="text" value={lote.texto_especial||""} onChange={e=>updLote({texto_especial:e.target.value})} placeholder={textoAuto} /></div>
-        <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!enLote.length}>Exportar CSV</button>
-        <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!enLote.length}>Exportar Excel</button>
+        <SlMulti label="Gerencias" all={gerO.all} counts={gerO.counts} value={gers} onChange={setGers} />
+        <SlMulti label="Empresa" all={empO.all} counts={empO.counts} value={empSel} onChange={setEmps} />
+        <SlMulti label="Sector" all={secO.all} counts={secO.counts} value={sectores} onChange={setSectores} />
+        <SlMulti label="Sanción" all={tipO.all} counts={tipO.counts} value={tipos} onChange={setTipos} />
+        {/* N° interno + Numerar arriba, Texto especial abajo */}
+        <div style={{display:"flex", flexDirection:"column", gap:10, flex:"1 1 340px", minWidth:0}}>
+          <div style={{display:"flex", gap:10, alignItems:"flex-end"}}>
+            <div className="field"><label>N° interno inicial</label><input type="number" style={{width:120}} value={lote.start_num||""} onChange={e=>updLote({start_num:e.target.value})} placeholder="Ej.: 3501" /></div>
+            <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados, en el orden de la tabla">Numerar lote</button>
+          </div>
+          <div className="field"><label>Texto especial (columna del Excel/CSV)</label><input type="text" style={{width:"100%"}} value={lote.texto_especial||""} onChange={e=>updLote({texto_especial:e.target.value})} placeholder={textoAuto} /></div>
+        </div>
+        {/* Exportar Excel arriba, CSV abajo */}
+        <div style={{display:"flex", flexDirection:"column", gap:10}}>
+          <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!enLote.length}>Exportar Excel</button>
+          <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!enLote.length}>Exportar CSV</button>
+        </div>
         <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
           <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
           <span className="hint">Mostrando {vista.length} de {filas.length}</span>
+          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: igual reciben N° interno al numerar y salen en Cartas y Envíos">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (igual se numeran y tienen nota)</span>}
           {orden && ordenLabel[orden.key] ? <React.Fragment><span className="hint">· Orden: <b>{ordenLabel[orden.key]}</b> {orden.key==="legajoTxt" ? "" : orden.dir==="asc" ? "▲" : "▼"}</span><button type="button" className="cell-link" onClick={()=>setOrden(null)}>quitar orden</button></React.Fragment>
             : <span className="hint">· Orden: gerencia y sector (tocá un título para ordenar)</span>}
           <span className="hint">· «Numerar lote» sigue el orden de la tabla.</span>
@@ -6702,16 +6749,17 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
               {th("legajo","Legajo")}{th("nombre","Empleado")}{th("fechas","Fechas de ausencia")}{th("ultima","Última sanción firmada")}{th("dias","Días susp. 12 m", true)}{th("sancion","Sanción a aplicar")}{th("num","N° interno")}<th></th>
             </tr></thead>
             <tbody>
-              {!vista.length && <tr><td colSpan="9" style={{textAlign:"center", color:"var(--muted)", padding:"16px 0"}}>{gers && !gers.length ? "Elegí al menos una gerencia." : filas.length ? "Nadie con estos filtros." : "No hay ausencias injustificadas en el período (o ya estaban sancionadas)."}</td></tr>}
+              {!vista.length && <tr><td colSpan="9" style={{textAlign:"center", color:"var(--muted)", padding:"16px 0"}}>{[gers, empSel, sectores, tipos].some(s=>s && !s.length) ? "Hay un filtro en «Ninguna»: elegí al menos una opción." : filas.length ? "Nadie con estos filtros." : "No hay ausencias injustificadas en el período (o ya estaban sancionadas)."}</td></tr>}
               {vista.map(f=>{
                 const it = f.it, blk = slExcede(f, it), d = slDias(it);
                 const coincide = it.sancion===f.sug.sancion && (it.sancion!=="Suspensión" || d===+f.sug.dias);
                 const prev = radarPrevio(it.legajo);
                 return (
                   <React.Fragment key={it.id}>
-                    <tr style={{opacity:it.incluir ? 1 : .5}}>
-                      <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} onChange={e=>updItem(it.id, {incluir:e.target.checked})} /></td>
-                      <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}</td>
+                    <tr className={it.incluir ? "" : "sl-off"}>
+                      <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} title={it.incluir ? "Quitá la tilde si no se va a sancionar (te pide el motivo)" : "Volver a incluir"} onChange={e=>updItem(it.id, e.target.checked ? {incluir:true, motivo_omision:""} : {incluir:false})} /></td>
+                      <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}
+                        {!it.incluir && <SlOmision it={it} onSave={v=>updItem(it.id, {motivo_omision:v})} />}</td>
                       <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
                       <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:230}}>{(it.fechas||[]).map(x=>(<span key={x} className="hint" style={{border:"1px solid var(--border)", borderRadius:8, padding:"1px 6px", color:"var(--ink)"}}>{isoToDMY(x)}</span>))}</div></td>
                       <td style={{verticalAlign:"top", minWidth:170}}>{f.ultima ? <React.Fragment><b style={{color:slChipColor(f.ultima.sancion)}}>{f.ultima.sancion}</b><div className="hint">{isoToDMY(f.ultima.fecha_creado)}{Number(f.ultima.dias) ? " · "+f.ultima.dias+" d" : ""}</div></React.Fragment> : <span className="hint">Sin antecedentes</span>}
