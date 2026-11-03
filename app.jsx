@@ -315,7 +315,7 @@ function AuthGate(){
 /* ===================== perfiles y permisos ===================== */
 // Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
 // ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
-const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","ranking","detalle_empleados","plantel"];
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel"];
 const ROLES = {
   admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
     tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
@@ -3189,17 +3189,39 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
     return ()=>{ vivo = false; };
   }, [puedeVerSanciones, legajoSel]);
   const sancionesConDias = useMemo(()=> sancionesLeg.map(s=>({s, dias:diasDeSancion(s)})), [sancionesLeg]);
+  // Sanciones por lote del empleado (menú «Sanciones por lote»): se muestran junto a las del menú Sanciones. Sin la tabla, no se muestra nada.
+  const [loteLeg, setLoteLeg] = useState([]);
+  useEffect(()=>{
+    let vivo = true;
+    setLoteLeg([]);
+    if(!puedeVerSanciones || !legajoSel) return;
+    (async ()=>{
+      try{
+        const {data, error} = await supabaseClient.from(SL_T.items).select("id,legajo,fechas,incluir,sancion,dias,enviado_ts").eq("legajo", legajoSel);
+        if(error) throw error;
+        if(vivo) setLoteLeg((data||[]).filter(it=>it.incluir));
+      }catch(e){ /* sin la migración de Sanciones por lote: la columna sigue como antes */ }
+    })();
+    return ()=>{ vivo = false; };
+  }, [puedeVerSanciones, legajoSel]);
   // Celda "Sanción" de un día o de un período (desde/hasta en AAAA-MM-DD): una línea por cada sanción que alcanza esos días.
   function sancionCelda(desdeISO, hastaISO){
     const hit = sancionesConDias.filter(x=>x.dias.some(d=>d>=desdeISO && d<=hastaISO)).map(x=>x.s);
-    if(!hit.length) return <span className="hint">—</span>;
+    const hitLote = loteLeg.filter(it=>(it.fechas||[]).some(d=>d>=desdeISO && d<=hastaISO));
+    if(!hit.length && !hitLote.length) return <span className="hint">—</span>;
     const color = {emitida:"var(--good)", definida:"var(--accent)", marcada:"var(--warning)"};
-    return hit.map(s=>(
+    const lineasLote = hitLote.map(it=>(
+      <div key={it.id} style={{color: it.enviado_ts ? "var(--good)" : "var(--accent)", fontWeight:700}} title="Menú Sanciones por lote">
+        {it.enviado_ts ? "✔ Sancionada (lote): "+(it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "")+" · enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")
+          : "En lote de sanción: "+(it.sancion||"")+" (sin enviar)"}
+      </div>
+    ));
+    return lineasLote.concat(hit.map(s=>(
       <div key={s.id} style={{color:color[s.estado]||"inherit", fontWeight:700}} title={(SANCION_MOTIVOS[s.motivoSancion]||SANCION_MOTIVOS.ausencias).label}>
         {s.estado==="emitida" ? "✔ Emitida: "+(s.medida||"sanción")+(s.emitidaTs ? " ("+new Date(s.emitidaTs).toLocaleDateString("es-AR")+")" : "")
           : s.estado==="definida" ? "Definida: "+s.medida+" (sin emitir)" : "Marcada para sanción (sin definir)"}
       </div>
-    ));
+    )));
   }
 
   // Períodos: días consecutivos con el mismo Id Motivo se juntan en un solo renglón (desde / hasta / días). Los fines de semana y feriados
@@ -4206,6 +4228,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   const [citas, setCitas] = useState(new Map());       // citaciones a Medicina Laboral (id -> cita)
   const [citaBusy, setCitaBusy] = useState(null);      // caso cuya citación se está guardando
   const [sanciones, setSanciones] = useState(new Map()); // notas de sanción ya emitidas (id de la citación -> registro)
+  const [loteSan, setLoteSan] = useState(new Map());     // menú «Sanciones por lote»: legajo -> [{fecha, sancion, dias, enviado_ts}] (para no sancionar dos veces)
   // La fecha de la citación se elige POR EMPLEADO (calendario del formulario de la columna Medicina Laboral). `citaFecha` = último día cargado:
   // es la fecha mínima (no se cita para días anteriores) y la que se propone; la columna muestra la próxima citación vigente de cada empleado.
   const citaFecha = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
@@ -4229,6 +4252,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     if(puedeSancionar){
       try{ const sm = await loadSanciones(); if(aliveRef.current) setSanciones(sm); }
       catch(err){ /* si todavía no se corrió supabase-migracion-medicina-sanciones.sql, no hay sanciones emitidas que mostrar */ }
+      try{
+        const its = await slFetchAll(SL_T.items, "id");
+        const m = new Map();
+        its.forEach(it=>{ if(!it.incluir) return; const k = String(it.legajo||"").toUpperCase(); if(!m.has(k)) m.set(k, []); (it.fechas||[]).forEach(f=>m.get(k).push({fecha:f, sancion:it.sancion, dias:it.dias, enviado_ts:it.enviado_ts})); });
+        if(aliveRef.current) setLoteSan(m);
+      }catch(err){ /* sin la migración de Sanciones por lote: Crónicos sigue como antes */ }
     }
     return true;
   }
@@ -4284,8 +4313,15 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   // Sanciones, donde el Administrador define el tipo de sanción y emite la nota. Las fechas de las ausencias salen del caso (si son más de 10, solo la última;
   // se revisan en el menú Sanciones).
   const [sancionBusy, setSancionBusy] = useState(null);
+  // si alguna ausencia del caso ya está en el menú «Sanciones por lote», no se ofrece «Sancionar» (no se sanciona dos veces)
+  function loteDe(c){
+    const arr = loteSan.get(String(c.legajo||"").toUpperCase()); if(!arr || !arr.length) return null;
+    const dias = new Set((c.diasTs||[]).map(ts=>tsToISODate(ts)));
+    const hits = arr.filter(x=>dias.has(x.fecha)); if(!hits.length) return null;
+    return hits.sort((a,b)=>(b.enviado_ts||0)-(a.enviado_ts||0))[0];
+  }
   async function marcarSancion(c){
-    if(!puedeSancionar || sanciones.has(sancionId(c.id))) return;
+    if(!puedeSancionar || sanciones.has(sancionId(c.id)) || loteDe(c)) return;
     setSancionBusy(c.id); setSaveStatus("Marcando para sanción…");
     try{
       const dias = (c.diasTs||[]).slice().sort((a,b)=>a-b);
@@ -4828,6 +4864,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
                           {c.sancionReg && c.sancionReg.estado!=="marcada" ? (
                             <span style={{color:"var(--good)", fontWeight:700}} title="Se define y se emite desde el menú Sanciones">✔ Sanción {c.sancionReg.estado==="emitida" ? "emitida" : "definida"}: {c.sancionReg.medida}</span>
+                          ) : (!c.sancionReg && loteDe(c)) ? (
+                            <span style={{color:loteDe(c).enviado_ts ? "var(--good)" : "var(--accent)", fontWeight:700}} title={"Esa ausencia ya está en el menú Sanciones por lote ("+isoToDMY(loteDe(c).fecha)+"): no se vuelve a sancionar"}>
+                              {loteDe(c).enviado_ts ? "✔ Sancionada por lote: "+loteDe(c).sancion+" ("+new Date(loteDe(c).enviado_ts).toLocaleDateString("es-AR")+")" : "En lote de sanción: "+loteDe(c).sancion}
+                            </span>
                           ) : (
                             <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}} title="Tildá para que el Administrador defina y emita la sanción por ausencias injustificadas (figura en el menú Sanciones)">
                               <input type="checkbox" checked={!!c.sancionReg} onChange={()=>c.sancionReg ? desmarcarSancion(c) : marcarSancion(c)} disabled={sancionBusy===c.id} />
@@ -5980,6 +6020,1012 @@ function SancionesTab({plantel, puedeDefinir, esAdmin}){
   );
 }
 
+/* ===================== Sanciones por lote (menú «Sanciones por lote», 03/11/2026) =====================
+   Migración supabase-migracion-sanciones-lote.sql (correr ANTES de subir app.jsx). Para deshacer: supabase-deshacer-sanciones-lote.sql.
+   Circuito: 1) se elige un período (desde/hasta) y se buscan las ausencias con Agrupador cuadro presidencia = NO JUST; se omiten los días que ya
+   tienen sanción (menú Sanciones / Crónicos, o incluidos en otro lote). 2) Por empleado se sugiere la sanción por escalamiento según el historial
+   (tabla sanciones_historial, Excel SANCION del sistema: últimos 2 años): sin antecedentes → Apercibimiento → Severo Apercibimiento → Suspensión de
+   1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 29 días. Si con la suspensión pasaría de 30 días firmados en 12 meses, no se emite (corresponde evaluar la
+   desvinculación). 3) Se tilda a quién sancionar, se numera (N° interno), se emiten las notas (Florida, Arial; imprimir, PDF, ZIP por sector) y se
+   envían por mail agrupadas por gerencia (mailto, .eml con los PDF, copiar cuadro). 4) Al marcar una gerencia como «Enviado» quedan marcadas como
+   sancionadas esas ausencias, con la fecha de envío (se ve en Detalle Empleados y en Crónicos, y no vuelven a aparecer en otro lote).
+   Tablas: sanciones_historial, sanciones_lotes, sanciones_lote_items, sanciones_lote_envios, sanciones_mails, sanciones_config. */
+const SL_T = {hist:"sanciones_historial", lotes:"sanciones_lotes", items:"sanciones_lote_items", envios:"sanciones_lote_envios", mails:"sanciones_mails", config:"sanciones_config"};
+// las tres del escalamiento (las únicas que se sugieren) y las demás medidas de la tabla del sistema, con su código (IDSancion)
+const SL_ESC = ["Apercibimiento","Severo Apercibimiento","Suspensión"];
+const SL_OTRAS = ["Amonestación","Llamado de atención","Pedido de Explicaciones","Comité de Salud"];
+const SL_TODAS = [...SL_ESC, ...SL_OTRAS];
+const SL_COD = {"Amonestación":"01","Apercibimiento":"02","Pedido de Explicaciones":"03","Severo Apercibimiento":"04","Suspensión":"05","Llamado de atención":"06","Comité de Salud":"07"};
+const SL_PASOS = [1,2,3,4,5,7,10,15,20,25,29];
+const SL_LIMITE_DIAS = 30;      // tope de días de suspensión firmados en 12 meses
+const SL_HIST_DIAS = 730;       // el historial guarda los últimos 2 años
+const SL_CFG_DEF = {asunto:"Sanciones por ausentismo – {gerencia} – {periodo}",
+  intro:"Estimados, adjuntamos las notificaciones de sanción correspondientes a su gerencia para su firma y notificación al personal. A continuación el detalle:",
+  cierre:"Saludos cordiales.\nRecursos Humanos."};
+// en el Excel exportado la suspensión va como en el sistema ("Suspension")
+const slExportNombre = s => s==="Suspensión" ? "Suspension" : s;
+const slNorm = s => String(s==null ? "" : s).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const slLeg = v => { const s = String(v==null ? "" : v).trim().replace(/\.0+$/,""); const d = s.replace(/[.\s-]/g,""); return /^\d+$/.test(d) ? String(parseInt(d,10)) : s.toUpperCase(); };
+const slSafe = s => String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Za-z0-9 _.-]/g,"").trim().replace(/\s+/g,"_") || "SinDato";
+function slIso(v){
+  if(v==null || v==="") return null;
+  if(v instanceof Date){ if(isNaN(v)) return null; const d = new Date(v.getTime()+12*3600e3); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+  if(typeof v==="number"){ if(v<20000 || v>80000) return null; const d = new Date(Math.round((v-25569)*86400e3)); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+  const s = String(v).trim(); let m;
+  if((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return m[1]+"-"+pad2(+m[2])+"-"+pad2(+m[3]);
+  if((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/))){ let y = +m[3]; if(y<100) y += 2000; return y+"-"+pad2(+m[2])+"-"+pad2(+m[1]); }
+  if(/^\d+(\.\d+)?$/.test(s)) return slIso(+s);
+  return null;
+}
+function slAddDays(iso, n){ const [y,m,d] = iso.split("-").map(Number); const t = new Date(Date.UTC(y, m-1, d+n)); return t.getUTCFullYear()+"-"+pad2(t.getUTCMonth()+1)+"-"+pad2(t.getUTCDate()); }
+function slTipo(s){ const n = slNorm(s); if(n.includes("severo")) return "SEV"; if(n.includes("apercib")) return "APE"; if(n.includes("susp")) return "SUS"; return null; }
+function slSugerir(ult, diasAnio){
+  let s;
+  if(!ult) s = {sancion:"Apercibimiento", dias:0, motivo:"Sin antecedentes firmados por ausencia"};
+  else {
+    const t = slTipo(ult.sancion);
+    if(t==="APE") s = {sancion:"Severo Apercibimiento", dias:0, motivo:"Último: Apercibimiento"};
+    else if(t==="SEV") s = {sancion:"Suspensión", dias:1, motivo:"Último: Severo Apercibimiento"};
+    else if(t==="SUS"){ const d = Number(ult.dias) || parseInt((String(ult.sancion).match(/\d+/)||[])[0],10) || 1; const next = SL_PASOS.find(x=>x>d) || 29;
+      s = {sancion:"Suspensión", dias:next, motivo:"Última suspensión: "+d+" día"+(d===1?"":"s")+(d>=29?" (tope de escala)":"")}; }
+    else s = {sancion:"Apercibimiento", dias:0, motivo:"Sanción previa no reconocida"};
+  }
+  s.excede = s.sancion==="Suspensión" && (diasAnio||0)+s.dias > SL_LIMITE_DIAS;
+  return s;
+}
+const slDias = it => it.sancion==="Suspensión" ? (Number(it.dias)||1) : 0;
+const slExcede = (f, it) => it.sancion==="Suspensión" && (f.diasAnio||0)+slDias(it) > SL_LIMITE_DIAS;
+const slSanTxt = (s, d) => s==="Suspensión" ? "Suspensión "+d+" d" : s;
+const slLoteNombre = l => l ? "del "+isoToDMY(l.desde)+" al "+isoToDMY(l.hasta) : "";
+const slChipColor = s => { const t = slTipo(s); return t==="SUS" ? "var(--critical)" : t==="SEV" ? "var(--warning)" : t==="APE" ? "var(--accent)" : "var(--muted)"; };
+
+// lectura completa de una tabla (de a 1000 filas)
+async function slFetchAll(table, orderCol){
+  let from = 0, out = [];
+  while(true){
+    const {data, error} = await supabaseClient.from(table).select("*").order(orderCol, {ascending:true}).range(from, from+999);
+    if(error) throw error;
+    out = out.concat(data||[]);
+    if(!data || data.length<1000) break;
+    from += 1000;
+  }
+  return out;
+}
+// lectura de un Excel/CSV: devuelve las hojas como matrices (CSV: separador ; , o tab, UTF-8 o Windows-1252)
+function slParseCSV(text){
+  const first = text.split(/\r?\n/)[0]||"";
+  const sep = [";",",","\t"].sort((a,b)=>first.split(b).length-first.split(a).length)[0];
+  const rows = []; let row = [], cur = "", q = false;
+  for(let i=0;i<text.length;i++){ const c = text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){ cur+='"'; i++; } else q = false; } else cur += c; }
+    else if(c==='"') q = true;
+    else if(c===sep){ row.push(cur); cur = ""; }
+    else if(c==="\n" || c==="\r"){ if(c==="\r" && text[i+1]==="\n") i++; row.push(cur); rows.push(row); row = []; cur = ""; }
+    else cur += c; }
+  if(cur!=="" || row.length){ row.push(cur); rows.push(row); }
+  return rows.filter(r=>r.some(c=>String(c).trim()!==""));
+}
+async function slLeerHojas(file){
+  const buf = await file.arrayBuffer();
+  if(/\.(csv|txt)$/i.test(file.name)){
+    let text; try{ text = new TextDecoder("utf-8", {fatal:true}).decode(buf); }catch(e){ text = new TextDecoder("windows-1252").decode(buf); }
+    return [slParseCSV(text.replace(/^﻿/,""))];
+  }
+  const wb = XLSX.read(new Uint8Array(buf), {type:"array", cellDates:true});
+  return wb.SheetNames.map(n=>XLSX.utils.sheet_to_json(wb.Sheets[n], {header:1, raw:true, defval:""}));
+}
+// busca la fila de títulos (entre las 20 primeras) que cumple `ok(headers)` y devuelve las filas como objetos con los títulos normalizados
+function slTabla(aoa, ok){
+  for(let i=0;i<Math.min(aoa.length,20);i++){
+    const h0 = (aoa[i]||[]).map(slNorm);
+    if(!ok(new Set(h0))) continue;
+    const seen = {};
+    const h = h0.map(k=>{ if(!k) return k; if(seen[k]){ seen[k]++; return k+"__"+seen[k]; } seen[k] = 1; return k; });
+    return aoa.slice(i+1).filter(r=>r && r.some(c=>c!=="" && c!=null)).map(r=>{ const o = {}; h.forEach((k,j)=>{ if(k) o[k] = r[j]; }); return o; });
+  }
+  return null;
+}
+const slG = (r, ...ks) => { for(const k of ks){ const v = r[k]; if(v!==undefined && v!==null && v!=="") return v; } return ""; };
+const slTxt = v => v==null ? "" : String(v).trim();
+
+// librerías de PDF/ZIP: se cargan recién cuando se necesitan (no cambia index.html)
+function slScript(src){ return new Promise((res, rej)=>{ const s = document.createElement("script"); s.src = src; s.onload = ()=>res(); s.onerror = ()=>rej(new Error("No se pudo cargar una librería ("+src+"). Revisá la conexión.")); document.head.appendChild(s); }); }
+async function slLibs(){
+  if(!window.jspdf) await slScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+  if(!window.JSZip) await slScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+}
+// logo para el PDF: se pasa a JPEG con fondo blanco para que cada PDF pese poco
+let slLogoPromise = null;
+function slLogo(){
+  if(!slLogoPromise) slLogoPromise = new Promise(res=>{
+    const img = new Image();
+    img.onload = ()=>{ try{ const w = Math.min(900, img.naturalWidth), h = Math.round(img.naturalHeight*w/img.naturalWidth); const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h); res({data:c.toDataURL("image/jpeg",0.85), w, h}); }catch(e){ res(null); } };
+    img.onerror = ()=>res(null);
+    img.src = "logo-ema.png";
+  });
+  return slLogoPromise;
+}
+function slDescargar(nombre, blob){
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+
+/* ---- la nota (mismo modelo que las notas del menú Sanciones: Florida, Arial) ---- */
+const SL_JORNADAS_EXTRA = {21:"Veintiuno",22:"Veintidós",23:"Veintitrés",24:"Veinticuatro",25:"Veinticinco",26:"Veintiséis",27:"Veintisiete",28:"Veintiocho",29:"Veintinueve",30:"Treinta"};
+function slJornadas(n){ return n===1 ? "Una Jornada laboral" : (JORNADAS_TXT[n] || SL_JORNADAS_EXTRA[n] || String(n))+" Jornadas laborales"; }
+function slDecision(d){
+  const blanco = "___/___/___", dmy = iso => iso ? isoToDMY(iso) : blanco;
+  return d.medida==="Suspensión"
+    ? "suspenderlo por el término de "+slJornadas(Math.max(1, d.diasSuspension||1))+" desde el día "+dmy(d.suspDesde)+" Hasta el día "+dmy(d.suspHasta)+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+dmy(d.suspRetoma)+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo."
+    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+(d.medida||"Apercibimiento");
+}
+function slParrafos(d){
+  return ["Notificámosle que ante el incumplimiento a sus obligaciones laborales, al registrar Ausencias injustificadas, en fechas "+(fechasTexto(d.fechas)||"…")+", generando trastornos operativos de su pleno conocimiento, se ha resuelto, en concordancia con sus antecedentes y la gravedad de la falta cometida, "+slDecision(d),
+    "La presente medida tiene por finalidad reencauzar su gestión y evitar en el futuro la reiteración de este tipo de hechos.",
+    "Apercibimosle que ante la reiteración de este tipo de incumplimientos, se le aplicarán medidas disciplinarias más severas,",
+    "Queda Usted debidamente notificado."];
+}
+const SL_NOTA_CSS = `
+  @page{size:A4;margin:0;}
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:#fff;}
+  body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
+  .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;background:#fff;}
+  .nota:last-child{page-break-after:auto;}
+  .top{display:flex;justify-content:space-between;align-items:flex-start;}
+  .top img{width:60mm;height:auto;}
+  .lugar{margin-top:14mm;font-size:13px;}
+  .dest{margin-top:8mm;}
+  .senor{font-style:italic;font-size:15px;}
+  .nom{font-size:21px;line-height:1.25;margin:1mm 0 1mm;}
+  .dato{font-style:italic;font-size:15px;display:flex;}
+  .dato span{display:inline-block;width:24mm;}
+  .dato b{font-weight:700;}
+  hr{border:0;border-top:1.5px solid #000;margin:4mm 0 6mm;}
+  p.cuerpo{text-align:justify;margin:0 0 6mm;font-size:14px;line-height:1.5;}
+  p.ind{text-indent:38mm;}
+  .firmas{margin:16mm 0 0 55mm;font-size:14px;}
+  .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
+  .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
+  .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
+`;
+function slNotaHtml(d, logoUrl){
+  const e = escHtml, ps = slParrafos(d);
+  return "<section class='nota'>"+
+    "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
+    "<div class='dest'><div class='senor'>Señor/a:</div><div class='nom'>"+e(d.nombre||"")+"</div>"+
+    "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>"+
+    ps.map((p,i)=>"<p class='cuerpo"+(i===0?" ind":"")+"'>"+e(p)+"</p>").join("")+
+    "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
+    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+}
+const slLogoUrl = () => new URL("logo-ema.png", location.href).href;
+function slAbrirNotas(titulo, notas){
+  const win = window.open("", "_blank");
+  if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return false; }
+  const logo = slLogoUrl();
+  win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+escHtml(titulo)+'</title><style>'+SL_NOTA_CSS+'</style></head><body>'+notas.map(d=>slNotaHtml(d, logo)).join("")+'</body></html>');
+  win.document.close(); win.focus();
+  setTimeout(()=>{ win.print(); }, 700);
+  return true;
+}
+// texto justificado en el PDF (con sangría en la primera línea)
+function slJustificar(doc, text, x, y, w, indent, lh){
+  const words = text.split(/\s+/).filter(Boolean), sp = doc.getTextWidth(" ");
+  let line = [], lw = 0, first = true;
+  const flush = last => {
+    if(y>272){ doc.addPage(); y = 22; }
+    const x0 = x+(first?indent:0), avail = w-(first?indent:0);
+    const tot = line.reduce((s,t)=>s+doc.getTextWidth(t),0);
+    const gap = (last || line.length<2) ? sp : (avail-tot)/(line.length-1);
+    let cx = x0; line.forEach(t=>{ doc.text(t, cx, y); cx += doc.getTextWidth(t)+gap; });
+    y += lh; line = []; lw = 0; first = false;
+  };
+  for(const t of words){ const tw = doc.getTextWidth(t), avail = w-(first?indent:0), need = line.length ? lw+sp+tw : tw;
+    if(need>avail && line.length){ flush(false); line = [t]; lw = tw; } else { line.push(t); lw = need; } }
+  if(line.length) flush(true);
+  return y;
+}
+function slDibujarNota(doc, d, logo){
+  const L = 18, R = 192, W = R-L; let y = 16, logoH = 0;
+  if(logo){ logoH = 60*logo.h/logo.w; try{ doc.addImage(logo.data, "JPEG", L, y, 60, logoH, "logo-ema", "FAST"); }catch(e){} }
+  doc.setTextColor(0,0,0);
+  doc.setFont("helvetica","normal"); doc.setFontSize(10);
+  doc.text((d.lugar||"Florida")+",  "+fechaLarga(d.fechaEmision), R, y+17, {align:"right"});
+  y += Math.max(logoH, 20)+9;
+  doc.setFont("helvetica","italic"); doc.setFontSize(11.3); doc.text("Señor/a:", L, y); y += 7.5;
+  doc.setFont("helvetica","normal"); doc.setFontSize(15.5);
+  const nl = doc.splitTextToSize(String(d.nombre||""), W); doc.text(nl, L, y); y += nl.length*6.6;
+  doc.setFontSize(11.3);
+  [["Legajo:", d.legajo], ["Sector:", d.sector]].forEach(([k,v])=>{ doc.setFont("helvetica","italic"); doc.text(k, L, y); doc.setFont("helvetica","bold"); doc.text(String(v||""), L+24, y); y += 6; });
+  doc.setLineWidth(0.5); doc.line(L, y-1.5, R, y-1.5); y += 8;
+  doc.setFont("helvetica","normal"); doc.setFontSize(10.5);
+  slParrafos(d).forEach((p,i)=>{ y = slJustificar(doc, p, L, y, W, i===0 ? 38 : 0, 5.6)+3; });
+  let sy = y+12; if(sy>250){ doc.addPage(); sy = 40; }
+  const sx = L+55;
+  ["Me notifico:", "Aclaración:", "DNI:"].forEach((k,i)=>{ const yy = sy+i*10; doc.text(k, sx, yy); doc.setLineWidth(0.25); doc.line(sx+doc.getTextWidth(k)+3, yy+0.6, R, yy+0.6); });
+  doc.text("N° interno: "+(d.nInterno||""), L, 281);
+}
+async function slPdf(notas){
+  await slLibs(); const logo = await slLogo();
+  const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true});
+  notas.forEach((d,i)=>{ if(i) doc.addPage(); slDibujarNota(doc, d, logo); });
+  return doc;
+}
+
+/* ---- mail ---- */
+// acepta "mail@x.com; otro@x.com" y también "Nombre Apellido <mail@x.com>; …"; quita repetidos
+const slMails = s => { const m = String(s||"").match(/[^\s<>;,"'()]+@[^\s<>;,"'()]+/g) || []; return Array.from(new Set(m.map(x=>x.toLowerCase()))); };
+// Outlook de escritorio (clásico) lee los enlaces mailto en Windows-1252: sin esto la ñ y los acentos salen como "Ã±"
+const SL_CP1252 = {0x20AC:0x80,0x201A:0x82,0x0192:0x83,0x201E:0x84,0x2026:0x85,0x2020:0x86,0x2021:0x87,0x02C6:0x88,0x2030:0x89,0x0160:0x8A,0x2039:0x8B,0x0152:0x8C,0x017D:0x8E,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,0x02DC:0x98,0x2122:0x99,0x0161:0x9A,0x203A:0x9B,0x0153:0x9C,0x017E:0x9E,0x0178:0x9F};
+const slEncAnsi = s => { let o = ""; for(const ch of String(s)){ if(/[A-Za-z0-9\-_.~]/.test(ch)){ o += ch; continue; } const c = ch.codePointAt(0); let b = (c<0x80 || (c>=0xA0 && c<=0xFF)) ? c : SL_CP1252[c]; if(b==null) b = 0x3F; o += "%"+b.toString(16).toUpperCase().padStart(2,"0"); } return o; };
+// acentos y ñ como entidades (&#241;) para que el HTML del mail no dependa de la codificación del programa de correo
+const slAsciiHtml = s => String(s).replace(/[^\x00-\x7F]/g, c=>"&#"+c.codePointAt(0)+";");
+const slB64 = buf => { const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf); let s = ""; for(let i=0;i<u.length;i+=0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i+0x8000)); return btoa(s).replace(/.{76}/g, "$&\r\n"); };
+const slB64Txt = t => slB64(new TextEncoder().encode(t));
+const slHdr = t => /^[\x20-\x7E]*$/.test(t) ? t : "=?UTF-8?B?"+slB64(new TextEncoder().encode(t)).replace(/\r\n/g,"")+"?=";
+const slCsvCell = v => { const s = String(v==null ? "" : v); return /[;"\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+const slCsv = rows => "﻿"+rows.map(r=>r.map(slCsvCell).join(";")).join("\r\n");
+async function slCopiar(htmlStr, text){
+  try{ if(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write){ await navigator.clipboard.write([new ClipboardItem({"text/html":new Blob([htmlStr],{type:"text/html"}), "text/plain":new Blob([text],{type:"text/plain"})})]); return true; } }catch(e){}
+  try{ await navigator.clipboard.writeText(text); return true; }catch(e){}
+  return false;
+}
+
+/* ---- selector de gerencias (una, varias, todas o ninguna) ---- */
+function SlGerencias({all, counts, value, onChange}){
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(()=>{ const h = e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", h); return ()=>document.removeEventListener("mousedown", h); }, []);
+  const sel = value==null ? all : value.filter(x=>all.includes(x));
+  const label = value==null || sel.length===all.length ? "Todas" : !sel.length ? "Ninguna" : sel.length===1 ? sel[0] : sel.length+" de "+all.length;
+  const toggle = (g, on) => { const n = on ? [...sel, g] : sel.filter(x=>x!==g); onChange(n.length===all.length ? null : n); };
+  return (
+    <div className="field" ref={ref} style={{position:"relative"}}>
+      <label>Gerencias</label>
+      <button type="button" className="btn secondary small" style={{minWidth:180, textAlign:"left"}} onClick={()=>setOpen(o=>!o)}>{label} ▾</button>
+      {open && (
+        <div className="card" style={{position:"absolute", top:"100%", left:0, zIndex:40, marginTop:4, padding:10, minWidth:260, maxHeight:320, overflowY:"auto", display:"flex", flexDirection:"column", gap:6}}>
+          <div style={{display:"flex", gap:6}}>
+            <button type="button" className="btn secondary small" onClick={()=>onChange(null)}>Todas</button>
+            <button type="button" className="btn secondary small" onClick={()=>onChange([])}>Ninguna</button>
+          </div>
+          {all.map(g=>(
+            <label key={g} style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}>
+              <input type="checkbox" checked={sel.includes(g)} onChange={e=>toggle(g, e.target.checked)} /> {g}
+              <span className="hint" style={{marginLeft:"auto"}}>{counts[g]||0}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SancionesLoteTab({parsed, plantel, esAdmin}){
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [hist, setHist] = useState([]);
+  const [lotes, setLotes] = useState([]);
+  const [items, setItems] = useState([]);
+  const [envios, setEnvios] = useState([]);
+  const [mails, setMails] = useState([]);
+  const [cfg, setCfg] = useState(SL_CFG_DEF);
+  const [crSan, setCrSan] = useState(new Map());
+  const [loteId, setLoteId] = useKeptState("sl.lote", "");
+  const [vista, setVista] = useKeptState("sl.vista", "evaluar");
+  const [nuevoDesde, setNuevoDesde] = useKeptState("sl.desde", "");
+  const [nuevoHasta, setNuevoHasta] = useKeptState("sl.hasta", "");
+  const [omitidas, setOmitidas] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [confirmar, setConfirmar] = useState("");
+  const userRef = useRef(""); const aliveRef = useRef(true);
+  const itemsRef = useRef(items); itemsRef.current = items;
+  const lotesRef = useRef(lotes); lotesRef.current = lotes;
+  const say = (t) => setStatus(t);
+  const errTxt = err => (err && err.message) ? err.message : String(err);
+
+  async function cargar(){
+    try{
+      const [h, l, it, en, ml, cf] = await Promise.all([
+        slFetchAll(SL_T.hist, "id_sancion"), slFetchAll(SL_T.lotes, "id"), slFetchAll(SL_T.items, "id"),
+        slFetchAll(SL_T.envios, "id"), slFetchAll(SL_T.mails, "gerencia"),
+        supabaseClient.from(SL_T.config).select("*").eq("id","main").maybeSingle()
+      ]);
+      if(cf.error) throw cf.error;
+      if(!aliveRef.current) return false;
+      const c = {...SL_CFG_DEF}; if(cf.data) ["asunto","intro","cierre"].forEach(k=>{ if(cf.data[k]) c[k] = cf.data[k]; });
+      setHist(h); setLotes(l); setItems(it); setEnvios(en); setMails(ml); setCfg(c); setError("");
+    }catch(err){ if(aliveRef.current) setError(errTxt(err)); return false; }
+    try{ const m = await loadSanciones(); if(aliveRef.current) setCrSan(m); }catch(e){ /* sin la tabla del menú Sanciones: no hay días que omitir por ese lado */ }
+    return true;
+  }
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{ const {data} = await supabaseClient.auth.getSession(); userRef.current = (data && data.session && data.session.user && data.session.user.email) || ""; }catch(e){}
+      await cargar();
+      if(aliveRef.current) setLoading(false);
+    })();
+    return ()=>{ aliveRef.current = false; flushItems(); flushLote(); };
+  }, []);
+  async function actualizar(){ say("Actualizando…"); const ok = await cargar(); say(ok ? "Datos actualizados" : ""); }
+
+  /* ---- guardado diferido de las evaluaciones (una sola tanda cada 0,7 s) ---- */
+  const dirty = useRef(new Set()); const flushT = useRef(null);
+  function updItems(patches){
+    setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
+    Object.keys(patches).forEach(k=>dirty.current.add(k));
+    clearTimeout(flushT.current); flushT.current = setTimeout(flushItems, 700);
+  }
+  const updItem = (id, patch) => updItems({[id]:patch});
+  async function flushItems(){
+    clearTimeout(flushT.current);
+    const ids = Array.from(dirty.current); dirty.current.clear();
+    if(!ids.length) return;
+    const now = new Date().toISOString();
+    const rows = itemsRef.current.filter(x=>ids.includes(x.id)).map(x=>({...x, editado_por:userRef.current, updated_at:now}));
+    if(!rows.length) return;
+    const {error} = await supabaseClient.from(SL_T.items).upsert(rows);
+    if(error){ ids.forEach(i=>dirty.current.add(i)); if(aliveRef.current) say("No se pudo guardar: "+error.message); }
+    else if(aliveRef.current) say("Cambios guardados");
+  }
+  // guarda ya (sin esperar) un grupo de cambios — se usa al marcar envíos
+  async function guardarItemsYa(patches){
+    const now = new Date().toISOString();
+    const rows = itemsRef.current.filter(x=>patches[x.id]).map(x=>({...x, ...patches[x.id], editado_por:userRef.current, updated_at:now}));
+    if(rows.length){ const {error} = await supabaseClient.from(SL_T.items).upsert(rows); if(error) throw error; }
+    setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
+  }
+  const loteDirty = useRef(null); const loteT = useRef(null);
+  function updLote(patch){
+    const id = loteId;
+    setLotes(list=>list.map(l=>l.id===id ? {...l, ...patch} : l));
+    loteDirty.current = id; clearTimeout(loteT.current); loteT.current = setTimeout(flushLote, 700);
+  }
+  async function flushLote(){
+    clearTimeout(loteT.current);
+    const id = loteDirty.current; loteDirty.current = null; if(!id) return;
+    const l = lotesRef.current.find(x=>x.id===id); if(!l) return;
+    const {error} = await supabaseClient.from(SL_T.lotes).upsert({...l, updated_at:new Date().toISOString()});
+    if(error && aliveRef.current) say("No se pudo guardar el lote: "+error.message);
+  }
+
+  /* ---- índices ---- */
+  const hoy = localISO(Date.now());
+  const plantelIdx = useMemo(()=> new Map((plantel||[]).map(p=>[slLeg(p.legajo), p])), [plantel]);
+  const histIdx = useMemo(()=>{
+    const m = new Map();
+    hist.forEach(h=>{ const k = slLeg(h.legajo); if(!m.has(k)) m.set(k, []); m.get(k).push(h); });
+    m.forEach(a=>a.sort((x,y)=>String(y.fecha_creado||"").localeCompare(String(x.fecha_creado||""))));
+    return m;
+  }, [hist]);
+  const lim = slAddDays(hoy, -365);
+  function infoLegajo(leg){
+    const h = histIdx.get(slLeg(leg)) || [];
+    const ultima = h.find(s=>slNorm(s.aplicada)==="si" && slNorm(s.motivo).startsWith("ausencia")) || null;
+    const diasAnio = h.filter(s=>slNorm(s.aplicada)==="si" && s.fecha_creado && s.fecha_creado>=lim).reduce((t,s)=>t+(Number(s.dias)||0), 0);
+    return {hist:h, ultima, diasAnio, sug:slSugerir(ultima, diasAnio)};
+  }
+  const lotesOrden = useMemo(()=> lotes.slice().sort((a,b)=>String(b.hasta).localeCompare(String(a.hasta)) || (b.creado_ts||0)-(a.creado_ts||0)), [lotes]);
+  const lote = lotes.find(l=>l.id===loteId) || null;
+  const itemsLote = useMemo(()=> lote ? items.filter(i=>i.lote_id===lote.id) : [], [items, lote && lote.id]);
+
+  // días ya sancionados por legajo: menú Sanciones (Crónicos) y otros lotes (incluidos)
+  function yaSancionadas(loteActualId){
+    const m = new Map();
+    const add = (leg, iso, origen) => { const k = slLeg(leg); if(!m.has(k)) m.set(k, new Map()); if(!m.get(k).has(iso)) m.get(k).set(iso, origen); };
+    crSan.forEach(s=>diasDeSancion(s).forEach(d=>add(s.legajo, d, "menú Sanciones ("+((SANCION_ESTADOS[s.estado]||{}).txt||s.estado)+")")));
+    items.forEach(it=>{
+      if(it.lote_id===loteActualId){ (it.fechas||[]).forEach(d=>add(it.legajo, d, "este lote")); return; }
+      if(!it.incluir) return;
+      const l = lotes.find(x=>x.id===it.lote_id);
+      (it.fechas||[]).forEach(d=>add(it.legajo, d, "lote "+slLoteNombre(l)+(it.enviado_ts ? " (enviada)" : "")));
+    });
+    return m;
+  }
+  function buscarAusencias(desde, hasta, loteActualId){
+    const ya = yaSancionadas(loteActualId);
+    const porLeg = new Map(), omit = [];
+    ((parsed && parsed.records) || []).forEach(r=>{
+      if(!r.valid || String(r.presidencia||"").trim().toUpperCase()!=="NO JUST") return;
+      const iso = r.dateKey; if(!iso || iso<desde || iso>hasta) return;
+      const k = slLeg(r.legajo); const y = ya.get(k);
+      if(y && y.has(iso)){ if(y.get(iso)!=="este lote") omit.push({legajo:r.legajo, nombre:r.nombre, fecha:iso, origen:y.get(iso)}); return; }
+      if(!porLeg.has(k)) porLeg.set(k, {legajo:r.legajo, nombreR:r.nombre, sectorR:r.sector, gerenciaR:r.gerencia, unidadR:r.unidad, fechas:new Set()});
+      porLeg.get(k).fechas.add(iso);
+    });
+    return {porLeg, omit};
+  }
+  function nuevoItem(idLote, c){
+    const p = plantelIdx.get(slLeg(c.legajo));
+    const nombre = (p && p.nombre) || c.nombreR || "";
+    const inf = infoLegajo(c.legajo);
+    const baja = !!(p && p.bajaTs!=null && p.bajaTs<=Date.now());
+    return {id:idLote+"|"+slLeg(c.legajo), lote_id:idLote, legajo:String(c.legajo), nombre, apellido:String(nombre).split(/[,. ]/)[0]||"",
+      sector:(p && p.sector) || c.sectorR || "", gerencia:(p && p.gerencia) || c.gerenciaR || "", unidad:(p && p.unidad) || c.unidadR || "",
+      fechas:Array.from(c.fechas).sort(), incluir:!baja, sancion:inf.sug.sancion, dias:inf.sug.dias||0, n_interno:"",
+      susp_desde:null, susp_hasta:null, susp_retoma:null, enviado_ts:null, enviado_por:"", editado_por:userRef.current, updated_at:new Date().toISOString()};
+  }
+  async function crearLote(){
+    const desde = nuevoDesde, hasta = nuevoHasta;
+    if(!desde || !hasta || desde>hasta){ say("Elegí un período válido (desde ≤ hasta)."); return; }
+    if(!parsed){ say("Todavía no hay datos de ausentismo cargados."); return; }
+    setBusy("crear"); say("Buscando ausencias injustificadas…");
+    try{
+      const {porLeg, omit} = buscarAusencias(desde, hasta, null);
+      if(!porLeg.size){
+        setOmitidas(omit); setBusy("");
+        say("No hay ausencias injustificadas pendientes del "+isoToDMY(desde)+" al "+isoToDMY(hasta)+(omit.length ? " (las "+omit.length+" que hay ya tienen sanción)" : "")+". No se creó el lote.");
+        return;
+      }
+      const id = "L"+desde.replace(/-/g,"")+"-"+hasta.replace(/-/g,"")+"-"+Date.now().toString(36);
+      const l = {id, desde, hasta, estado:"abierto", fecha_emision:hoy, completar_fechas:false, periodo:"", texto_especial:"", start_num:"", creado_por:userRef.current, creado_ts:Date.now(), updated_at:new Date().toISOString()};
+      const {error:e1} = await supabaseClient.from(SL_T.lotes).insert(l); if(e1) throw e1;
+      const rows = Array.from(porLeg.values()).map(c=>nuevoItem(id, c));
+      if(rows.length) await upsertInBatches(SL_T.items, rows, "id");
+      setLotes(p=>[...p, l]); setItems(p=>[...p, ...rows]); setLoteId(id); setVista("evaluar"); setOmitidas(omit);
+      say("Lote creado: "+rows.length+" empleado"+(rows.length===1?"":"s")+" con ausencias injustificadas"+(omit.length ? " · "+omit.length+" ausencia"+(omit.length===1?"":"s")+" omitida"+(omit.length===1?"":"s")+" por estar ya sancionada"+(omit.length===1?"":"s") : ""));
+    }catch(err){ say("No se pudo crear el lote: "+errTxt(err)+" (¿corriste supabase-migracion-sanciones-lote.sql?)"); }
+    setBusy("");
+  }
+  async function agregarNuevas(){
+    if(!lote) return;
+    setBusy("agregar"); say("Buscando ausencias nuevas en el período…");
+    try{
+      await flushItems();
+      const {porLeg, omit} = buscarAusencias(lote.desde, lote.hasta, lote.id);
+      const own = new Map(itemsLote.map(i=>[slLeg(i.legajo), i]));
+      const rows = []; let nFechas = 0, nNuevos = 0;
+      porLeg.forEach((c,k)=>{
+        const ex = own.get(k);
+        if(ex){ const f = Array.from(new Set([...(ex.fechas||[]), ...c.fechas])).sort(); nFechas += f.length-(ex.fechas||[]).length; rows.push({...ex, fechas:f, updated_at:new Date().toISOString()}); }
+        else { nNuevos++; nFechas += c.fechas.size; rows.push(nuevoItem(lote.id, c)); }
+      });
+      if(rows.length) await upsertInBatches(SL_T.items, rows, "id");
+      const byId = new Map(rows.map(r=>[r.id, r]));
+      setItems(p=>[...p.map(x=>byId.get(x.id) || x), ...rows.filter(r=>!p.some(x=>x.id===r.id))]);
+      setOmitidas(omit);
+      say(rows.length ? "Se agregaron "+nFechas+" ausencia"+(nFechas===1?"":"s")+" ("+nNuevos+" empleado"+(nNuevos===1?"":"s")+" nuevo"+(nNuevos===1?"":"s")+")" : "No hay ausencias nuevas en el período.");
+    }catch(err){ say("No se pudo actualizar el lote: "+errTxt(err)); }
+    setBusy("");
+  }
+  async function borrarLote(){
+    if(!lote || !esAdmin) return;
+    setBusy("borrar");
+    try{
+      const {error} = await supabaseClient.from(SL_T.lotes).delete().eq("id", lote.id); if(error) throw error;
+      setLotes(p=>p.filter(x=>x.id!==lote.id)); setItems(p=>p.filter(x=>x.lote_id!==lote.id)); setEnvios(p=>p.filter(x=>x.lote_id!==lote.id));
+      setLoteId(""); setConfirmar(""); say("Lote borrado. Sus ausencias vuelven a quedar disponibles para otro lote.");
+    }catch(err){ say("No se pudo borrar el lote: "+errTxt(err)); }
+    setBusy("");
+  }
+
+  /* ---- filas del lote ---- */
+  const filas = useMemo(()=> itemsLote.map(it=>{
+    const inf = infoLegajo(it.legajo);
+    const p = plantelIdx.get(slLeg(it.legajo));
+    return {it, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now())};
+  }).sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")),
+  [itemsLote, histIdx, plantelIdx]);
+  const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
+  const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
+  const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
+    suspDesde: lote && lote.completar_fechas ? (f.it.susp_desde||"") : "", suspHasta: lote && lote.completar_fechas ? (f.it.susp_hasta||"") : "", suspRetoma: lote && lote.completar_fechas ? (f.it.susp_retoma||"") : "",
+    nInterno:f.it.n_interno||"", lugar:"Florida", fechaEmision:(lote && lote.fecha_emision) || hoy});
+  const archivoDe = f => "Sancion_"+slSafe(f.it.legajo)+"_"+slSafe(f.it.apellido || f.it.nombre)+".pdf";
+  const periodoAuto = useMemo(()=>{
+    if(!lote) return "";
+    if(lote.desde.slice(0,7)===lote.hasta.slice(0,7)){ const m = +lote.desde.slice(5,7); const s = MESES_LARGO[m-1]+" "+lote.desde.slice(0,4); return s[0].toUpperCase()+s.slice(1); }
+    return isoToDMY(lote.desde)+" al "+isoToDMY(lote.hasta);
+  }, [lote && lote.desde, lote && lote.hasta]);
+  const periodo = (lote && lote.periodo) || periodoAuto;
+  const textoAuto = lote ? "SANCION AUSENCIAS MANUAL del "+(lote.desde.slice(0,4)===lote.hasta.slice(0,4) ? isoToDMY(lote.desde).slice(0,5) : isoToDMY(lote.desde))+" - "+isoToDMY(lote.hasta) : "";
+  const textoEsp = (lote && lote.texto_especial) || textoAuto;
+
+  /* ---- exportar lote (Excel / CSV) ---- */
+  function loteRows(){
+    const H = ["Id Sancion","Empleado","Sancion","Motivo","Fecha creado","Dias de Suspencion","Fecha Sancion","Nivel de gravedad","Sector","Fecha Firma","Aplicada","Legajo","Nombre","Gerencia","Fechas ausencia","Nº Interno","Sugerida","Cant Suspensión","Texto Especial","IDSancion"];
+    const fe = isoToDMY((lote && lote.fecha_emision) || hoy);
+    return [H, ...enLote.map(f=>{ const it = f.it;
+      return ["", it.legajo+" "+it.nombre, slExportNombre(it.sancion), "Ausencia injustificada", fe, slDias(it), fe, "", it.sector, "", "", it.legajo, it.nombre, it.gerencia,
+        (it.fechas||[]).map(isoToDMY).join("; "), it.n_interno||"", slExportNombre(SL_ESC.includes(it.sancion) ? it.sancion : f.sug.sancion), slDias(it)||0, textoEsp, SL_COD[it.sancion]||""]; })];
+  }
+  const nombreBase = () => lote ? lote.desde+"_al_"+lote.hasta : hoy;
+  function exportarCSV(){ slDescargar("Lote_sanciones_"+nombreBase()+".csv", new Blob([slCsv(loteRows())], {type:"text/csv"})); say("CSV descargado"); }
+  function exportarXLSX(){
+    // Legajo y N° interno como número (si no, Excel los ordena como texto); IDSancion como texto para conservar el 0
+    const rows = loteRows().map((r,i)=> i===0 ? r : r.map((c,j)=> (j===11 || j===15) && /^\d+$/.test(String(c)) ? +c : c));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "SANCION");
+    slDescargar("Lote_sanciones_"+nombreBase()+".xlsx", new Blob([XLSX.write(wb, {type:"array", bookType:"xlsx"})]));
+    say("Excel descargado");
+  }
+
+  /* ---- salida de notas ---- */
+  const enLoteOrden = enLote; // ya ordenado por gerencia, sector y nombre
+  async function pdfUno(f){ setBusy("pdf"); try{ const doc = await slPdf([notaDe(f)]); slDescargar(archivoDe(f), doc.output("blob")); say("Descargado "+archivoDe(f)); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  async function pdfTodas(){ setBusy("pdfall"); try{ const doc = await slPdf(enLoteOrden.map(notaDe)); slDescargar("Sanciones_"+nombreBase()+".pdf", doc.output("blob")); say("PDF combinado descargado ("+enLoteOrden.length+" notas)"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  async function zipDe(lista){
+    await slLibs(); const logo = await slLogo(); const z = new window.JSZip();
+    lista.forEach(f=>{ const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true}); slDibujarNota(doc, notaDe(f), logo); z.folder(slSafe(f.it.sector||"Sin sector")).file(archivoDe(f), doc.output("arraybuffer")); });
+    return z.generateAsync({type:"blob"});
+  }
+  async function zipTodas(){ setBusy("zip"); try{ slDescargar("Sanciones_por_sector_"+nombreBase()+".zip", await zipDe(enLoteOrden)); say("ZIP descargado"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  function imprimir(lista){ if(!lista.length) return; slAbrirNotas(lista.length===1 ? lista[0].it.legajo+" "+lista[0].it.nombre+" - "+lista[0].it.sancion : "Sanciones "+slLoteNombre(lote), lista.map(notaDe)); }
+
+  /* ---- render ---- */
+  const sinTablas = error && /PGRST205|42P01|does not exist|schema cache|sanciones_/i.test(error);
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field"><label>Lote</label>
+          <select value={loteId} onChange={e=>{ flushItems(); setLoteId(e.target.value); setOmitidas(null); setConfirmar(""); }} style={{minWidth:300}}>
+            <option value="">— Elegí un lote o creá uno nuevo —</option>
+            {lotesOrden.map(l=>{ const its = items.filter(i=>i.lote_id===l.id); const env = its.filter(i=>i.enviado_ts).length;
+              return <option key={l.id} value={l.id}>{"Ausencias "+slLoteNombre(l)+" · "+its.length+" empleados"+(env ? " · "+env+" enviados" : "")}</option>; })}
+          </select>
+        </div>
+        <div className="field"><label>Nuevo lote: desde</label><input type="date" value={nuevoDesde} onChange={e=>setNuevoDesde(e.target.value)} /></div>
+        <div className="field"><label>Hasta</label><input type="date" value={nuevoHasta} onChange={e=>setNuevoHasta(e.target.value)} /></div>
+        <button type="button" className="btn" onClick={crearLote} disabled={!!busy || !nuevoDesde || !nuevoHasta}>{busy==="crear" ? "Buscando…" : "Buscar injustificadas y crear lote"}</button>
+        <button type="button" className="btn secondary" onClick={actualizar} disabled={loading} title="Vuelve a leer lo que guardaron los demás usuarios">Actualizar datos</button>
+        <span className="hint">{status}</span>
+      </div>
+      {error && <div className="warn-banner">{sinTablas ? "Falta crear las tablas de Sanciones por lote: corré supabase-migracion-sanciones-lote.sql en el SQL Editor de Supabase." : "No se pudieron leer los datos ("+error+")."}</div>}
+      {loading && <div className="card table-card"><div className="hint">Cargando…</div></div>}
+
+      {lote && (
+        <div className="card controls" style={{paddingTop:12, paddingBottom:12}}>
+          <div style={{display:"flex", flexDirection:"column", gap:2}}>
+            <b>Ausencias injustificadas {slLoteNombre(lote)}</b>
+            <span className="hint">Creado {lote.creado_ts ? new Date(lote.creado_ts).toLocaleString("es-AR") : ""}{lote.creado_por ? " por "+lote.creado_por : ""} · {filas.length} empleados · {enLote.length} con nota · {bloqueados.length} bloqueados por tope</span>
+          </div>
+          <div style={{display:"flex", gap:6}}>
+            {[["evaluar","1. Evaluar"],["cartas","2. Cartas"],["envios","3. Envíos"]].map(([k,t])=>(
+              <button key={k} type="button" className={"btn small"+(vista===k ? "" : " secondary")} onClick={()=>{ flushItems(); setVista(k); }}>{t}</button>
+            ))}
+          </div>
+          <button type="button" className="btn secondary small" onClick={agregarNuevas} disabled={!!busy} title="Si se actualizó el archivo de ausentismo, suma las injustificadas nuevas del período">Agregar ausencias nuevas del período</button>
+          {esAdmin && (confirmar==="borrar"
+            ? <span style={{display:"flex", gap:6, alignItems:"center"}}><span className="hint" style={{color:"var(--critical)", fontWeight:700}}>¿Borrar el lote y sus evaluaciones? No se puede deshacer.</span>
+                <button type="button" className="btn small" style={{background:"var(--critical)"}} onClick={borrarLote} disabled={!!busy}>Sí, borrar</button>
+                <button type="button" className="btn secondary small" onClick={()=>setConfirmar("")}>Cancelar</button></span>
+            : <button type="button" className="btn secondary small" style={{color:"var(--critical)"}} onClick={()=>setConfirmar("borrar")}>Borrar lote</button>)}
+        </div>
+      )}
+      {omitidas && omitidas.length>0 && (
+        <div className="card table-card">
+          <details>
+            <summary style={{cursor:"pointer", fontWeight:700}}>{omitidas.length===1 ? "1 ausencia del período no se incluyó porque ya tiene sanción (ver detalle)" : omitidas.length+" ausencias del período no se incluyeron porque ya tienen sanción (ver detalle)"}</summary>
+            <div className="overflow-x" style={{marginTop:8}}><table><thead><tr><th>Legajo</th><th>Nombre</th><th>Fecha</th><th>Ya sancionada en</th></tr></thead><tbody>
+              {omitidas.map((o,i)=>(<tr key={i}><td>{o.legajo}</td><td>{o.nombre}</td><td>{isoToDMY(o.fecha)}</td><td>{o.origen}</td></tr>))}
+            </tbody></table></div>
+          </details>
+        </div>
+      )}
+
+      {!lote && !loading && !error && (
+        <div className="card table-card">
+          <h3>Cómo se usa</h3>
+          <div className="caption" style={{marginTop:0}}>
+            1) Elegí el período (por ejemplo del 17/10 al 31/10) y tocá «Buscar injustificadas y crear lote»: se toman las ausencias con Agrupador cuadro presidencia = NO JUST y se omiten las que ya tienen sanción (menú Sanciones o un lote anterior).
+            2) En «Evaluar» tildás a quién sancionar; la sanción se sugiere según el historial y la podés cambiar. 3) En «Cartas» emitís las notas (imprimir, PDF o ZIP por sector). 4) En «Envíos» mandás por mail a cada gerencia y la marcás como «Enviado»: esas ausencias quedan sancionadas, con la fecha de envío.
+          </div>
+        </div>
+      )}
+
+      {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
+        textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
+          const k = slLeg(leg); const out = [];
+          crSan.forEach(s=>{ if(slLeg(s.legajo)===k && s.estado==="emitida") out.push("Menú Sanciones: "+(s.medida||"sanción")+(s.emitidaTs ? " emitida "+new Date(s.emitidaTs).toLocaleDateString("es-AR") : "")); });
+          items.forEach(it=>{ if(it.lote_id!==lote.id && slLeg(it.legajo)===k && it.incluir && it.enviado_ts) out.push("Lote: "+it.sancion+(it.sancion==="Suspensión" ? " "+slDias(it)+" d" : "")+" enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")); });
+          return out; }} />}
+      {lote && vista==="cartas" && <SlCartas enLote={enLoteOrden} lote={lote} updItem={updItem} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe}
+        pdfUno={pdfUno} pdfTodas={pdfTodas} zipTodas={zipTodas} imprimir={imprimir} busy={busy} />}
+      {lote && vista==="envios" && <SlEnvios enLote={enLoteOrden} lote={lote} envios={envios} setEnvios={setEnvios} mails={mails} setMails={setMails} cfg={cfg} setCfg={setCfg}
+        esAdmin={esAdmin} periodo={periodo} periodoAuto={periodoAuto} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe} zipDe={zipDe} guardarItemsYa={guardarItemsYa}
+        userRef={userRef} say={say} busy={busy} setBusy={setBusy} nombreBase={nombreBase} />}
+
+      <SlHistorial hist={hist} setHist={setHist} esAdmin={esAdmin} mails={mails} setMails={setMails} say={say} />
+    </div>
+  );
+}
+
+/* ---- 1. Evaluar ---- */
+function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio}){
+  const [q, setQ] = useKeptState("sl.q", "");
+  const [gers, setGers] = useKeptState("sl.gers", null);
+  const [sector, setSector] = useKeptState("sl.sector", "");
+  const [tipo, setTipo] = useKeptState("sl.tipo", "");
+  const [orden, setOrden] = useKeptState("sl.orden", null);
+  const [abierto, setAbierto] = useState({});
+  const gerAll = Array.from(new Set(filas.map(f=>f.it.gerencia||"(sin gerencia)"))).sort((a,b)=>a.localeCompare(b,"es"));
+  const gerCount = {}; filas.forEach(f=>{ const g = f.it.gerencia||"(sin gerencia)"; gerCount[g] = (gerCount[g]||0)+1; });
+  const sectores = Array.from(new Set(filas.map(f=>f.it.sector||""))).filter(Boolean).sort((a,b)=>a.localeCompare(b,"es"));
+  // orden por columna: 1er clic ascendente, 2º descendente, 3º (Legajo) «como Excel» en texto, luego vuelve al orden por gerencia y sector
+  const SORTS = {legajo:f=>+f.it.legajo||f.it.legajo, legajoTxt:f=>String(f.it.legajo), nombre:f=>normTxt(f.it.nombre), fechas:f=>(f.it.fechas||[])[0]||"",
+    ultima:f=>f.ultima ? f.ultima.fecha_creado||"" : "", dias:f=>f.diasAnio||0, sancion:f=>SL_TODAS.indexOf(f.it.sancion)*100+slDias(f.it), num:f=>f.it.n_interno ? (+f.it.n_interno||f.it.n_interno) : null};
+  const cmp = (a,b) => a===b ? 0 : a==null ? 1 : b==null ? -1 : (typeof a==="number" && typeof b==="number") ? a-b : String(a).localeCompare(String(b),"es",{numeric:true});
+  const cmpTxt = (a,b) => a<b ? -1 : a>b ? 1 : 0;
+  let ordenadas = filas;
+  if(orden && SORTS[orden.key]){ const fn = SORTS[orden.key], m = orden.dir==="desc" ? -1 : 1, cf = orden.key==="legajoTxt" ? cmpTxt : cmp;
+    ordenadas = filas.map((f,i)=>({f,i,v:fn(f)})).sort((a,b)=>{ const c = cf(a.v,b.v); return (a.v==null||b.v==null) ? c||a.i-b.i : (c*m)||a.i-b.i; }).map(x=>x.f); }
+  const qn = normTxt(q);
+  const vista = ordenadas.filter(f=>(gers==null || gers.includes(f.it.gerencia||"(sin gerencia)")) && (!sector || f.it.sector===sector) && (!tipo || f.it.sancion===tipo) && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn)));
+  const th = (k, label, right) => {
+    const cur = orden && orden.key; const on = cur===k || (k==="legajo" && cur==="legajoTxt"); const dir = on ? orden.dir : null;
+    const next = !on ? {key:k, dir:"asc"} : (dir==="asc" && cur!=="legajoTxt") ? {key:k, dir:"desc"} : (k==="legajo" && cur==="legajo") ? {key:"legajoTxt", dir:"asc"} : null;
+    return <th style={{textAlign:right ? "right" : "left", cursor:"pointer", whiteSpace:"nowrap", color:on ? "var(--accent)" : undefined}} onClick={()=>setOrden(next)} title="Ordenar">{label} <span style={{fontSize:9, opacity:on?1:.45}}>{on ? (cur==="legajoTxt" ? "Aa" : dir==="asc" ? "▲" : "▼") : "▲▼"}</span></th>;
+  };
+  const nOn = vista.filter(f=>f.it.incluir).length, allOn = vista.length>0 && nOn===vista.length;
+  function setTodos(v){ const p = {}; vista.forEach(f=>{ if(f.it.incluir!==v) p[f.it.id] = {incluir:v}; }); updItems(p); }
+  function aplicarSug(){ const p = {}; vista.forEach(f=>{ p[f.it.id] = {sancion:f.sug.sancion, dias:f.sug.dias||0}; }); updItems(p); }
+  function numerar(){
+    let n = parseInt(lote.start_num, 10); if(isNaN(n)) return;
+    const p = {}; ordenadas.forEach(f=>{ if(f.it.incluir && !slExcede(f, f.it)) p[f.it.id] = {n_interno:String(n++)}; }); updItems(p);
+  }
+  const sinNum = enLote.filter(f=>!f.it.n_interno).length;
+  const cnt = SL_TODAS.map(s=>[s, enLote.filter(f=>f.it.sancion===s).length]).filter(([s,n])=>n>0 || SL_ESC.includes(s));
+  const ordenLabel = {legajoTxt:"Legajo como Excel (texto)", legajo:"Legajo", nombre:"Empleado", fechas:"Fechas", ultima:"Última sanción firmada", dias:"Días susp. 12 m", sancion:"Sanción", num:"N° interno"};
+  return (
+    <React.Fragment>
+      {bloqueados.length>0 && <div className="warn-banner" style={{flexDirection:"column", alignItems:"flex-start"}}>
+        <span>{bloqueados.length} empleado{bloqueados.length>1?"s":""} superaría{bloqueados.length>1?"n":""} los {SL_LIMITE_DIAS} días de suspensión firmados en 12 meses. No se {bloqueados.length>1?"les":"le"} emite nota: corresponde evaluar la desvinculación por cúmulo de sanciones.</span>
+        <span style={{fontWeight:400}}>{bloqueados.map(f=>f.it.legajo+" "+f.it.nombre+" ("+f.diasAnio+" + "+slDias(f.it)+" = "+(f.diasAnio+slDias(f.it))+")").join(" · ")}</span>
+      </div>}
+      <div className="card controls">
+        <div className="hint" style={{flexBasis:"100%"}}><b style={{color:"var(--ink)"}}>{enLote.length}</b> con nota · {cnt.map(([s,n])=>n+" "+s).join(" · ")}{bloqueados.length ? " · "+bloqueados.length+" bloqueados por tope" : ""}{sinNum ? " · "+sinNum+" sin N° interno" : ""}</div>
+        <div className="field" style={{flex:"1 1 200px"}}><label>Buscar legajo o nombre</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Ej.: 9957 o Cifarelli" /></div>
+        <SlGerencias all={gerAll} counts={gerCount} value={gers} onChange={setGers} />
+        <div className="field"><label>Sector</label><select value={sector} onChange={e=>setSector(e.target.value)}><option value="">Todos</option>{sectores.map(s=>(<option key={s}>{s}</option>))}</select></div>
+        <div className="field"><label>Sanción</label><select value={tipo} onChange={e=>setTipo(e.target.value)}><option value="">Todas</option>{SL_TODAS.map(s=>(<option key={s}>{s}</option>))}</select></div>
+        <div className="field"><label>N° interno inicial</label><input type="number" style={{width:110}} value={lote.start_num||""} onChange={e=>updLote({start_num:e.target.value})} placeholder="Ej.: 3501" /></div>
+        <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados, en el orden de la tabla">Numerar lote</button>
+        <div className="field" style={{flex:"1 1 320px"}}><label>Texto especial (columna del Excel/CSV)</label><input type="text" value={lote.texto_especial||""} onChange={e=>updLote({texto_especial:e.target.value})} placeholder={textoAuto} /></div>
+        <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!enLote.length}>Exportar CSV</button>
+        <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!enLote.length}>Exportar Excel</button>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
+          <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
+          <span className="hint">Mostrando {vista.length} de {filas.length}</span>
+          {orden && ordenLabel[orden.key] ? <React.Fragment><span className="hint">· Orden: <b>{ordenLabel[orden.key]}</b> {orden.key==="legajoTxt" ? "" : orden.dir==="asc" ? "▲" : "▼"}</span><button type="button" className="cell-link" onClick={()=>setOrden(null)}>quitar orden</button></React.Fragment>
+            : <span className="hint">· Orden: gerencia y sector (tocá un título para ordenar)</span>}
+          <span className="hint">· «Numerar lote» sigue el orden de la tabla.</span>
+        </div>
+      </div>
+      <div className="card table-card">
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <th><input type="checkbox" title="Marcar / desmarcar todos los visibles" checked={allOn} ref={el=>{ if(el) el.indeterminate = nOn>0 && !allOn; }} onChange={e=>setTodos(e.target.checked)} disabled={!vista.length} /></th>
+              {th("legajo","Legajo")}{th("nombre","Empleado")}{th("fechas","Fechas de ausencia")}{th("ultima","Última sanción firmada")}{th("dias","Días susp. 12 m", true)}{th("sancion","Sanción a aplicar")}{th("num","N° interno")}<th></th>
+            </tr></thead>
+            <tbody>
+              {!vista.length && <tr><td colSpan="9" style={{textAlign:"center", color:"var(--muted)", padding:"16px 0"}}>{gers && !gers.length ? "Elegí al menos una gerencia." : filas.length ? "Nadie con estos filtros." : "No hay ausencias injustificadas en el período (o ya estaban sancionadas)."}</td></tr>}
+              {vista.map(f=>{
+                const it = f.it, blk = slExcede(f, it), d = slDias(it);
+                const coincide = it.sancion===f.sug.sancion && (it.sancion!=="Suspensión" || d===+f.sug.dias);
+                const prev = radarPrevio(it.legajo);
+                return (
+                  <React.Fragment key={it.id}>
+                    <tr style={{opacity:it.incluir ? 1 : .5}}>
+                      <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} onChange={e=>updItem(it.id, {incluir:e.target.checked})} /></td>
+                      <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}</td>
+                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:230}}>{(it.fechas||[]).map(x=>(<span key={x} className="hint" style={{border:"1px solid var(--border)", borderRadius:8, padding:"1px 6px", color:"var(--ink)"}}>{isoToDMY(x)}</span>))}</div></td>
+                      <td style={{verticalAlign:"top", minWidth:170}}>{f.ultima ? <React.Fragment><b style={{color:slChipColor(f.ultima.sancion)}}>{f.ultima.sancion}</b><div className="hint">{isoToDMY(f.ultima.fecha_creado)}{Number(f.ultima.dias) ? " · "+f.ultima.dias+" d" : ""}</div></React.Fragment> : <span className="hint">Sin antecedentes</span>}
+                        {prev.map((t,i)=>(<div key={i} className="hint" style={{color:"var(--warning)"}} title="Emitida en el Radar; todavía no figura firmada en el historial">{t}</div>))}</td>
+                      <td style={{verticalAlign:"top", textAlign:"right", fontWeight:f.diasAnio>=20 ? 700 : 400, color:f.diasAnio>=SL_LIMITE_DIAS ? "var(--critical)" : f.diasAnio>=20 ? "var(--warning)" : undefined}}>{f.diasAnio||0}</td>
+                      <td style={{verticalAlign:"top", minWidth:250}}>
+                        <div style={{display:"flex", gap:6}}>
+                          <select value={it.sancion} onChange={e=>{ const v = e.target.value; updItem(it.id, {sancion:v, dias:v==="Suspensión" ? (d||f.sug.dias||1) : 0}); }}>
+                            {SL_ESC.map(s=>(<option key={s} value={s}>{s}</option>))}
+                            <optgroup label="Otras medidas">{SL_OTRAS.map(s=>(<option key={s} value={s}>{s}</option>))}</optgroup>
+                          </select>
+                          {it.sancion==="Suspensión" && <select value={d} onChange={e=>updItem(it.id, {dias:+e.target.value})}>{SL_PASOS.map(x=>(<option key={x} value={x}>{x+" d"+((f.diasAnio||0)+x>SL_LIMITE_DIAS ? " · supera 30" : "")}</option>))}</select>}
+                        </div>
+                        {blk ? <div className="hint" style={{marginTop:6, color:"var(--critical)", fontWeight:700}}>No se emite: {f.diasAnio} días firmados en 12 meses + {d} = {f.diasAnio+d}. Supera el máximo de {SL_LIMITE_DIAS}: corresponde evaluar la desvinculación por cúmulo de sanciones.</div>
+                          : <div className="hint" style={{marginTop:6, color:coincide ? "var(--good)" : "var(--warning)", fontWeight:600}}>
+                              {coincide ? "✓ Coincide con la sugerencia" : <React.Fragment>Sugerida: <b>{slSanTxt(f.sug.sancion, f.sug.dias)}</b> <button type="button" className="cell-link" onClick={()=>updItem(it.id, {sancion:f.sug.sancion, dias:f.sug.dias||0})}>usar</button></React.Fragment>}
+                              <span style={{fontWeight:400}}> · {f.sug.motivo}</span>
+                            </div>}
+                      </td>
+                      <td style={{verticalAlign:"top"}}><input type="text" style={{width:90}} value={it.n_interno||""} onChange={e=>updItem(it.id, {n_interno:e.target.value})} /></td>
+                      <td style={{verticalAlign:"top"}}><button type="button" className="btn secondary small" onClick={()=>setAbierto(o=>({...o, [it.id]:!o[it.id]}))}>{abierto[it.id] ? "Ocultar" : "Historial"} ({f.hist.length})</button></td>
+                    </tr>
+                    {abierto[it.id] && (
+                      <tr><td colSpan="9" style={{background:"var(--plane)"}}>
+                        {f.hist.length ? <table><thead><tr><th>Fecha creado</th><th>Sanción</th><th>Motivo</th><th>Días</th><th>Aplicada</th><th>Fecha firma</th><th>Id</th></tr></thead><tbody>
+                          {f.hist.map(h=>(<tr key={h.id_sancion}><td>{isoToDMY(h.fecha_creado)}</td><td style={{color:slChipColor(h.sancion), fontWeight:700}}>{h.sancion}</td><td>{h.motivo}</td><td>{Number(h.dias)||""}</td><td>{slNorm(h.aplicada)==="si" ? "Sí" : "—"}</td><td>{isoToDMY(h.fecha_firma)}</td><td className="hint">{h.id_sancion}</td></tr>))}
+                        </tbody></table> : <span className="hint">Sin sanciones en el historial (últimos 2 años).</span>}
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ---- 2. Cartas ---- */
+function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pdfTodas, zipTodas, imprimir, busy}){
+  const [sel, setSel] = useState(0);
+  if(!enLote.length) return <div className="card table-card"><h3>No hay notas para emitir</h3><div className="caption" style={{marginTop:0}}>Tildá al menos un empleado en «Evaluar».</div></div>;
+  const i = Math.min(sel, enLote.length-1), f = enLote[i], susp = f.it.sancion==="Suspensión";
+  function setDesde(v){
+    if(!v){ updItem(f.it.id, {susp_desde:null}); return; }
+    const hasta = slAddDays(v, slDias(f.it)-1);
+    updItem(f.it.id, {susp_desde:v, susp_hasta:hasta, susp_retoma:slAddDays(hasta, 1)});
+  }
+  const html = "<!doctype html><html><head><meta charset='utf-8'><style>"+SL_NOTA_CSS+" body{background:#fff}</style></head><body>"+slNotaHtml(notaDe(f), slLogoUrl())+"</body></html>";
+  return (
+    <React.Fragment>
+      <div className="card controls">
+        <div className="field"><label>Fecha de la nota</label><input type="date" value={lote.fecha_emision||""} onChange={e=>updLote({fecha_emision:e.target.value})} /></div>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer"}}><input type="checkbox" checked={!!lote.completar_fechas} onChange={e=>updLote({completar_fechas:e.target.checked})} /> Completar fechas de suspensión</label>
+        <button type="button" className="btn" onClick={()=>imprimir(enLote)}>Imprimir todas ({enLote.length})</button>
+        <button type="button" className="btn secondary" onClick={pdfTodas} disabled={!!busy}>{busy==="pdfall" ? "Generando…" : "PDF combinado"}</button>
+        <button type="button" className="btn secondary" onClick={zipTodas} disabled={!!busy}>{busy==="zip" ? "Generando…" : "ZIP por sector"}</button>
+      </div>
+      <div style={{display:"grid", gridTemplateColumns:"minmax(240px,320px) minmax(0,1fr)", gap:16, alignItems:"start"}}>
+        <div className="card" style={{maxHeight:"75vh", overflowY:"auto"}}>
+          {enLote.map((x,k)=>(
+            <button key={x.it.id} type="button" onClick={()=>setSel(k)} style={{all:"unset", display:"block", cursor:"pointer", padding:"9px 12px", borderBottom:"1px solid var(--border)", background:k===i ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent", width:"100%", boxSizing:"border-box"}}>
+              <div style={{display:"flex", justifyContent:"space-between", gap:8}}><b style={{fontSize:13}}>{x.it.nombre}</b><span className="hint">{x.it.n_interno ? "N° "+x.it.n_interno : <span style={{color:"var(--warning)"}}>sin N°</span>}</span></div>
+              <div className="hint">{x.it.legajo} · {x.it.sector} · <b style={{color:slChipColor(x.it.sancion)}}>{x.it.sancion==="Suspensión" ? "Susp. "+slDias(x.it)+" d" : x.it.sancion}</b></div>
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex", flexDirection:"column", gap:12, minWidth:0}}>
+          <div className="card controls" style={{paddingTop:10, paddingBottom:10}}>
+            <button type="button" className="btn secondary small" onClick={()=>setSel(Math.max(0,i-1))} disabled={i===0}>← Anterior</button>
+            <span className="hint">{i+1} / {enLote.length}</span>
+            <button type="button" className="btn secondary small" onClick={()=>setSel(Math.min(enLote.length-1,i+1))} disabled={i===enLote.length-1}>Siguiente →</button>
+            <button type="button" className="btn secondary small" onClick={()=>imprimir([f])}>Imprimir esta</button>
+            <button type="button" className="btn secondary small" onClick={()=>pdfUno(f)} disabled={!!busy}>Descargar {archivoDe(f)}</button>
+          </div>
+          {susp && lote.completar_fechas && (
+            <div className="card controls" style={{paddingTop:10, paddingBottom:10}}>
+              <div className="field"><label>Suspendido desde</label><input type="date" value={f.it.susp_desde||""} onChange={e=>setDesde(e.target.value)} /></div>
+              <div className="field"><label>Hasta (inclusive)</label><input type="date" value={f.it.susp_hasta||""} onChange={e=>updItem(f.it.id, {susp_hasta:e.target.value||null})} /></div>
+              <div className="field"><label>Retoma tareas el</label><input type="date" value={f.it.susp_retoma||""} onChange={e=>updItem(f.it.id, {susp_retoma:e.target.value||null})} /></div>
+              <span className="hint" style={{flex:"1 1 200px"}}>Al elegir «desde» se proponen hasta y retoma en días corridos; ajustalos si la jornada no es corrida.</span>
+            </div>
+          )}
+          <div className="card" style={{overflowX:"auto", padding:12, background:"var(--plane)"}}>
+            <iframe title="Vista previa de la nota" srcDoc={html} style={{width:"210mm", height:"297mm", border:"1px solid var(--border)", background:"#fff", display:"block", margin:"0 auto"}} />
+          </div>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ---- 3. Envíos ---- */
+function SlEnvios({enLote, lote, envios, setEnvios, mails, setMails, cfg, setCfg, esAdmin, periodo, periodoAuto, updLote, notaDe, archivoDe, zipDe, guardarItemsYa, userRef, say, busy, setBusy, nombreBase}){
+  const [mailEnc, setMailEnc] = useState(()=>{ try{ return localStorage.getItem("sl.mailenc")||"ansi"; }catch(e){ return "ansi"; } });
+  useEffect(()=>{ try{ localStorage.setItem("sl.mailenc", mailEnc); }catch(e){} }, [mailEnc]);
+  const [nueva, setNueva] = useState("");
+  const mailOf = g => mails.find(m=>slNorm(m.gerencia)===slNorm(g));
+  const grupos = useMemo(()=>{ const m = new Map(); enLote.forEach(f=>{ const g = f.it.gerencia||"(sin gerencia)"; if(!m.has(g)) m.set(g, []); m.get(g).push(f); }); return Array.from(m.entries()).sort((a,b)=>a[0].localeCompare(b[0],"es")); }, [enLote]);
+  const envioDe = g => envios.find(e=>e.lote_id===lote.id && slNorm(e.gerencia)===slNorm(g));
+  const gerList = Array.from(new Set([...mails.map(m=>m.gerencia), ...grupos.map(([g])=>g)])).filter(g=>g && !g.startsWith("("));
+  // guardado diferido de mails y texto (solo Administrador)
+  const mT = useRef({}); const cT = useRef(null);
+  function setMail(g, patch){
+    const cur = mailOf(g) || {gerencia:g, mails:"", cc:""}; const row = {...cur, ...patch, gerencia:cur.gerencia||g};
+    setMails(list=>{ const i = list.findIndex(m=>slNorm(m.gerencia)===slNorm(g)); if(i<0) return [...list, row]; const o = list.slice(); o[i] = row; return o; });
+    clearTimeout(mT.current[g]); mT.current[g] = setTimeout(async ()=>{ const {error} = await supabaseClient.from(SL_T.mails).upsert({...row, updated_at:new Date().toISOString()}); say(error ? "No se pudo guardar el mail: "+error.message : "Mails guardados"); }, 700);
+  }
+  async function quitarMail(g){ const m = mailOf(g); if(!m) return; const {error} = await supabaseClient.from(SL_T.mails).delete().eq("gerencia", m.gerencia); if(error){ say("No se pudo quitar: "+error.message); return; } setMails(list=>list.filter(x=>x!==m)); }
+  function setTxt(patch){
+    const c = {...cfg, ...patch}; setCfg(c);
+    clearTimeout(cT.current); cT.current = setTimeout(async ()=>{ const {error} = await supabaseClient.from(SL_T.config).upsert({id:"main", asunto:c.asunto, intro:c.intro, cierre:c.cierre, updated_at:new Date().toISOString()}); say(error ? "No se pudo guardar el texto: "+error.message : "Texto del mail guardado"); }, 700);
+  }
+  const asunto = g => String(cfg.asunto||"").replace(/\{gerencia\}/g, g).replace(/\{periodo\}/g, periodo);
+  const cols = ["Legajo","Nombre","Sector","Fechas","Sanción","Días","N° interno"];
+  const filasDe = lista => lista.map(f=>[f.it.legajo, f.it.nombre, f.it.sector, (f.it.fechas||[]).map(isoToDMY).join("; "), f.it.sancion, slDias(f.it)||"", f.it.n_interno||""]);
+  const tablaHtml = lista => "<table style=\"border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px\"><thead><tr>"+cols.map(c=>"<th style=\"border:1px solid #999;background:#E4E8F5;padding:4px 8px;text-align:left\">"+escHtml(c)+"</th>").join("")+"</tr></thead><tbody>"+filasDe(lista).map(r=>"<tr>"+r.map(c=>"<td style=\"border:1px solid #999;padding:4px 8px\">"+escHtml(c)+"</td>").join("")+"</tr>").join("")+"</tbody></table>";
+  const cuerpoHtml = lista => slAsciiHtml("<div style=\"font-family:Arial,sans-serif;font-size:14px\"><p>"+escHtml(cfg.intro).replace(/\n/g,"<br>")+"</p>"+tablaHtml(lista)+"<p>"+escHtml(cfg.cierre).replace(/\n/g,"<br>")+"</p></div>");
+  const cuerpoTxt = lista => cfg.intro+"\n\n"+filasDe(lista).map(r=>r[0]+" | "+r[1]+" | "+r[2]+" | "+r[3]+" | "+r[4]+(r[5] ? " ("+r[5]+" d)" : "")+" | N° "+r[6]).join("\n")+"\n\n"+cfg.cierre;
+  const tablaTxt = lista => [cols.join("\t"), ...filasDe(lista).map(r=>r.join("\t"))].join("\n");
+  function mailto(g, lista){
+    const m = mailOf(g) || {}; const enc = mailEnc==="ansi" ? slEncAnsi : encodeURIComponent;
+    let body = cuerpoTxt(lista); if(body.length>1500) body = cfg.intro+"\n\n(El detalle está en el cuadro: usá «Copiar cuadro» y pegalo acá.)\n\n"+cfg.cierre;
+    body = body.replace(/\r?\n/g, "\r\n");
+    const q = []; if(m.cc) q.push("cc="+slMails(m.cc).map(enc).join(";")); q.push("subject="+enc(asunto(g))); q.push("body="+enc(body));
+    return "mailto:"+slMails(m.mails).join(";")+"?"+q.join("&");
+  }
+  async function zipGer(g, lista){ setBusy("zip-"+g); try{ slDescargar("Sanciones_"+slSafe(g)+"_"+nombreBase()+".zip", await zipDe(lista)); say("ZIP descargado: adjuntalo al mail."); }catch(err){ say("Error: "+((err&&err.message)||err)); } setBusy(""); }
+  async function eml(g, lista){
+    setBusy("eml-"+g);
+    try{
+      await slLibs(); const logo = await slLogo(); const m = mailOf(g) || {};
+      const B = "----=_RRHH_mix_"+Math.random().toString(36).slice(2), A = "----=_RRHH_alt_"+Math.random().toString(36).slice(2);
+      const parts = ["To: "+slMails(m.mails).join(", "), m.cc ? "Cc: "+slMails(m.cc).join(", ") : null, "Subject: "+slHdr(asunto(g)), "X-Unsent: 1", "MIME-Version: 1.0", "Content-Type: multipart/mixed; boundary=\""+B+"\"", "",
+        "--"+B, "Content-Type: multipart/alternative; boundary=\""+A+"\"", "",
+        "--"+A, "Content-Type: text/plain; charset=\"utf-8\"", "Content-Transfer-Encoding: base64", "", slB64Txt(cuerpoTxt(lista).replace(/\r?\n/g,"\r\n")),
+        "--"+A, "Content-Type: text/html; charset=\"utf-8\"", "Content-Transfer-Encoding: base64", "", slB64Txt("<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head><body>"+cuerpoHtml(lista)+"</body></html>"),
+        "--"+A+"--"].filter(x=>x!==null);
+      lista.forEach(f=>{ const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true}); slDibujarNota(doc, notaDe(f), logo);
+        parts.push("--"+B, "Content-Type: application/pdf; name=\""+archivoDe(f)+"\"", "Content-Transfer-Encoding: base64", "Content-Disposition: attachment; filename=\""+archivoDe(f)+"\"", "", slB64(doc.output("arraybuffer"))); });
+      parts.push("--"+B+"--", "");
+      slDescargar("Mail_"+slSafe(g)+"_"+nombreBase()+".eml", new Blob([parts.join("\r\n")], {type:"message/rfc822"}));
+      say("Descargado el .eml: abrilo con Outlook y presioná Enviar.");
+    }catch(err){ say("Error: "+((err&&err.message)||err)); }
+    setBusy("");
+  }
+  async function copiar(lista){ const ok = await slCopiar(cuerpoHtml(lista), tablaTxt(lista)); say(ok ? "Cuadro copiado. Pegalo en el cuerpo del mail." : "No se pudo copiar: seleccioná el cuadro y copialo a mano."); }
+  async function marcar(g, lista, on){
+    setBusy("env-"+g);
+    try{
+      const id = lote.id+"|"+slNorm(g), ts = Date.now();
+      if(on){
+        const m = mailOf(g) || {};
+        const row = {id, lote_id:lote.id, gerencia:g, destinatarios:slMails(m.mails).join("; "), cc:slMails(m.cc).join("; "), legajos:lista.map(f=>f.it.legajo), n_internos:lista.map(f=>f.it.n_interno||""), enviado_ts:ts, enviado_por:userRef.current, updated_at:new Date().toISOString()};
+        const {error} = await supabaseClient.from(SL_T.envios).upsert(row); if(error) throw error;
+        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:ts, enviado_por:userRef.current}; }); await guardarItemsYa(p);
+        setEnvios(list=>[...list.filter(e=>e.id!==id), row]);
+        say(lista.length===1 ? "Marcado como enviado: la sanción de "+g+" queda registrada con la fecha de hoy." : "Marcado como enviado: las "+lista.length+" sanciones de "+g+" quedan registradas con la fecha de hoy.");
+      } else {
+        const {error} = await supabaseClient.from(SL_T.envios).delete().eq("id", id); if(error) throw error;
+        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:null, enviado_por:""}; }); await guardarItemsYa(p);
+        setEnvios(list=>list.filter(e=>e.id!==id));
+        say("Se quitó la marca de enviado de "+g+".");
+      }
+    }catch(err){ say("No se pudo guardar: "+((err&&err.message)||err)); }
+    setBusy("");
+  }
+  function exportarLog(){
+    const rows = [["Fecha envío","Gerencia","Destinatarios","CC","Sectores","Cantidad","Legajos","N° interno","Período","Estado","Marcado por"],
+      ...grupos.map(([g,lista])=>{ const m = mailOf(g) || {}; const e = envioDe(g);
+        return [e && e.enviado_ts ? new Date(e.enviado_ts).toLocaleString("es-AR") : "", g, slMails(m.mails).join("; "), slMails(m.cc).join("; "), Array.from(new Set(lista.map(f=>f.it.sector))).join("; "), lista.length, lista.map(f=>f.it.legajo).join(" "), lista.map(f=>f.it.n_interno||"").join(" "), periodo, e ? "Enviado" : "Pendiente", e ? e.enviado_por : ""]; })];
+    slDescargar("Log_envios_"+nombreBase()+".csv", new Blob([slCsv(rows)], {type:"text/csv"})); say("Log descargado");
+  }
+  const ro = !esAdmin;
+  return (
+    <React.Fragment>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(340px, 1fr))", gap:16}}>
+        <div className="card table-card">
+          <h3>Texto del mail</h3>
+          <div className="caption">Se usa para todas las gerencias; {"{gerencia}"} y {"{periodo}"} se reemplazan solos.{ro ? " Lo edita el Administrador." : ""}</div>
+          <div className="field"><label>Asunto</label><input type="text" value={cfg.asunto} disabled={ro} onChange={e=>setTxt({asunto:e.target.value})} /></div>
+          <div className="field"><label>Período (de este lote)</label><input type="text" value={lote.periodo||""} placeholder={periodoAuto} onChange={e=>updLote({periodo:e.target.value})} /></div>
+          <div className="field"><label>Introducción</label><textarea rows="3" value={cfg.intro} disabled={ro} onChange={e=>setTxt({intro:e.target.value})} /></div>
+          <div className="field"><label>Cierre</label><textarea rows="2" value={cfg.cierre} disabled={ro} onChange={e=>setTxt({cierre:e.target.value})} /></div>
+          <div className="field"><label>Mi programa de correo (para «Abrir en mi correo»)</label>
+            <select value={mailEnc} onChange={e=>setMailEnc(e.target.value)}><option value="ansi">Outlook de escritorio (clásico)</option><option value="utf8">Outlook nuevo, Outlook web, Gmail u otro</option></select></div>
+          <div className="hint">Si en el mail aparecen «Ã±» o «Ã³» en lugar de ñ y acentos, cambiá esta opción. El .eml y «Copiar cuadro» funcionan bien con cualquiera.</div>
+        </div>
+        <div className="card table-card">
+          <h3>Mails por gerencia</h3>
+          <div className="caption">Separá varios mails con «;» (también acepta «Nombre &lt;mail&gt;»).{ro ? " Los edita el Administrador." : " Se pueden cargar desde un Excel con la hoja Gerencia | Mails | CC (abajo, en Historial)."}</div>
+          <div className="overflow-x"><table><thead><tr><th>Gerencia</th><th>Mails</th><th>CC</th>{!ro && <th></th>}</tr></thead><tbody>
+            {!gerList.length && <tr><td colSpan="4" className="hint">Sin gerencias todavía.</td></tr>}
+            {gerList.map(g=>{ const m = mailOf(g) || {mails:"", cc:""}; return (
+              <tr key={g}><td style={{fontWeight:700, whiteSpace:"nowrap"}}>{g}</td>
+                <td><input type="text" style={{width:"100%", minWidth:200}} value={m.mails} disabled={ro} onChange={e=>setMail(g, {mails:e.target.value})} /></td>
+                <td><input type="text" style={{width:"100%", minWidth:120}} value={m.cc} disabled={ro} onChange={e=>setMail(g, {cc:e.target.value})} /></td>
+                {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitarMail(g)} disabled={!mailOf(g)}>Quitar</button></td>}</tr>); })}
+          </tbody></table></div>
+          {!ro && <div style={{display:"flex", gap:8}}><input type="text" placeholder="Nueva gerencia" value={nueva} onChange={e=>setNueva(e.target.value)} /><button type="button" className="btn secondary small" disabled={!nueva.trim()} onClick={()=>{ setMail(nueva.trim(), {}); setNueva(""); }}>Agregar</button></div>}
+        </div>
+      </div>
+      <div className="card controls" style={{paddingTop:12, paddingBottom:12}}>
+        <span className="hint"><b style={{color:"var(--ink)"}}>{grupos.length}</b> gerencias · <b style={{color:"var(--ink)"}}>{enLote.length}</b> notas · <b style={{color:"var(--ink)"}}>{grupos.filter(([g])=>envioDe(g)).length}</b> marcadas como enviadas</span>
+        <button type="button" className="btn secondary small" onClick={exportarLog} disabled={!grupos.length}>Exportar log CSV</button>
+      </div>
+      {!grupos.length && <div className="card table-card"><div className="hint">No hay notas en el lote.</div></div>}
+      {grupos.map(([g, lista])=>{
+        const m = mailOf(g), to = slMails(m && m.mails), cc = slMails(m && m.cc), e = envioDe(g);
+        return (
+          <div key={g} className="card table-card" style={e ? {borderColor:"var(--good)"} : undefined}>
+            <div style={{display:"flex", justifyContent:"space-between", gap:12, flexWrap:"wrap", alignItems:"flex-start"}}>
+              <div><h3>{g}</h3><div className="hint">{lista.length} nota{lista.length===1?"":"s"} · {Array.from(new Set(lista.map(f=>f.it.sector))).join(", ")}</div></div>
+              <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontWeight:700}}>
+                {e && <span style={{color:"var(--good)"}}>✔ Enviado {new Date(e.enviado_ts).toLocaleString("es-AR")}{e.enviado_por ? " · "+e.enviado_por : ""}</span>}
+                <input type="checkbox" checked={!!e} disabled={busy==="env-"+g} onChange={ev=>marcar(g, lista, ev.target.checked)} /> Marcar enviado
+              </label>
+            </div>
+            <div className="hint" style={{color:"var(--ink)"}}><b>Para:</b> {to.length ? to.join("; ") : <span style={{color:"var(--critical)", fontWeight:700}}>sin destinatarios: completá la tabla de mails</span>}{cc.length ? <React.Fragment> · <b>CC:</b> {cc.join("; ")}</React.Fragment> : null}</div>
+            <div className="hint" style={{color:"var(--ink)"}}><b>Asunto:</b> {asunto(g)}</div>
+            <div className="overflow-x"><table><thead><tr>{cols.map(c=>(<th key={c}>{c}</th>))}</tr></thead><tbody>
+              {filasDe(lista).map((r,k)=>(<tr key={k}>{r.map((c,j)=>(<td key={j}>{c}</td>))}</tr>))}
+            </tbody></table></div>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              <a className="btn small" href={mailto(g, lista)} style={{textDecoration:"none"}}>Abrir en mi correo</a>
+              <button type="button" className="btn secondary small" onClick={()=>zipGer(g, lista)} disabled={!!busy}>{busy==="zip-"+g ? "Generando…" : "ZIP de PDFs"}</button>
+              <button type="button" className="btn secondary small" onClick={()=>eml(g, lista)} disabled={!!busy}>{busy==="eml-"+g ? "Generando…" : "Descargar .eml"}</button>
+              <button type="button" className="btn secondary small" onClick={()=>copiar(lista)}>Copiar cuadro</button>
+            </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/* ---- Historial de sanciones (Excel SANCION del sistema) y carga de mails ---- */
+function SlHistorial({hist, setHist, esAdmin, mails, setMails, say}){
+  const [prog, setProg] = useState("");
+  const [resumen, setResumen] = useState(null);
+  const inp = useRef(null);
+  const corte = slAddDays(localISO(Date.now()), -SL_HIST_DIAS);
+  const fechas = hist.map(h=>h.fecha_creado).filter(Boolean).sort();
+  async function onFile(e){
+    const file = e.target.files && e.target.files[0]; e.target.value = ""; if(!file) return;
+    setResumen(null); setProg("Leyendo "+file.name+"…");
+    try{
+      const hojas = await slLeerHojas(file);
+      let sanRows = null, mailRows = null;
+      hojas.forEach(aoa=>{
+        if(!sanRows){ const t = slTabla(aoa, H=>H.has("idsancion") || (H.has("aplicada") && (H.has("diasdesuspencion") || H.has("diasdesuspension")))); if(t) sanRows = t; }
+        if(!mailRows){ const t = slTabla(aoa, H=>H.has("gerencia") && (H.has("mails") || H.has("mail")) && !H.has("legajo")); if(t) mailRows = t; }
+      });
+      if(!sanRows && !mailRows){ setProg(""); say("No encontré una hoja de sanciones (columna «Id Sancion») ni de mails (Gerencia | Mails | CC) en "+file.name+"."); return; }
+      const out = {};
+      if(sanRows){
+        const actual = new Map(hist.map(h=>[h.id_sancion, h]));
+        const campos = ["legajo","empleado","nombre","sancion","motivo","fecha_creado","dias","fecha_sancion","nivel","sector","fecha_firma","aplicada"];
+        let viejas = 0, nuevas = 0, cambiadas = 0, iguales = 0; const subir = [];
+        sanRows.forEach(r=>{
+          const emp = slTxt(slG(r,"empleado"));
+          const o = {legajo:slLeg(slG(r,"legajo") || emp.split(/\s+/)[0]), empleado:emp, nombre:slTxt(slG(r,"nombre")), sancion:slTxt(slG(r,"sancion")), motivo:slTxt(slG(r,"motivo")),
+            fecha_creado:slIso(slG(r,"fechacreado")), dias:Number(String(slG(r,"diasdesuspencion","diasdesuspension")).replace(",","."))||0, fecha_sancion:slIso(slG(r,"fechasancion")),
+            nivel:slTxt(slG(r,"niveldegravedad")), sector:slTxt(slG(r,"sector")), fecha_firma:slIso(slG(r,"fechafirma")), aplicada:slTxt(slG(r,"aplicada"))};
+          if(!o.legajo) return;
+          o.id_sancion = slTxt(slG(r,"idsancion")) || (o.legajo+"|"+(o.fecha_creado||"")+"|"+slNorm(o.sancion));
+          if(o.fecha_creado && o.fecha_creado<corte){ viejas++; return; }
+          const prev = actual.get(o.id_sancion);
+          if(!prev) nuevas++;
+          else if(campos.some(k=>String(prev[k]==null?"":prev[k])!==String(o[k]==null?"":o[k]))) cambiadas++;
+          else { iguales++; return; }
+          subir.push({...o, updated_at:new Date().toISOString()});
+        });
+        if(subir.length){ setProg("Guardando "+subir.length+" sanciones…"); await upsertInBatches(SL_T.hist, subir, "id_sancion", (d,t)=>setProg("Guardando sanciones… "+d+"/"+t)); }
+        const {error:eDel} = await supabaseClient.from(SL_T.hist).delete().lt("fecha_creado", corte); if(eDel) throw eDel;
+        const todas = await slFetchAll(SL_T.hist, "id_sancion"); setHist(todas);
+        Object.assign(out, {leidas:sanRows.length, nuevas, cambiadas, iguales, viejas, total:todas.length});
+      }
+      if(mailRows){
+        const filas = mailRows.map(r=>({gerencia:slTxt(slG(r,"gerencia")), mails:slTxt(slG(r,"mails","mail","emails")), cc:slTxt(slG(r,"cc")), updated_at:new Date().toISOString()})).filter(r=>r.gerencia);
+        if(filas.length){ const {error} = await supabaseClient.from(SL_T.mails).upsert(filas); if(error) throw error; setMails(await slFetchAll(SL_T.mails, "gerencia")); }
+        out.mails = filas.length;
+      }
+      setResumen(out); setProg("");
+      say("Carga terminada");
+    }catch(err){ setProg(""); say("No se pudo cargar: "+((err&&err.message)||err)); }
+  }
+  return (
+    <CollapsibleCard id="sl-historial" title="Historial de sanciones (para la sugerencia y el tope de 30 días)"
+      summary={hist.length ? hist.length+" sanciones guardadas"+(fechas.length ? " · del "+isoToDMY(fechas[0])+" al "+isoToDMY(fechas[fechas.length-1]) : "") : "todavía sin cargar"}>
+      <div className="caption" style={{marginTop:0}}>
+        Es el Excel SANCION del sistema (columnas Id Sancion, Empleado, Sancion, Motivo, Fecha creado, Dias de Suspencion, Aplicada, Legajo…). Se guardan solo los últimos 2 años (desde el {isoToDMY(corte)}); lo anterior se descarta.
+        Al subir una actualización, se agregan las nuevas y se reemplazan las que cambiaron (por Id Sancion). El mismo archivo puede traer una hoja de mails por gerencia (Gerencia | Mails | CC).
+        Para el escalamiento cuenta la última sanción con Aplicada = Si y Motivo que empiece con «Ausencia»; para el tope suman los días de suspensión con Aplicada = Si de los últimos 12 meses.
+      </div>
+      {esAdmin ? (
+        <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+          <button type="button" className="btn small" onClick={()=>inp.current && inp.current.click()} disabled={!!prog}>{prog ? "Cargando…" : "Subir historial / actualización"}</button>
+          <input ref={inp} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onFile} />
+          <span className="hint">{prog}</span>
+        </div>
+      ) : <div className="hint">El historial lo actualiza el Administrador.</div>}
+      {resumen && (
+        <div className="hint" style={{color:"var(--ink)"}}>
+          {resumen.leidas!=null && <div>Sanciones leídas: <b>{fmt(resumen.leidas)}</b> · nuevas <b>{fmt(resumen.nuevas)}</b> · reemplazadas por cambios <b>{fmt(resumen.cambiadas)}</b> · sin cambios {fmt(resumen.iguales)} · descartadas por tener más de 2 años {fmt(resumen.viejas)} · total guardado <b>{fmt(resumen.total)}</b></div>}
+          {resumen.mails!=null && <div>Mails por gerencia cargados: <b>{resumen.mails}</b></div>}
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
+
 function SimuladorTab({rankingUnits, objetivo}){
   const [unit, setUnit] = useState(rankingUnits[0] ? rankingUnits[0].name : "");
   const [dotacion, setDotacion] = useState(0);
@@ -6589,6 +7635,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
     {key:"cronicos", label:"Crónicos", color:"#e5484d"},
     {key:"medicina_laboral", label:"Medicina Laboral", color:"#b4724a"},
     {key:"sanciones", label:"Sanciones", color:"#c0392b"},
+    {key:"sanciones_lote", label:"Sanciones por lote", color:"#7a2a8c"},
     {key:"ranking", label:"Ranking", color:"#e5a000"},
     {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
     {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
@@ -6796,6 +7843,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
         </React.Fragment>
       )}
