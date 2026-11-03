@@ -6650,13 +6650,24 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     updItems(p);
     say("Se quitaron "+nF+" fecha"+(nF===1?"":"s")+" que ya no son sancionables"+(nE ? "; "+nE+" empleado"+(nE===1?"":"s")+" quedó"+(nE===1?"":"aron")+" omitido"+(nE===1?"":"s")+" por no tener ninguna" : "")+".");
   }
-  const filas = useMemo(()=> itemsLote.map(it=>{
+  // Cada vez que se abre el lote se vuelve a comparar con la base actual del Radar (ausentismo_registros): las fechas que HOY ya no son
+  // sancionables (se justificaron o cambió el codpla después de armar el lote) quedan afuera solas, en pantalla, notas, envíos y exportación.
+  // Lo guardado no se borra (si la base vuelve a cambiar, se recalcula). Lo ya enviado no se toca.
+  const filasTodas = useMemo(()=> itemsLote.map(it0=>{
+    const todas = it0.fechas || [];
+    const vigentes = it0.enviado_ts ? todas : todas.filter(d=>fechaInfo(it0.legajo, d).ok);
+    const justificadas = it0.enviado_ts ? [] : todas.filter(d=>!vigentes.includes(d));
+    const it = justificadas.length ? {...it0, fechas:vigentes} : it0;
     const inf = infoLegajo(it.legajo);
     const p = plantelIdx.get(slLeg(it.legajo));
-    return {it, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now()), empresa:(p && p.empresa) || empresaRec.get(slLeg(it.legajo)) || "(sin empresa)"};
+    return {it, justificadas, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now()), empresa:(p && p.empresa) || empresaRec.get(slLeg(it.legajo)) || "(sin empresa)"};
   // los dados de baja no se muestran ni se sancionan (salvo que ya se hubiera enviado su sanción antes de la baja)
-  }).filter(f=>!f.baja || f.it.enviado_ts).sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")),
-  [itemsLote, histIdx, plantelIdx, empresaRec]);
+  }), [itemsLote, histIdx, plantelIdx, empresaRec, codIdx, codigosNoJust]);
+  // a quien no le queda ninguna fecha sancionable no se lo muestra (tampoco a los dados de baja), salvo que ya se haya enviado
+  const filas = useMemo(()=> filasTodas.filter(f=>(!f.baja || f.it.enviado_ts) && ((f.it.fechas||[]).length || f.it.enviado_ts))
+    .sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")), [filasTodas]);
+  // fechas que se dejaron afuera porque en la base actual ya están justificadas (para informar, sin alarma)
+  const justificadasInfo = useMemo(()=>{ const out = []; filasTodas.forEach(f=>{ if(f.baja && !f.it.enviado_ts) return; f.justificadas.forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); out.push({legajo:f.it.legajo, nombre:f.it.nombre, fecha:d, cod:fi.sinDato ? "sin dato" : fi.cod, motivo:fi.motivo}); }); }); return out; }, [filasTodas]);
   const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
   const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
   const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
@@ -6764,7 +6775,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       )}
 
       {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
-        fechaInfo={fechaInfo} quitarNoSancionables={quitarNoSancionables}
+        fechaInfo={fechaInfo} justificadasInfo={justificadasInfo}
         textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
           const k = slLeg(leg); const out = [];
           crSan.forEach(s=>{ if(slLeg(s.legajo)===k && s.estado==="emitida") out.push("Menú Sanciones: "+(s.medida||"sanción")+(s.emitidaTs ? " emitida "+new Date(s.emitidaTs).toLocaleDateString("es-AR") : "")); });
@@ -6784,7 +6795,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
 }
 
 /* ---- 1. Evaluar ---- */
-function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, quitarNoSancionables}){
+function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo}){
   const [q, setQ] = useKeptState("sl.q", "");
   const [gers, setGers] = useKeptState("sl.gers", null);
   const [sectores, setSectores] = useKeptState("sl.sectores", null);
@@ -6833,17 +6844,18 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
     <React.Fragment>
       {/* fila omitida: se atenúa todo menos la tilde y el legajo (donde va el motivo, en rojo) */}
       <style>{".sl-off > td:nth-child(n+3){opacity:.5}"}</style>
-      {(()=>{
-        // fechas del lote que, con la base de hoy, ya no son sancionables (cambió el codpla o la ausencia ya no está)
-        const malas = []; filas.forEach(f=>{ if(f.it.enviado_ts) return; (f.it.fechas||[]).forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); if(!fi.ok) malas.push(f.it.legajo+" "+isoToDMY(d).slice(0,5)+" ("+(fi.sinDato ? "sin dato" : fi.cod||"—")+")"); }); });
-        if(!malas.length) return null;
-        return (
-          <div className="warn-banner" style={{flexWrap:"wrap"}}>
-            <span>{malas.length} fecha{malas.length===1?"":"s"} del lote ya no figura{malas.length===1?"":"n"} como NO JUST en la base actual (se actualizó después de armar el lote): {malas.slice(0,8).join(" · ")}{malas.length>8 ? " …" : ""}</span>
-            <button type="button" className="btn small" style={{background:"var(--critical)"}} onClick={quitarNoSancionables} title="Saca esas fechas del lote; si a alguien no le queda ninguna, queda omitido con el motivo">Quitar esas fechas del lote</button>
-          </div>
-        );
-      })()}
+      {justificadasInfo.length>0 && (
+        <div className="card table-card" style={{paddingTop:10, paddingBottom:10}}>
+          <details>
+            <summary style={{cursor:"pointer", fontSize:13}}>
+              <span className="hint">Se dejaron afuera <b style={{color:"var(--ink)"}}>{justificadasInfo.length}</b> fecha{justificadasInfo.length===1?"":"s"} que en la base actual del Radar ya figura{justificadasInfo.length===1?"":"n"} justificada{justificadasInfo.length===1?"":"s"} (se actualizó el ausentismo después de armar el lote). No se sancionan. Ver detalle</span>
+            </summary>
+            <div className="overflow-x" style={{marginTop:8}}><table><thead><tr><th>Legajo</th><th>Nombre</th><th>Fecha</th><th>Codpla actual</th><th>Motivo</th></tr></thead><tbody>
+              {justificadasInfo.map((x,i)=>(<tr key={i}><td>{x.legajo}</td><td>{x.nombre}</td><td>{isoToDMY(x.fecha)}</td><td><b>{x.cod}</b></td><td>{x.motivo}</td></tr>))}
+            </tbody></table></div>
+          </details>
+        </div>
+      )}
       {bloqueados.length>0 && <div className="warn-banner" style={{flexDirection:"column", alignItems:"flex-start"}}>
         <span>{bloqueados.length} empleado{bloqueados.length>1?"s":""} superaría{bloqueados.length>1?"n":""} los {SL_LIMITE_DIAS} días de suspensión firmados en 12 meses. No se {bloqueados.length>1?"les":"le"} emite nota: corresponde evaluar la desvinculación por cúmulo de sanciones.</span>
         <span style={{fontWeight:400}}>{bloqueados.map(f=>f.it.legajo+" "+f.it.nombre+" ("+f.diasAnio+" + "+slDias(f.it)+" = "+(f.diasAnio+slDias(f.it))+")").join(" · ")}</span>
@@ -7062,7 +7074,8 @@ function SlEnvios({enLote, lote, envios, setEnvios, mails, setMails, cfg, setCfg
         const m = mailOf(g) || {};
         const row = {id, lote_id:lote.id, gerencia:g, destinatarios:slMails(m.mails).join("; "), cc:slMails(m.cc).join("; "), legajos:lista.map(f=>f.it.legajo), n_internos:lista.map(f=>f.it.n_interno||""), enviado_ts:ts, enviado_por:userRef.current, updated_at:new Date().toISOString()};
         const {error} = await supabaseClient.from(SL_T.envios).upsert(row); if(error) throw error;
-        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:ts, enviado_por:userRef.current}; }); await guardarItemsYa(p);
+        // se guardan las fechas vigentes al momento del envío (sin las que ya figuran justificadas en la base)
+        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:ts, enviado_por:userRef.current, fechas:f.it.fechas||[]}; }); await guardarItemsYa(p);
         setEnvios(list=>[...list.filter(e=>e.id!==id), row]);
         say(lista.length===1 ? "Marcado como enviado: la sanción de "+g+" queda registrada con la fecha de hoy." : "Marcado como enviado: las "+lista.length+" sanciones de "+g+" quedan registradas con la fecha de hoy.");
       } else {
