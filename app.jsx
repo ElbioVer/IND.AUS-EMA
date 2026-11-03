@@ -6030,7 +6030,9 @@ function SancionesTab({plantel, puedeDefinir, esAdmin}){
    envían por mail agrupadas por gerencia (mailto, .eml con los PDF, copiar cuadro). 4) Al marcar una gerencia como «Enviado» quedan marcadas como
    sancionadas esas ausencias, con la fecha de envío (se ve en Detalle Empleados y en Crónicos, y no vuelven a aparecer en otro lote).
    Tablas: sanciones_historial, sanciones_lotes, sanciones_lote_items, sanciones_lote_envios, sanciones_mails, sanciones_config. */
-const SL_T = {hist:"sanciones_historial", lotes:"sanciones_lotes", items:"sanciones_lote_items", envios:"sanciones_lote_envios", mails:"sanciones_mails", config:"sanciones_config"};
+const SL_T = {hist:"sanciones_historial", lotes:"sanciones_lotes", items:"sanciones_lote_items", envios:"sanciones_lote_envios", mails:"sanciones_mails", config:"sanciones_config", motivos:"sanciones_motivos"};
+// códigos (Id Motivo / codpla) que se sancionan: los de la tabla de motivos con Cuadro = "NO JUST"
+const slCodigosNoJust = motivos => new Set((motivos||[]).filter(m=>slNorm(m.cuadro)==="nojust" && String(m.codigo||"").trim()).map(m=>String(m.codigo).trim().toUpperCase()));
 // las tres del escalamiento (las únicas que se sugieren) y las demás medidas de la tabla del sistema, con su código (IDSancion)
 const SL_ESC = ["Apercibimiento","Severo Apercibimiento","Suspensión"];
 const SL_OTRAS = ["Amonestación","Llamado de atención","Pedido de Explicaciones","Comité de Salud"];
@@ -6042,6 +6044,88 @@ const SL_HIST_DIAS = 730;       // el historial guarda los últimos 2 años
 const SL_CFG_DEF = {asunto:"Sanciones por ausentismo – {gerencia} – {periodo}",
   intro:"Estimados, adjuntamos las notificaciones de sanción correspondientes a su gerencia para su firma y notificación al personal. A continuación el detalle:",
   cierre:"Saludos cordiales.\nRecursos Humanos."};
+// tabla de motivos por defecto (hoja TABLAS al 30/10/2026): [Nombre, Codigo, Concepto, Dia pago, Cuadro]
+const SL_MOTIVOS_DEF = [
+  ["Accidente de trabajo", "AT", "1037ES Lic. por Accidente", "Pago", "ART"],
+  ["Aislamiento Social Preventivo Obligatorio (S5)", "ASP", "ASP", "Pago", "VARIOS COVID"],
+  ["Ausente C/ Aviso", "CA", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "NO JUST"],
+  ["Ausente C/ Aviso Enfermedad", "CA", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "NO JUST"],
+  ["Ausente S/ Aviso", "SA", "1020ES Ausente sin Aviso", "No pago", "NO JUST"],
+  ["Baja", "BA", "", "No pago", "LIC VS"],
+  ["Cesante", "CE", "1025ES Dias no Trabajados", "No pago", "JUST"],
+  ["Citacion judicial", "CJ", "1031ES Lic. por Citac. Judic.", "Pago", "LIC VS"],
+  ["Compensa Horas", "COH", "", "Pres H.O.", "PRES"],
+  ["Con aviso Especial MTEySS 207/20 (S2)", "CAE", "", "No pago", "JUST"],
+  ["Con aviso Justificado", "CAJ", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Con aviso x Movilidad", "CAM", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Covid 19 Positivo", "C19", "", "Pago", "C19"],
+  ["Dia a Compensar", "DAC", "", "Pres H.O.", "PRES"],
+  ["Dia Compensado", "DC", "", "", "PRES"],
+  ["Dia de lluvia", "DL", "", "Pago", "LIC VS"],
+  ["Donación de sangre", "DS", "1030ES Lic. por Donac. Sangre", "Pago", "LIC VS"],
+  ["Enf Certif Digital", "ECD", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Enf Compatible Virus (S7)", "ECC", "", "Pago", "VARIOS COVID"],
+  ["Enfermedad", "EN", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Enfermedad Con Covid", "ECC", "1029ES Lic. por Enfermedad", "Pago", "ECC"],
+  ["Enfermedad Familiar Sgbatos Art 21", "EFS", "", "Pago", "LIC VS"],
+  ["Enfermedad trabajo (ET)", "ET", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Esposa enferma", "EE", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Examen", "EX", "1033ES Lic. por Examen", "Pago", "LIC VS"],
+  ["Excedencia", "ED", "1022ES Periodo Excedencia", "No pago", "LIC VS"],
+  ["Excedente de enfermedad", "EDE", "1019ES Lic. S/Goce sueldos", "No pago", "ENF"],
+  ["Fallecimiento", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento Padres", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento Hermano", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento suegros", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento abuelos", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Feriado", "FER", "", "Pago", "LIC VS"],
+  ["Franco", "FR", "", "Pago", "PRES"],
+  ["Franco compensatorio", "FC", "", "Pago", "LIC VS"],
+  ["Franco Motivo Empresa (S8)", "FPE", "", "Pago", "VARIOS COVID"],
+  ["Hijo enfermo", "HE", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Home Office Protocolo", "HOP", "", "Pres H.O.", "F HOP"],
+  ["Injustificado", "IN", "1020ES Ausente sin Aviso", "No pago", "NO JUST"],
+  ["Inundación", "IND", "", "Pago", "LIC VS"],
+  ["Jornada Parcial", "", "", "", "PRES"],
+  ["Jornada de Lluvia", "CE", "1025ES Dias no Trabajados", "No pago", "JUST"],
+  ["Lic Sanitaria Preventiva (S9)", "LSP", "", "Pago", "VARIOS COVID"],
+  ["Lic. Especial", "LE", "1036ES Lic. Especial", "Lic Esp Paga", "LIC VS"],
+  ["Lic. Grup. Riesgo MTEySS 207/20 (S1)", "LGR", "", "Pago", "LGR"],
+  ["Licencia por Vacuna contra Covid", "LVC", "", "Pago", "VARIOS COVID"],
+  ["Licencia Sin Goce de Haberes", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Maternidad", "MT", "1040ES Lic. por Maternidad", "No pago", "JUST"],
+  ["Matrimonio", "MA", "1039ES Lic. por Matrimonio", "Pago", "LIC VS"],
+  ["Mudanza", "MU", "1032ES Lic. por Mudanza", "Pago", "LIC VS"],
+  ["Mudanza (Sgbatos)", "MU", "1032ES Lic. por Mudanza", "Pago", "LIC VS"],
+  ["Nacimiento", "NAC", "1034ES Lic. por Nacimiento", "Pago", "LIC VS"],
+  ["No Convocado", "NC", "No Convocado", "Pago", "JUST"],
+  ["No informado", "NI", "1025ES Dias no Trabajados", "No pago", "NO JUST"],
+  ["Otro", "FR", "", "Pres H.O.", "PRES"],
+  ["P. Sindical", "PSI", "1038ES Lic. Gremial", "Pres H.O.", "PRES"],
+  ["Paro / huelga", "PH", "", "Pago", "LIC VS"],
+  ["Permiso con Goce", "PCG", "", "Pago", "LIC VS"],
+  ["Permiso Parcial C/Goce", "", "", "", "PRES"],
+  ["Permiso gremial", "PG", "1038ES Lic. Gremial", "Pres H.O.", "PRES"],
+  ["Permiso Sgbatos Art 20.1 (JRP)", "JRP", "", "Pago", "LIC VS"],
+  ["Permiso sin Goce", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Proceso Desvinculacion", "PRD", "", "", "PRD"],
+  ["Licencia con goce de haber", "", "", "Pago", "LIC VS"],
+  ["Pres Home Office", "PHO", "", "Pres H.O.", "F PHO"],
+  ["Pres Home Office (S3)", "PHO", "", "Pres H.O.", "PRES"],
+  ["Presente Gerente/Coordinador", "*", "", "Pago", "PRES"],
+  ["Presente Contratista", "PCT", "", "Pago", "PRES"],
+  ["Proceso Penal", "PRP", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Reserva de puesto", "RP", "1027ES Reserva de Puesto", "No pago", "JUST"],
+  ["Susp Esp L22250 (S4)", "SUE", "", "SUE", "VARIOS COVID"],
+  ["Suspension", "SUS", "1026ES Dias no Trab.Susp", "No pago", "SUSP"],
+  ["Suspension falta de trabajo", "SFT", "1025ES Dias no Trabajados", "Pago", "LIC VS"],
+  ["Suspension pendiente", "SP", "1026ES Dias no Trab.Susp", "No pago", "SUSP"],
+  ["Trabajo en Comisión", "TC", "", "Pago", "PRES"],
+  ["Tramites Registro", "TR", "", "Pago", "LIC VS"],
+  ["Vacaciones", "VAC", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "LIC VS"],
+  ["Vacaciones Pendientes", "VAP", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "PRES"],
+  ["Vacaciones (Pagas)", "VAP", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "PRES"]
+].map((r,i)=>({id:"D"+String(i+1).padStart(3,"0"), orden:i+1, nombre:r[0], codigo:r[1], concepto:r[2], dia_pago:r[3], cuadro:r[4]}));
 // en el Excel exportado la suspensión va como en el sistema ("Suspension")
 const slExportNombre = s => s==="Suspensión" ? "Suspension" : s;
 const slNorm = s => String(s==null ? "" : s).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
@@ -6337,6 +6421,9 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   const [mails, setMails] = useState([]);
   const [cfg, setCfg] = useState(SL_CFG_DEF);
   const [crSan, setCrSan] = useState(new Map());
+  // tabla de motivos: la guardada en el servidor; si todavía no hay (o falta el SQL), la de por defecto
+  const [motivos, setMotivos] = useState(SL_MOTIVOS_DEF);
+  const [motivosEstado, setMotivosEstado] = useState("def");   // "base" = guardada en el servidor · "def" = por defecto, sin guardar · "sintabla" = falta el SQL
   const [loteId, setLoteId] = useKeptState("sl.lote", "");
   const [vista, setVista] = useKeptState("sl.vista", "evaluar");
   const [nuevoDesde, setNuevoDesde] = useKeptState("sl.desde", "");
@@ -6363,8 +6450,13 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       setHist(h); setLotes(l); setItems(it); setEnvios(en); setMails(ml); setCfg(c); setError("");
     }catch(err){ if(aliveRef.current) setError(errTxt(err)); return false; }
     try{ const m = await loadSanciones(); if(aliveRef.current) setCrSan(m); }catch(e){ /* sin la tabla del menú Sanciones: no hay días que omitir por ese lado */ }
+    try{
+      const mo = await slFetchAll(SL_T.motivos, "id");
+      if(aliveRef.current){ if(mo.length){ setMotivos(mo.slice().sort((a,b)=>(a.orden||0)-(b.orden||0))); setMotivosEstado("base"); } else { setMotivos(SL_MOTIVOS_DEF); setMotivosEstado("def"); } }
+    }catch(e){ if(aliveRef.current){ setMotivos(SL_MOTIVOS_DEF); setMotivosEstado("sintabla"); } }
     return true;
   }
+  const codigosNoJust = useMemo(()=> slCodigosNoJust(motivos), [motivos]);
   useEffect(()=>{
     aliveRef.current = true;
     (async ()=>{
@@ -6451,16 +6543,21 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   }
   function buscarAusencias(desde, hasta, loteActualId){
     const ya = yaSancionadas(loteActualId);
-    const porLeg = new Map(), omit = [];
+    const porLeg = new Map(), omit = [], bajas = new Set();
     ((parsed && parsed.records) || []).forEach(r=>{
-      if(!r.valid || String(r.presidencia||"").trim().toUpperCase()!=="NO JUST") return;
+      if(!r.valid) return;
+      // se toma por el Id Motivo (codpla) según la tabla de motivos (Cuadro = NO JUST); si la fila no trae código, por el Agrupador cuadro presidencia
+      const cod = String(r.idMotivo||"").trim().toUpperCase();
+      if(cod ? !codigosNoJust.has(cod) : String(r.presidencia||"").trim().toUpperCase()!=="NO JUST") return;
       const iso = r.dateKey; if(!iso || iso<desde || iso>hasta) return;
       const k = slLeg(r.legajo); const y = ya.get(k);
+      // los legajos dados de baja (plantel con fecha de egreso ya cumplida) no se sancionan
+      const pl = plantelIdx.get(k); if(pl && pl.bajaTs!=null && pl.bajaTs<=Date.now()){ bajas.add(k); return; }
       if(y && y.has(iso)){ if(y.get(iso)!=="este lote") omit.push({legajo:r.legajo, nombre:r.nombre, fecha:iso, origen:y.get(iso)}); return; }
       if(!porLeg.has(k)) porLeg.set(k, {legajo:r.legajo, nombreR:r.nombre, sectorR:r.sector, gerenciaR:r.gerencia, unidadR:r.unidad, fechas:new Set()});
       porLeg.get(k).fechas.add(iso);
     });
-    return {porLeg, omit};
+    return {porLeg, omit, bajas:bajas.size};
   }
   function nuevoItem(idLote, c){
     const p = plantelIdx.get(slLeg(c.legajo));
@@ -6478,10 +6575,11 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     if(!parsed){ say("Todavía no hay datos de ausentismo cargados."); return; }
     setBusy("crear"); say("Buscando ausencias injustificadas…");
     try{
-      const {porLeg, omit} = buscarAusencias(desde, hasta, null);
+      const {porLeg, omit, bajas} = buscarAusencias(desde, hasta, null);
+      const txtBajas = bajas ? " · "+bajas+" legajo"+(bajas===1?"":"s")+" dado"+(bajas===1?"":"s")+" de baja no se incluye"+(bajas===1?"":"n") : "";
       if(!porLeg.size){
         setOmitidas(omit); setBusy("");
-        say("No hay ausencias injustificadas pendientes del "+isoToDMY(desde)+" al "+isoToDMY(hasta)+(omit.length ? " (las "+omit.length+" que hay ya tienen sanción)" : "")+". No se creó el lote.");
+        say("No hay ausencias injustificadas pendientes del "+isoToDMY(desde)+" al "+isoToDMY(hasta)+(omit.length ? " (las "+omit.length+" que hay ya tienen sanción)" : "")+txtBajas+". No se creó el lote.");
         return;
       }
       const id = "L"+desde.replace(/-/g,"")+"-"+hasta.replace(/-/g,"")+"-"+Date.now().toString(36);
@@ -6490,7 +6588,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       const rows = Array.from(porLeg.values()).map(c=>nuevoItem(id, c));
       if(rows.length) await upsertInBatches(SL_T.items, rows, "id");
       setLotes(p=>[...p, l]); setItems(p=>[...p, ...rows]); setLoteId(id); setVista("evaluar"); setOmitidas(omit);
-      say("Lote creado: "+rows.length+" empleado"+(rows.length===1?"":"s")+" con ausencias injustificadas"+(omit.length ? " · "+omit.length+" ausencia"+(omit.length===1?"":"s")+" omitida"+(omit.length===1?"":"s")+" por estar ya sancionada"+(omit.length===1?"":"s") : ""));
+      say("Lote creado: "+rows.length+" empleado"+(rows.length===1?"":"s")+" con ausencias injustificadas"+(omit.length ? " · "+omit.length+" ausencia"+(omit.length===1?"":"s")+" omitida"+(omit.length===1?"":"s")+" por estar ya sancionada"+(omit.length===1?"":"s") : "")+txtBajas);
     }catch(err){ say("No se pudo crear el lote: "+errTxt(err)+" (¿corriste supabase-migracion-sanciones-lote.sql?)"); }
     setBusy("");
   }
@@ -6511,7 +6609,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       const byId = new Map(rows.map(r=>[r.id, r]));
       setItems(p=>[...p.map(x=>byId.get(x.id) || x), ...rows.filter(r=>!p.some(x=>x.id===r.id))]);
       setOmitidas(omit);
-      say(rows.length ? "Se agregaron "+nFechas+" ausencia"+(nFechas===1?"":"s")+" ("+nNuevos+" empleado"+(nNuevos===1?"":"s")+" nuevo"+(nNuevos===1?"":"s")+")" : "No hay ausencias nuevas en el período.");
+      say(rows.length ? (nFechas===1 ? "Se agregó 1 ausencia (" : "Se agregaron "+nFechas+" ausencias (")+nNuevos+" empleado"+(nNuevos===1?"":"s")+" nuevo"+(nNuevos===1?"":"s")+")" : "No hay ausencias nuevas en el período.");
     }catch(err){ say("No se pudo actualizar el lote: "+errTxt(err)); }
     setBusy("");
   }
@@ -6533,7 +6631,8 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     const inf = infoLegajo(it.legajo);
     const p = plantelIdx.get(slLeg(it.legajo));
     return {it, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now()), empresa:(p && p.empresa) || empresaRec.get(slLeg(it.legajo)) || "(sin empresa)"};
-  }).sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")),
+  // los dados de baja no se muestran ni se sancionan (salvo que ya se hubiera enviado su sanción antes de la baja)
+  }).filter(f=>!f.baja || f.it.enviado_ts).sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")),
   [itemsLote, histIdx, plantelIdx, empresaRec]);
   const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
   const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
@@ -6635,7 +6734,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
         <div className="card table-card">
           <h3>Cómo se usa</h3>
           <div className="caption" style={{marginTop:0}}>
-            1) Elegí el período (por ejemplo del 17/10 al 31/10) y tocá «Buscar injustificadas y crear lote»: se toman las ausencias con Agrupador cuadro presidencia = NO JUST y se omiten las que ya tienen sanción (menú Sanciones o un lote anterior).
+            1) Elegí el período (por ejemplo del 17/10 al 31/10) y tocá «Buscar injustificadas y crear lote»: se toman las ausencias cuyo Id Motivo (codpla) figura como «NO JUST» en la tabla de motivos (abajo de todo), se dejan afuera los legajos dados de baja y se omiten las ausencias que ya tienen sanción (menú Sanciones o un lote anterior).
             2) En «Evaluar» tildás a quién sancionar; la sanción se sugiere según el historial y la podés cambiar. 3) En «Cartas» emitís las notas (imprimir, PDF o ZIP por sector). 4) En «Envíos» mandás por mail a cada gerencia y la marcás como «Enviado»: esas ausencias quedan sancionadas, con la fecha de envío.
           </div>
         </div>
@@ -6653,7 +6752,9 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
         esAdmin={esAdmin} periodo={periodo} periodoAuto={periodoAuto} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe} zipDe={zipDe} guardarItemsYa={guardarItemsYa}
         userRef={userRef} say={say} busy={busy} setBusy={setBusy} nombreBase={nombreBase} />}
 
-      <SlHistorial hist={hist} setHist={setHist} esAdmin={esAdmin} mails={mails} setMails={setMails} say={say} />
+      <SlHistorial hist={hist} setHist={setHist} esAdmin={esAdmin} mails={mails} setMails={setMails} say={say}
+        motivosEstado={motivosEstado} setMotivos={setMotivos} setMotivosEstado={setMotivosEstado} />
+      <SlMotivos motivos={motivos} setMotivos={setMotivos} estado={motivosEstado} setEstado={setMotivosEstado} esAdmin={esAdmin} say={say} />
     </div>
   );
 }
@@ -6998,8 +7099,92 @@ function SlEnvios({enLote, lote, envios, setEnvios, mails, setMails, cfg, setCfg
   );
 }
 
+/* ---- Tabla de motivos de ausencia: qué Id Motivo (codpla) se sanciona (Cuadro = NO JUST). La edita el Administrador. ---- */
+function SlMotivos({motivos, setMotivos, estado, setEstado, esAdmin, say}){
+  const [q, setQ] = useState("");
+  const [soloNJ, setSoloNJ] = useState(false);
+  const ref = useRef(motivos); ref.current = motivos;
+  const estRef = useRef(estado); estRef.current = estado;
+  const timers = useRef({});
+  const ro = !esAdmin || estado==="sintabla";
+  const nj = slCodigosNoJust(motivos);
+  const cuadros = Array.from(new Set(motivos.map(m=>m.cuadro).filter(Boolean))).sort((a,b)=>a.localeCompare(b,"es"));
+  // la primera vez que se edita, se guarda la tabla completa (hasta entonces es la de por defecto)
+  async function guardar(id){
+    const now = new Date().toISOString();
+    if(estRef.current!=="base"){
+      const {error} = await supabaseClient.from(SL_T.motivos).upsert(ref.current.map(m=>({...m, updated_at:now})));
+      if(error){ say("No se pudo guardar la tabla de motivos: "+error.message); return; }
+      setEstado("base"); say("Tabla de motivos guardada"); return;
+    }
+    const m = ref.current.find(x=>x.id===id); if(!m) return;
+    const {error} = await supabaseClient.from(SL_T.motivos).upsert({...m, updated_at:now});
+    say(error ? "No se pudo guardar el motivo: "+error.message : "Tabla de motivos guardada");
+  }
+  function cambiar(id, patch){
+    setMotivos(list=>list.map(m=>m.id===id ? {...m, ...patch} : m));
+    clearTimeout(timers.current[id]); timers.current[id] = setTimeout(()=>guardar(id), 700);
+  }
+  function agregar(){
+    const orden = ref.current.reduce((mx,m)=>Math.max(mx, m.orden||0), 0)+1;
+    const m = {id:"M"+Date.now().toString(36), orden, nombre:"", codigo:"", concepto:"", dia_pago:"", cuadro:"NO JUST"};
+    setMotivos(list=>[...list, m]); setQ(""); setSoloNJ(false);
+    clearTimeout(timers.current[m.id]); timers.current[m.id] = setTimeout(()=>guardar(m.id), 700);
+  }
+  async function quitar(m){
+    if(estRef.current==="base"){ const {error} = await supabaseClient.from(SL_T.motivos).delete().eq("id", m.id); if(error){ say("No se pudo quitar: "+error.message); return; } }
+    setMotivos(list=>list.filter(x=>x.id!==m.id));
+    if(estRef.current!=="base") setTimeout(()=>guardar(null), 60);
+    say("Motivo quitado: "+(m.nombre||m.codigo));
+  }
+  const qn = normTxt(q);
+  const lista = motivos.filter(m=>(!soloNJ || slNorm(m.cuadro)==="nojust") && (!qn || [m.nombre, m.codigo, m.concepto, m.cuadro].some(v=>normTxt(v).includes(qn))));
+  const celda = (m, k, w) => ro ? <span>{m[k]||""}</span>
+    : <input type="text" value={m[k]||""} style={{width:w, fontSize:12.5, padding:"4px 6px"}} list={k==="cuadro" ? "sl-cuadros" : undefined}
+        onChange={e=>cambiar(m.id, {[k]: k==="codigo" ? e.target.value.toUpperCase() : e.target.value})} />;
+  return (
+    <CollapsibleCard id="sl-motivos" title="Tipos de ausencia que se sancionan (tabla de motivos)"
+      summary={motivos.length+" motivos · se sancionan los códigos "+(Array.from(nj).join(", ")||"—")+(estado==="def" ? " · tabla por defecto" : "")}>
+      <div className="caption" style={{marginTop:0}}>
+        Al crear un lote se toman las ausencias cuyo <b>Id Motivo (codpla)</b> figura acá con <b>Cuadro = NO JUST</b> (si una fila no trae código, se usa el Agrupador cuadro presidencia).
+        Para sumar otro tipo de ausencia, poné «NO JUST» en su Cuadro o agregá un motivo nuevo. Los cambios valen para los lotes nuevos y para «Agregar ausencias nuevas del período».
+        También se puede reemplazar la tabla completa subiendo un Excel con la hoja TABLAS (Nombre | Codigo | Concepto | Dia pago | Cuadro) en «Historial de sanciones».
+        {ro && esAdmin ? "" : ro ? " La edita el Administrador." : ""}
+      </div>
+      {estado==="sintabla" && <div className="warn-banner">Se usa la tabla por defecto y no se puede editar: falta correr supabase-migracion-sanciones-lote-motivos.sql en Supabase.</div>}
+      <div style={{display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap"}}>
+        <div className="field"><label>Buscar</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Nombre, código o cuadro" style={{minWidth:220}} /></div>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}><input type="checkbox" checked={soloNJ} onChange={e=>setSoloNJ(e.target.checked)} /> Solo los que se sancionan (NO JUST)</label>
+        <span className="hint">Mostrando {lista.length} de {motivos.length}</span>
+      </div>
+      <datalist id="sl-cuadros">{cuadros.map(c=>(<option key={c} value={c} />))}</datalist>
+      <div className="overflow-x" style={{maxHeight:520, overflowY:"auto"}}>
+        <table>
+          <thead><tr><th>Nombre</th><th>Código</th><th>Concepto</th><th>Día pago</th><th>Cuadro</th><th>¿Se sanciona?</th>{!ro && <th></th>}</tr></thead>
+          <tbody>
+            {lista.map(m=>{ const san = slNorm(m.cuadro)==="nojust";
+              return (
+                <tr key={m.id} style={san ? {background:"color-mix(in srgb, var(--critical) 8%, transparent)"} : undefined}>
+                  <td>{celda(m, "nombre", 230)}</td>
+                  <td>{celda(m, "codigo", 60)}</td>
+                  <td>{celda(m, "concepto", 230)}</td>
+                  <td>{celda(m, "dia_pago", 90)}</td>
+                  <td>{celda(m, "cuadro", 120)}</td>
+                  <td style={{fontWeight:700, color:san ? "var(--critical)" : "var(--muted)"}}>{san ? (m.codigo ? "Sí" : "Sí (falta el código)") : "—"}</td>
+                  {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitar(m)}>Quitar</button></td>}
+                </tr>
+              ); })}
+            {!lista.length && <tr><td colSpan="7" className="hint">Ningún motivo con este filtro.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {!ro && <div><button type="button" className="btn secondary small" onClick={agregar}>+ Agregar tipo de ausencia</button></div>}
+    </CollapsibleCard>
+  );
+}
+
 /* ---- Historial de sanciones (Excel SANCION del sistema) y carga de mails ---- */
-function SlHistorial({hist, setHist, esAdmin, mails, setMails, say}){
+function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstado, setMotivos, setMotivosEstado}){
   const [prog, setProg] = useState("");
   const [resumen, setResumen] = useState(null);
   const inp = useRef(null);
@@ -7010,12 +7195,13 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say}){
     setResumen(null); setProg("Leyendo "+file.name+"…");
     try{
       const hojas = await slLeerHojas(file);
-      let sanRows = null, mailRows = null;
+      let sanRows = null, mailRows = null, motRows = null;
       hojas.forEach(aoa=>{
         if(!sanRows){ const t = slTabla(aoa, H=>H.has("idsancion") || (H.has("aplicada") && (H.has("diasdesuspencion") || H.has("diasdesuspension")))); if(t) sanRows = t; }
         if(!mailRows){ const t = slTabla(aoa, H=>H.has("gerencia") && (H.has("mails") || H.has("mail")) && !H.has("legajo")); if(t) mailRows = t; }
+        if(!motRows){ const t = slTabla(aoa, H=>H.has("nombre") && H.has("codigo") && H.has("cuadro") && !H.has("legajo")); if(t) motRows = t; }
       });
-      if(!sanRows && !mailRows){ setProg(""); say("No encontré una hoja de sanciones (columna «Id Sancion») ni de mails (Gerencia | Mails | CC) en "+file.name+"."); return; }
+      if(!sanRows && !mailRows && !motRows){ setProg(""); say("No encontré una hoja de sanciones (columna «Id Sancion»), de mails (Gerencia | Mails | CC) ni la tabla de motivos (TABLAS) en "+file.name+"."); return; }
       const out = {};
       if(sanRows){
         const actual = new Map(hist.map(h=>[h.id_sancion, h]));
@@ -7045,6 +7231,19 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say}){
         if(filas.length){ const {error} = await supabaseClient.from(SL_T.mails).upsert(filas); if(error) throw error; setMails(await slFetchAll(SL_T.mails, "gerencia")); }
         out.mails = filas.length;
       }
+      // tabla de motivos (hoja TABLAS): reemplaza la tabla completa
+      if(motRows && motivosEstado!=="sintabla"){
+        const now = new Date().toISOString();
+        const filas = motRows.map(r=>({nombre:slTxt(slG(r,"nombre")), codigo:slTxt(slG(r,"codigo")).toUpperCase(), concepto:slTxt(slG(r,"concepto")), dia_pago:slTxt(slG(r,"diapago")), cuadro:slTxt(slG(r,"cuadro"))}))
+          .filter(m=>m.nombre || m.codigo).map((m,i)=>({...m, nombre:m.nombre.replace("Inundaci¾"+"n","Inundación"), id:"T"+String(i+1).padStart(3,"0"), orden:i+1, updated_at:now}));
+        if(filas.length){
+          const {error:eD} = await supabaseClient.from(SL_T.motivos).delete().neq("id", ""); if(eD) throw eD;
+          const {error:eI} = await supabaseClient.from(SL_T.motivos).insert(filas); if(eI) throw eI;
+          setMotivos(filas); setMotivosEstado("base");
+        }
+        out.motivos = filas.length;
+      }
+      if(motRows && motivosEstado==="sintabla") out.motivosSinTabla = true;
       setResumen(out); setProg("");
       say("Carga terminada");
     }catch(err){ setProg(""); say("No se pudo cargar: "+((err&&err.message)||err)); }
@@ -7068,6 +7267,8 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say}){
         <div className="hint" style={{color:"var(--ink)"}}>
           {resumen.leidas!=null && <div>Sanciones leídas: <b>{fmt(resumen.leidas)}</b> · nuevas <b>{fmt(resumen.nuevas)}</b> · reemplazadas por cambios <b>{fmt(resumen.cambiadas)}</b> · sin cambios {fmt(resumen.iguales)} · descartadas por tener más de 2 años {fmt(resumen.viejas)} · total guardado <b>{fmt(resumen.total)}</b></div>}
           {resumen.mails!=null && <div>Mails por gerencia cargados: <b>{resumen.mails}</b></div>}
+          {resumen.motivos!=null && <div>Tabla de motivos reemplazada: <b>{resumen.motivos}</b> motivos (ver «Tipos de ausencia que se sancionan»)</div>}
+          {resumen.motivosSinTabla && <div style={{color:"var(--critical)"}}>El archivo trae la hoja TABLAS, pero no se cargó: falta correr supabase-migracion-sanciones-lote-motivos.sql.</div>}
         </div>
       )}
     </CollapsibleCard>
