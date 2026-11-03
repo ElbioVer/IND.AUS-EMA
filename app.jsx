@@ -6627,6 +6627,29 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   /* ---- filas del lote ---- */
   // empresa de cada legajo: del plantel o, si no está, de las filas de ausentismo (nombres ya unificados por withCanonEmpresa)
   const empresaRec = useMemo(()=>{ const m = new Map(); ((parsed && parsed.records) || []).forEach(r=>{ if(r.empresa) m.set(slLeg(r.legajo), r.empresa); }); return m; }, [parsed]);
+  // codpla actual de cada ausencia (legajo|fecha) en la base del Radar: sirve para ver si la base cambió después de armar el lote
+  const codIdx = useMemo(()=>{ const m = new Map(); ((parsed && parsed.records) || []).forEach(r=>{ if(r.valid && r.dateKey) m.set(slLeg(r.legajo)+"|"+r.dateKey, {cod:String(r.idMotivo||"").trim().toUpperCase(), pres:String(r.presidencia||"").trim().toUpperCase(), motivo:r.motivo||""}); }); return m; }, [parsed]);
+  // estado de una fecha del lote: cod (codpla actual) y ok (sigue siendo sancionable). Sin fila en la base: ok=false, sinDato=true
+  const fechaInfo = (leg, iso) => {
+    const x = codIdx.get(slLeg(leg)+"|"+iso);
+    if(!x) return {cod:"", ok:false, sinDato:true, motivo:""};
+    return {cod:x.cod || x.pres, ok: x.cod ? codigosNoJust.has(x.cod) : x.pres==="NO JUST", sinDato:false, motivo:x.motivo};
+  };
+  // saca del lote las fechas que ya no son sancionables según la base actual (no toca las ya enviadas); si a alguien no le queda ninguna, lo omite con el motivo
+  function quitarNoSancionables(){
+    const p = {}; let nF = 0, nE = 0;
+    itemsLote.forEach(it=>{
+      if(it.enviado_ts) return;
+      const quedan = (it.fechas||[]).filter(d=>fechaInfo(it.legajo, d).ok);
+      if(quedan.length===(it.fechas||[]).length) return;
+      nF += (it.fechas||[]).length-quedan.length;
+      if(quedan.length) p[it.id] = {fechas:quedan};
+      else { nE++; p[it.id] = {fechas:it.fechas, incluir:false, motivo_omision:"Sin ausencias NO JUST: la base se actualizó ("+(it.fechas||[]).map(d=>isoToDMY(d).slice(0,5)+" "+(fechaInfo(it.legajo,d).cod||"sin dato")).join(", ")+")"}; }
+    });
+    if(!nF){ say("Todas las fechas del lote siguen siendo NO JUST en la base."); return; }
+    updItems(p);
+    say("Se quitaron "+nF+" fecha"+(nF===1?"":"s")+" que ya no son sancionables"+(nE ? "; "+nE+" empleado"+(nE===1?"":"s")+" quedó"+(nE===1?"":"aron")+" omitido"+(nE===1?"":"s")+" por no tener ninguna" : "")+".");
+  }
   const filas = useMemo(()=> itemsLote.map(it=>{
     const inf = infoLegajo(it.legajo);
     const p = plantelIdx.get(slLeg(it.legajo));
@@ -6741,6 +6764,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       )}
 
       {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
+        fechaInfo={fechaInfo} quitarNoSancionables={quitarNoSancionables}
         textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
           const k = slLeg(leg); const out = [];
           crSan.forEach(s=>{ if(slLeg(s.legajo)===k && s.estado==="emitida") out.push("Menú Sanciones: "+(s.medida||"sanción")+(s.emitidaTs ? " emitida "+new Date(s.emitidaTs).toLocaleDateString("es-AR") : "")); });
@@ -6760,7 +6784,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
 }
 
 /* ---- 1. Evaluar ---- */
-function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio}){
+function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, quitarNoSancionables}){
   const [q, setQ] = useKeptState("sl.q", "");
   const [gers, setGers] = useKeptState("sl.gers", null);
   const [sectores, setSectores] = useKeptState("sl.sectores", null);
@@ -6809,6 +6833,17 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
     <React.Fragment>
       {/* fila omitida: se atenúa todo menos la tilde y el legajo (donde va el motivo, en rojo) */}
       <style>{".sl-off > td:nth-child(n+3){opacity:.5}"}</style>
+      {(()=>{
+        // fechas del lote que, con la base de hoy, ya no son sancionables (cambió el codpla o la ausencia ya no está)
+        const malas = []; filas.forEach(f=>{ if(f.it.enviado_ts) return; (f.it.fechas||[]).forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); if(!fi.ok) malas.push(f.it.legajo+" "+isoToDMY(d).slice(0,5)+" ("+(fi.sinDato ? "sin dato" : fi.cod||"—")+")"); }); });
+        if(!malas.length) return null;
+        return (
+          <div className="warn-banner" style={{flexWrap:"wrap"}}>
+            <span>{malas.length} fecha{malas.length===1?"":"s"} del lote ya no figura{malas.length===1?"":"n"} como NO JUST en la base actual (se actualizó después de armar el lote): {malas.slice(0,8).join(" · ")}{malas.length>8 ? " …" : ""}</span>
+            <button type="button" className="btn small" style={{background:"var(--critical)"}} onClick={quitarNoSancionables} title="Saca esas fechas del lote; si a alguien no le queda ninguna, queda omitido con el motivo">Quitar esas fechas del lote</button>
+          </div>
+        );
+      })()}
       {bloqueados.length>0 && <div className="warn-banner" style={{flexDirection:"column", alignItems:"flex-start"}}>
         <span>{bloqueados.length} empleado{bloqueados.length>1?"s":""} superaría{bloqueados.length>1?"n":""} los {SL_LIMITE_DIAS} días de suspensión firmados en 12 meses. No se {bloqueados.length>1?"les":"le"} emite nota: corresponde evaluar la desvinculación por cúmulo de sanciones.</span>
         <span style={{fontWeight:400}}>{bloqueados.map(f=>f.it.legajo+" "+f.it.nombre+" ("+f.diasAnio+" + "+slDias(f.it)+" = "+(f.diasAnio+slDias(f.it))+")").join(" · ")}</span>
@@ -6862,7 +6897,16 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
                       <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}
                         {!it.incluir && <SlOmision it={it} onSave={v=>updItem(it.id, {motivo_omision:v})} />}</td>
                       <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
-                      <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:230}}>{(it.fechas||[]).map(x=>(<span key={x} className="hint" style={{border:"1px solid var(--border)", borderRadius:8, padding:"1px 6px", color:"var(--ink)"}}>{isoToDMY(x)}</span>))}</div></td>
+                      <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:250}}>{(it.fechas||[]).map(x=>{
+                        // debajo de cada fecha, chiquito, el codpla que tiene HOY en la base; en rojo si ya no es NO JUST (base actualizada después de armar el lote)
+                        const fi = fechaInfo(it.legajo, x), mal = !fi.ok;
+                        return (
+                          <span key={x} title={fi.sinDato ? "Esta fecha ya no figura como ausencia en la base del Radar" : (fi.motivo ? fi.cod+" — "+fi.motivo : fi.cod)+(mal ? " · ya NO es NO JUST: revisar" : "")}
+                            style={{display:"inline-flex", flexDirection:"column", alignItems:"center", lineHeight:1.15, border:"1px solid "+(mal ? "var(--critical)" : "var(--border)"), borderRadius:8, padding:"2px 6px", fontSize:12, color:mal ? "var(--critical)" : "var(--ink)"}}>
+                            <span>{isoToDMY(x)}</span>
+                            <span style={{fontSize:9.5, fontWeight:700, letterSpacing:".04em", color:mal ? "var(--critical)" : "var(--muted)"}}>{fi.sinDato ? "SIN DATO" : (fi.cod||"—")}{mal ? " ⚠" : ""}</span>
+                          </span>
+                        ); })}</div></td>
                       <td style={{verticalAlign:"top", minWidth:170}}>{f.ultima ? <React.Fragment><b style={{color:slChipColor(f.ultima.sancion)}}>{f.ultima.sancion}</b><div className="hint">{isoToDMY(f.ultima.fecha_creado)}{Number(f.ultima.dias) ? " · "+f.ultima.dias+" d" : ""}</div></React.Fragment> : <span className="hint">Sin antecedentes</span>}
                         {prev.map((t,i)=>(<div key={i} className="hint" style={{color:"var(--warning)"}} title="Emitida en el Radar; todavía no figura firmada en el historial">{t}</div>))}</td>
                       <td style={{verticalAlign:"top", textAlign:"right", fontWeight:f.diasAnio>=20 ? 700 : 400, color:f.diasAnio>=SL_LIMITE_DIAS ? "var(--critical)" : f.diasAnio>=20 ? "var(--warning)" : undefined}}>{f.diasAnio||0}</td>
