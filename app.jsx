@@ -7263,13 +7263,19 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstad
       if(sanRows){
         const actual = new Map(hist.map(h=>[h.id_sancion, h]));
         const campos = ["legajo","empleado","nombre","sancion","motivo","fecha_creado","dias","fecha_sancion","nivel","sector","fecha_firma","aplicada"];
-        let viejas = 0, nuevas = 0, cambiadas = 0, iguales = 0; const subir = [];
+        let viejas = 0, nuevas = 0, cambiadas = 0, iguales = 0, desdeEmpleado = 0, sinLegajo = 0; const subir = [];
         sanRows.forEach(r=>{
+          // sin columna Legajo (o vacía): el legajo son los números del principio de «Empleado» ("9284 GIMENEZ. CRISTIAN", "009284-GIMENEZ", "9284GIMENEZ")
+          // y el nombre, lo que sigue; si hay columnas Legajo / Nombre con dato, mandan esas
           const emp = slTxt(slG(r,"empleado"));
-          const o = {legajo:slLeg(slG(r,"legajo") || emp.split(/\s+/)[0]), empleado:emp, nombre:slTxt(slG(r,"nombre")), sancion:slTxt(slG(r,"sancion")), motivo:slTxt(slG(r,"motivo")),
+          const me = emp.match(/^\s*0*(\d+)\s*[-–—.,:;|]?\s*(.*)$/);
+          const legCol = slLeg(slG(r,"legajo"));
+          const legajo = /^\d+$/.test(legCol) ? legCol : (me ? String(parseInt(me[1],10)) : legCol);
+          if(!/^\d+$/.test(legCol) && me) desdeEmpleado++;
+          const o = {legajo, empleado:emp, nombre:slTxt(slG(r,"nombre")) || (me ? me[2].trim() : ""), sancion:slTxt(slG(r,"sancion")), motivo:slTxt(slG(r,"motivo")),
             fecha_creado:slIso(slG(r,"fechacreado")), dias:Number(String(slG(r,"diasdesuspencion","diasdesuspension")).replace(",","."))||0, fecha_sancion:slIso(slG(r,"fechasancion")),
             nivel:slTxt(slG(r,"niveldegravedad")), sector:slTxt(slG(r,"sector")), fecha_firma:slIso(slG(r,"fechafirma")), aplicada:slTxt(slG(r,"aplicada"))};
-          if(!o.legajo) return;
+          if(!o.legajo){ sinLegajo++; return; }
           o.id_sancion = slTxt(slG(r,"idsancion")) || (o.legajo+"|"+(o.fecha_creado||"")+"|"+slNorm(o.sancion));
           if(o.fecha_creado && o.fecha_creado<corte){ viejas++; return; }
           const prev = actual.get(o.id_sancion);
@@ -7281,7 +7287,7 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstad
         if(subir.length){ setProg("Guardando "+subir.length+" sanciones…"); await upsertInBatches(SL_T.hist, subir, "id_sancion", (d,t)=>setProg("Guardando sanciones… "+d+"/"+t)); }
         const {error:eDel} = await supabaseClient.from(SL_T.hist).delete().lt("fecha_creado", corte); if(eDel) throw eDel;
         const todas = await slFetchAll(SL_T.hist, "id_sancion"); setHist(todas);
-        Object.assign(out, {leidas:sanRows.length, nuevas, cambiadas, iguales, viejas, total:todas.length});
+        Object.assign(out, {leidas:sanRows.length, nuevas, cambiadas, iguales, viejas, total:todas.length, desdeEmpleado, sinLegajo});
       }
       if(mailRows){
         const filas = mailRows.map(r=>({gerencia:slTxt(slG(r,"gerencia")), mails:slTxt(slG(r,"mails","mail","emails")), cc:slTxt(slG(r,"cc")), updated_at:new Date().toISOString()})).filter(r=>r.gerencia);
@@ -7323,6 +7329,8 @@ function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstad
       {resumen && (
         <div className="hint" style={{color:"var(--ink)"}}>
           {resumen.leidas!=null && <div>Sanciones leídas: <b>{fmt(resumen.leidas)}</b> · nuevas <b>{fmt(resumen.nuevas)}</b> · reemplazadas por cambios <b>{fmt(resumen.cambiadas)}</b> · sin cambios {fmt(resumen.iguales)} · descartadas por tener más de 2 años {fmt(resumen.viejas)} · total guardado <b>{fmt(resumen.total)}</b></div>}
+          {resumen.desdeEmpleado>0 && <div>Legajo tomado de los números del principio de «Empleado» en <b>{fmt(resumen.desdeEmpleado)}</b> sanciones (el archivo no trae la columna Legajo o venía vacía).</div>}
+          {resumen.sinLegajo>0 && <div style={{color:"var(--critical)"}}><b>{fmt(resumen.sinLegajo)}</b> filas no se cargaron porque no tienen legajo (ni columna Legajo ni número al principio de «Empleado»).</div>}
           {resumen.mails!=null && <div>Mails por gerencia cargados: <b>{resumen.mails}</b></div>}
           {resumen.motivos!=null && <div>Tabla de motivos reemplazada: <b>{resumen.motivos}</b> motivos (ver «Tipos de ausencia que se sancionan»)</div>}
           {resumen.motivosSinTabla && <div style={{color:"var(--critical)"}}>El archivo trae la hoja TABLAS, pero no se cargó: falta correr supabase-migracion-sanciones-lote-motivos.sql.</div>}
