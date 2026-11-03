@@ -66,3 +66,4 @@ Para publicar un cambio: subir los archivos modificados al repositorio (*Add fil
 create index if not exists ausentismo_registros_updated_at_idx on public.ausentismo_registros (updated_at);
 create index if not exists plantel_empleados_updated_at_idx on public.plantel_empleados (updated_at);
 ```
+
