@@ -5948,7 +5948,7 @@ function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeC
    las notas en PDF (cada una con el nombre del empleado y la sanción). RRHH ve la lista pero no define ni emite. */
 function localISO(ts){ const d = new Date(ts); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
 const SANCION_ESTADOS = {marcada:{txt:"Pendiente de definir", color:"var(--warning)"}, definida:{txt:"Definida: lista para emitir", color:"var(--accent)"}, emitida:{txt:"Emitida", color:"var(--good)"}};
-function SancionesTab({plantel, puedeDefinir, esAdmin}){
+function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
   const [sanciones, setSanciones] = useState(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -6077,6 +6077,7 @@ function SancionesTab({plantel, puedeDefinir, esAdmin}){
         <span className="hint">{status}</span>
       </div>
       {error && <div className="warn-banner">No se pudieron leer las sanciones ({error}). ¿Ya corriste supabase-migracion-sanciones-menu.sql en Supabase?</div>}
+      <SlAntecedentes plantel={plantel} parsed={parsed} />
 
       <div className="card table-card">
         <h3>Sanciones ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
@@ -6881,6 +6882,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       </div>
       {error && <div className="warn-banner">{sinTablas ? "Falta crear las tablas de Sanciones por lote: corré supabase-migracion-sanciones-lote.sql en el SQL Editor de Supabase." : "No se pudieron leer los datos ("+error+")."}</div>}
       {loading && <div className="card table-card"><div className="hint">Cargando…</div></div>}
+      <SlAntecedentes plantel={plantel} parsed={parsed} hist={hist} items={items} lotes={lotes} crSan={crSan} codigosNoJust={codigosNoJust} />
 
       {lote && (
         <div className="card controls" style={{paddingTop:12, paddingBottom:12}}>
@@ -7305,6 +7307,141 @@ function SlEnvios({enLote, lote, envios, setEnvios, mails, setMails, cfg, setCfg
 }
 
 /* ---- Tabla de motivos de ausencia: qué Id Motivo (codpla) se sanciona (Cuadro = NO JUST). La edita el Administrador. ---- */
+/* ---- Antecedentes de un empleado (menús Sanciones y Sanciones por lote) ----
+   Buscador por legajo o nombre: historial del sistema (últimos 2 años), lo hecho en el Radar (lotes: enviadas, omitidas con motivo, en curso; menú
+   Sanciones), días de suspensión firmados en 12 meses frente al tope de 30, la próxima sanción según la escala y las ausencias NO JUST de los últimos
+   12 meses. Si no recibe los datos por props (menú Sanciones), los lee recién la primera vez que se busca. */
+function SlAntecedentes({plantel, parsed, hist, items, lotes, crSan, codigosNoJust}){
+  const propio = hist===undefined;
+  const [q, setQ] = useKeptState("ant.q", "");
+  const [leg, setLeg] = useKeptState("ant.leg", "");
+  const [datos, setDatos] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  useEffect(()=>{
+    if(!propio || datos || cargando || (!q && !leg)) return;
+    let vivo = true; setCargando(true);
+    (async ()=>{
+      const out = {hist:[], items:[], lotes:[], crSan:new Map(), motivos:SL_MOTIVOS_DEF};
+      try{ out.hist = await slFetchAll(SL_T.hist, "id_sancion"); }catch(e){}
+      try{ out.items = await slFetchAll(SL_T.items, "id"); }catch(e){}
+      try{ out.lotes = await slFetchAll(SL_T.lotes, "id"); }catch(e){}
+      try{ out.crSan = await loadSanciones(); }catch(e){}
+      try{ const mo = await slFetchAll(SL_T.motivos, "id"); if(mo.length) out.motivos = mo; }catch(e){}
+      if(vivo){ setDatos(out); setCargando(false); }
+    })();
+    return ()=>{ vivo = false; };
+  }, [q, leg]);
+  const H = propio ? (datos ? datos.hist : []) : hist;
+  const IT = propio ? (datos ? datos.items : []) : (items||[]);
+  const LO = propio ? (datos ? datos.lotes : []) : (lotes||[]);
+  const CR = propio ? (datos ? datos.crSan : new Map()) : (crSan||new Map());
+  const NJ = propio ? slCodigosNoJust(datos ? datos.motivos : SL_MOTIVOS_DEF) : (codigosNoJust||slCodigosNoJust(SL_MOTIVOS_DEF));
+  // personas para buscar: plantel + historial (por si ya no está en el plantel)
+  const personas = useMemo(()=>{
+    const m = new Map();
+    (plantel||[]).forEach(p=>{ const k = slLeg(p.legajo); if(k) m.set(k, {legajo:k, nombre:p.nombre||"", p}); });
+    H.forEach(h=>{ const k = slLeg(h.legajo); if(k && !m.has(k)) m.set(k, {legajo:k, nombre:h.nombre||String(h.empleado||"").replace(/^\s*\d+\s*[-.]?\s*/,""), p:null}); });
+    return Array.from(m.values());
+  }, [plantel, H]);
+  const qn = normTxt(q);
+  const coincidencias = !qn ? [] : personas.filter(x=> /^\d+$/.test(qn) ? x.legajo.startsWith(String(parseInt(qn,10))) : normTxt(x.nombre).includes(qn)).slice(0, 8);
+  const sel = leg ? (personas.find(x=>x.legajo===leg) || {legajo:leg, nombre:"", p:null}) : null;
+  const hoy = localISO(Date.now()), lim = slAddDays(hoy, -365);
+  const info = useMemo(()=>{
+    if(!sel) return null;
+    const h = H.filter(x=>slLeg(x.legajo)===sel.legajo).sort((a,b)=>String(b.fecha_creado||"").localeCompare(String(a.fecha_creado||"")));
+    const ultima = h.find(s=>slNorm(s.aplicada)==="si" && slNorm(s.motivo).startsWith("ausencia")) || null;
+    const diasAnio = h.filter(s=>slNorm(s.aplicada)==="si" && s.fecha_creado && s.fecha_creado>=lim).reduce((t,s)=>t+(Number(s.dias)||0), 0);
+    const radar = [];
+    IT.filter(it=>slLeg(it.legajo)===sel.legajo).forEach(it=>{
+      const l = LO.find(x=>x.id===it.lote_id);
+      radar.push({orden:(it.fechas||[])[0]||"", origen:"Lote "+slLoteNombre(l), fechas:it.fechas||[], sancion:it.incluir ? slSanTxt(it.sancion, Number(it.dias)||1) : "—",
+        estado: !it.incluir ? "✎ No sancionada: "+(it.motivo_omision||"sin motivo") : it.enviado_ts ? "✔ Enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR") : "• En lote, sin enviar",
+        color: !it.incluir ? "var(--warning)" : it.enviado_ts ? "var(--good)" : "var(--accent)", n:it.n_interno||""});
+    });
+    CR.forEach(s=>{ if(slLeg(s.legajo)!==sel.legajo) return; const f = diasDeSancion(s);
+      radar.push({orden:f[0]||"", origen:"Menú Sanciones", fechas:f, sancion:s.medida ? (s.medida+(s.medida==="Suspensión" && s.diasSuspension ? " "+s.diasSuspension+" d" : "")) : "—",
+        estado: s.estado==="emitida" ? "✔ Emitida "+(s.emitidaTs ? new Date(s.emitidaTs).toLocaleDateString("es-AR") : "") : ((SANCION_ESTADOS[s.estado]||{}).txt||s.estado),
+        color: s.estado==="emitida" ? "var(--good)" : "var(--accent)", n:s.nInterno||""}); });
+    radar.sort((a,b)=>String(b.orden).localeCompare(String(a.orden)));
+    // ausencias NO JUST de los últimos 12 meses en la base del Radar
+    const aus = ((parsed && parsed.records)||[]).filter(r=>r.valid && slLeg(r.legajo)===sel.legajo && r.dateKey>=lim && (()=>{ const c = String(r.idMotivo||"").trim().toUpperCase(); return c ? NJ.has(c) : cuadroPres(r)==="NO JUST"; })())
+      .map(r=>({fecha:r.dateKey, cod:String(r.idMotivo||"").toUpperCase()})).sort((a,b)=>b.fecha.localeCompare(a.fecha));
+    // sanciones ya enviadas/emitidas desde el Radar DESPUÉS del último registro del historial: todavía no figuran firmadas, pero conviene tenerlas en
+    // cuenta. Se muestra cómo quedaría la escala si se firman (no cambia la sugerencia oficial, que sale del historial).
+    const ultHist = h.length ? String(h[0].fecha_creado||"") : "";
+    const post = [];
+    IT.forEach(it=>{ if(slLeg(it.legajo)===sel.legajo && it.incluir && it.enviado_ts && localISO(it.enviado_ts)>ultHist) post.push({ts:it.enviado_ts, sancion:it.sancion, dias:slDias(it)}); });
+    CR.forEach(s=>{ if(slLeg(s.legajo)===sel.legajo && s.estado==="emitida" && s.emitidaTs && localISO(s.emitidaTs)>ultHist && s.motivoSancion!=="control") post.push({ts:s.emitidaTs, sancion:s.medida||"", dias:s.medida==="Suspensión" ? (s.diasSuspension||1) : 0}); });
+    post.sort((a,b)=>b.ts-a.ts);
+    const diasPost = post.filter(x=>localISO(x.ts)>=lim).reduce((t,x)=>t+(x.dias||0), 0);
+    const sugConRadar = post.length ? slSugerir({sancion:post[0].sancion, dias:post[0].dias}, diasAnio+diasPost) : null;
+    return {h, ultima, diasAnio, sug:slSugerir(ultima, diasAnio), radar, aus, post, diasPost, sugConRadar};
+  }, [sel && sel.legajo, H, IT, LO, CR, parsed, NJ]);
+  const p = sel && sel.p;
+  const baja = p && p.bajaTs!=null && p.bajaTs<=Date.now();
+  const quedan = info ? Math.max(0, SL_LIMITE_DIAS-info.diasAnio) : 0;
+  const elegir = x => { setLeg(x.legajo); setQ(x.legajo+" "+x.nombre); };
+  return (
+    <CollapsibleCard id="sl-antecedentes" title="Antecedentes de un empleado" summary={sel ? sel.legajo+" "+(sel.nombre||"") : "buscá por legajo o nombre"}>
+      <div style={{display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap", position:"relative"}}>
+        <div className="field" style={{flex:"1 1 280px", maxWidth:420, position:"relative"}}>
+          <label>Legajo o nombre</label>
+          <input type="text" value={q} placeholder="Ej.: 9957 o Cifarelli" onChange={e=>{ setQ(e.target.value); setLeg(""); }}
+            onKeyDown={e=>{ if(e.key==="Enter" && coincidencias.length) elegir(coincidencias[0]); }} />
+          {!leg && coincidencias.length>0 && (
+            <div className="card" style={{position:"absolute", top:"100%", left:0, right:0, zIndex:40, marginTop:4, padding:4, display:"flex", flexDirection:"column"}}>
+              {coincidencias.map(x=>(
+                <button key={x.legajo} type="button" onClick={()=>elegir(x)} style={{all:"unset", cursor:"pointer", padding:"6px 8px", borderRadius:6, fontSize:13}}
+                  onMouseEnter={e=>e.currentTarget.style.background="var(--plane)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <b>{x.legajo}</b> {x.nombre}{x.p && x.p.sector ? <span className="hint"> · {x.p.sector}</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {(q || leg) && <button type="button" className="btn secondary small" onClick={()=>{ setQ(""); setLeg(""); }}>Limpiar</button>}
+        {cargando && <span className="hint">Leyendo antecedentes…</span>}
+        {qn && !leg && !coincidencias.length && !cargando && <span className="hint">Nadie con ese legajo o nombre.</span>}
+      </div>
+      {sel && info && (
+        <div style={{display:"flex", flexDirection:"column", gap:10, marginTop:6}}>
+          <div style={{display:"flex", gap:"6px 16px", flexWrap:"wrap", alignItems:"baseline"}}>
+            <b style={{fontSize:15}}>{sel.legajo} · {sel.nombre||"(sin nombre)"}</b>
+            {p ? <span className="hint">{[p.sector, p.gerencia, p.unidad].filter(Boolean).join(" · ")}</span> : <span className="hint" style={{color:"var(--critical)"}}>no figura en el plantel</span>}
+            {baja && <span className="hint" style={{color:"var(--critical)", fontWeight:700}}>dado de baja {fmtDateFromTs(p.bajaTs)}</span>}
+          </div>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(190px, 1fr))", gap:10}}>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Última sanción firmada por ausencia</div>
+              {info.ultima ? <div><b style={{color:slChipColor(info.ultima.sancion)}}>{info.ultima.sancion}</b>{Number(info.ultima.dias) ? " · "+info.ultima.dias+" d" : ""}<div className="hint">{isoToDMY(info.ultima.fecha_creado)}</div></div> : <b>Sin antecedentes</b>}</div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Días de suspensión firmados (12 meses)</div>
+              <b style={{color:info.diasAnio>=SL_LIMITE_DIAS ? "var(--critical)" : info.diasAnio>=20 ? "var(--warning)" : undefined}}>{info.diasAnio} de {SL_LIMITE_DIAS}</b>
+              <div className="hint">{quedan ? "Le quedan "+quedan+" día"+(quedan===1?"":"s")+" antes del tope" : "Llegó al tope: corresponde evaluar desvinculación"}</div></div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Próxima según la escala</div>
+              <b style={{color:info.sug.excede ? "var(--critical)" : undefined}}>{slSanTxt(info.sug.sancion, info.sug.dias)}</b>
+              <div className="hint">{info.sug.excede ? "Supera los 30 días: no se emite" : info.sug.motivo}</div>
+              {info.sugConRadar && <div className="hint" style={{color:"var(--warning)", marginTop:4}} title="Enviadas o emitidas desde el Radar después del último registro del historial: todavía no figuran firmadas">
+                Ojo: {info.post.length===1 ? "hay 1 sanción enviada" : "hay "+info.post.length+" sanciones enviadas"} desde el Radar que aún no figura{info.post.length===1?"":"n"} en el historial (última: {slSanTxt(info.post[0].sancion, info.post[0].dias)}, {new Date(info.post[0].ts).toLocaleDateString("es-AR")}).
+                Si se firma{info.post.length===1?"":"n"}: <b>{info.sugConRadar.excede ? "supera el tope de 30 días" : slSanTxt(info.sugConRadar.sancion, info.sugConRadar.dias)}</b>{info.diasPost ? " · "+(info.diasAnio+info.diasPost)+" de 30 días" : ""}.
+              </div>}</div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Ausencias NO JUST en 12 meses</div>
+              <b>{info.aus.length}</b>{parsed ? null : <div className="hint">(se ven en Sanciones por lote)</div>}
+              {info.aus.length>0 && <div className="hint">Última: {isoToDMY(info.aus[0].fecha)} ({info.aus[0].cod||"NO JUST"})</div>}</div>
+          </div>
+          <div className="overflow-x"><table>
+            <thead><tr><th>Fecha</th><th>Sanción</th><th>Motivo</th><th className="num">Días</th><th>Aplicada</th><th>Firma</th><th>Origen</th></tr></thead>
+            <tbody>
+              {info.h.map(h=>(<tr key={"h"+h.id_sancion}><td>{isoToDMY(h.fecha_creado)}</td><td style={{color:slChipColor(h.sancion), fontWeight:700}}>{h.sancion}</td><td>{h.motivo}</td><td className="num">{Number(h.dias)||""}</td><td>{slNorm(h.aplicada)==="si" ? "Sí" : <span className="hint">no firmada</span>}</td><td>{isoToDMY(h.fecha_firma)}</td><td className="hint">Historial del sistema</td></tr>))}
+              {info.radar.map((x,i)=>(<tr key={"r"+i}><td>{x.fechas.length ? x.fechas.slice(0,3).map(d=>isoToDMY(d).slice(0,5)).join(", ")+(x.fechas.length>3 ? "…" : "")+"/"+String(x.fechas[0]).slice(0,4) : "—"}</td><td style={{fontWeight:700}}>{x.sancion}</td><td style={{color:x.color, fontWeight:600}}>{x.estado}</td><td></td><td></td><td className="hint">{x.n ? "N° "+x.n : ""}</td><td className="hint">{x.origen}</td></tr>))}
+              {!info.h.length && !info.radar.length && <tr><td colSpan="7" className="hint">Sin sanciones registradas (historial de los últimos 2 años y Radar).</td></tr>}
+            </tbody>
+          </table></div>
+          {info.aus.length>0 && <div className="hint">Ausencias NO JUST (12 meses): {info.aus.slice(0,20).map(a=>isoToDMY(a.fecha).slice(0,5)+(a.cod ? " "+a.cod : "")).join(" · ")}{info.aus.length>20 ? " …" : ""}</div>}
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
 function SlMotivos({motivos, setMotivos, estado, setEstado, esAdmin, say}){
   const [q, setQ] = useState("");
   const [soloNJ, setSoloNJ] = useState(false);
@@ -8313,7 +8450,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
-          {shownTab==="sanciones" && <SancionesTab plantel={plantel} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
         </React.Fragment>
