@@ -1637,15 +1637,56 @@ function estadoEgresoPlantel(idx, legajo){
   if(p.bajaTs==null) return ["Activo", "—"];
   return [p.bajaTs<=Date.now() ? "Egresado" : "Baja programada", fmtDateFromTs(p.bajaTs)];
 }
+// Sanciones por día de ausencia (legajo|fecha): lo que se hizo con cada ausencia en «Sanciones por lote» (enviada, omitida con su motivo, en lote)
+// y en el menú Sanciones. Lo provee App (solo Administrador y RRHH); en los informes de detalle es una columna discreta y sale completa al exportar.
+const SancionAuditCtx = React.createContext(null);
+async function cargarSancionesIdx(){
+  const m = new Map();
+  const add = (leg, iso, x) => { const k = slLeg(leg)+"|"+iso; if(!m.has(k)) m.set(k, []); m.get(k).push(x); };
+  const dmy = ts => ts ? new Date(ts).toLocaleDateString("es-AR") : "";
+  let motivos = SL_MOTIVOS_DEF;
+  try{ const mo = await slFetchAll(SL_T.motivos, "id"); if(mo.length) motivos = mo; }catch(e){}
+  try{
+    const its = await slFetchAll(SL_T.items, "id");
+    its.forEach(it=>{
+      const san = (it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "");
+      let x;
+      if(it.incluir && it.enviado_ts) x = {tipo:"emitida", txt:"✔ Sancionada: "+san+(it.n_interno ? " · N° "+it.n_interno : "")+" · enviada "+dmy(it.enviado_ts)};
+      else if(!it.incluir) x = {tipo:"omitida", txt:"✎ No sancionada: "+(it.motivo_omision || "sin motivo cargado")};
+      else x = {tipo:"enlote", lote:true, txt:"• En lote de sanción (sin enviar): "+san};
+      (it.fechas||[]).forEach(d=>add(it.legajo, d, x));
+    });
+  }catch(e){ /* sin las tablas de Sanciones por lote */ }
+  try{
+    const cs = await loadSanciones();
+    cs.forEach(s=>{ const x = s.estado==="emitida" ? {tipo:"emitida", txt:"✔ Sancionada (menú Sanciones): "+(s.medida||"sanción")+(s.emitidaTs ? " · emitida "+dmy(s.emitidaTs) : "")}
+      : {tipo:"enlote", txt:"• En menú Sanciones ("+((SANCION_ESTADOS[s.estado]||{}).txt||s.estado)+")"+(s.medida ? ": "+s.medida : "")};
+      diasDeSancion(s).forEach(d=>add(s.legajo, d, x)); });
+  }catch(e){}
+  m.nj = slCodigosNoJust(motivos);
+  return m;
+}
+// texto de la columna para una fila de ausentismo; lo que sigue «en lote» sin enviar solo se muestra si ese día todavía es sancionable
+function sancionDeFila(idx, r){
+  if(!idx || !r || !r.dateKey) return "";
+  const xs = idx.get(slLeg(r.legajo)+"|"+r.dateKey); if(!xs) return "";
+  const cod = String(r.idMotivo||"").trim().toUpperCase();
+  const njHoy = cod ? idx.nj.has(cod) : String(r.presidencia||"").trim().toUpperCase()==="NO JUST";
+  return xs.filter(x=>!(x.lote && !njHoy)).map(x=>x.txt).join(" / ");
+}
 function AuditModal({title, rows, onClose, cols, rowToArr}){
   const pIdx = React.useContext(PlantelAuditCtx);
-  // informe estándar (filas del ausentismo): se le suman el estado del empleado y su fecha de egreso, tomados del plantel
+  const sIdx = React.useContext(SancionAuditCtx);
+  // informe estándar (filas del ausentismo): se le suman el estado del empleado y su fecha de egreso, tomados del plantel,
+  // y (para Administrador y RRHH) la sanción o intervención registrada para ese día
   const estandar = !cols && !rowToArr;
-  const columns = cols || (estandar ? AUDIT_COLS.concat(["Estado empleado","Fecha de egreso"]) : AUDIT_COLS);
-  const toArr = rowToArr || (estandar ? (r=>auditRowArr(r).concat(estadoEgresoPlantel(pIdx, r.legajo))) : auditRowArr);
+  const conSancion = estandar && !!sIdx;
+  const columns = cols || (estandar ? AUDIT_COLS.concat(["Estado empleado","Fecha de egreso"], conSancion ? ["Sanción / intervención"] : []) : AUDIT_COLS);
+  const colSancion = conSancion ? columns.length-1 : -1;
+  const toArr = rowToArr || (estandar ? (r=>auditRowArr(r).concat(estadoEgresoPlantel(pIdx, r.legajo), conSancion ? [sancionDeFila(sIdx, r)] : [])) : auditRowArr);
   const [copied, setCopied] = useState("idle");
   const [sort, setSort] = useState(null); // {i: índice de columna, dir}
-  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows, pIdx]);
+  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows, pIdx, sIdx]);
   const sortedPrepared = useMemo(()=>{
     if(!sort) return prepared;
     const dir = sort.dir==="asc" ? 1 : -1;
@@ -1680,7 +1721,15 @@ function AuditModal({title, rows, onClose, cols, rowToArr}){
     }
     setTimeout(()=>setCopied("idle"), 2500);
   }
+  // descarga en Excel con TODAS las filas, en el orden de la pantalla (incluye la columna de sanción completa)
+  function handleExcel(){
+    if(!window.XLSX) return;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([columns, ...sortedPrepared.map(p=>p.a)]), "Detalle");
+    XLSX.writeFile(wb, (String(title||"detalle").replace(/[\\\/:*?"<>|]+/g,"").replace(/\s+/g," ").trim().slice(0,90) || "detalle")+".xlsx");
+  }
   const preview = sortedPrepared.slice(0,200);
+  const nConSancion = conSancion ? prepared.filter(p=>p.a[colSancion]).length : 0;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-panel" onClick={e=>e.stopPropagation()}>
@@ -1688,10 +1737,13 @@ function AuditModal({title, rows, onClose, cols, rowToArr}){
           <h3>{title}</h3>
           <button type="button" className="btn secondary small" onClick={onClose}>Cerrar</button>
         </div>
-        <p className="hint">{fmt(rows.length)} fila{rows.length===1?"":"s"} encontrada{rows.length===1?"":"s"}{rows.length>200 ? " — mostrando las primeras 200 en pantalla" : ""}. Los enlaces de descarga no funcionan dentro de este artifact, así que copiá el detalle completo y pegalo en Excel.</p>
-        <button type="button" className="btn small" onClick={handleCopy} disabled={!rows.length}>
-          {copied==="ok" ? "Copiado ✓" : copied==="err" ? "No se pudo copiar" : "Copiar detalle (CSV)"}
-        </button>
+        <p className="hint">{fmt(rows.length)} fila{rows.length===1?"":"s"} encontrada{rows.length===1?"":"s"}{rows.length>200 ? " — mostrando las primeras 200 en pantalla (el Excel y la copia llevan todas)" : ""}.{nConSancion ? " "+fmt(nConSancion)+" con sanción o intervención registrada (columna «Sanción / intervención»)." : ""}</p>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+          <button type="button" className="btn small" onClick={handleExcel} disabled={!rows.length}>Descargar Excel</button>
+          <button type="button" className="btn secondary small" onClick={handleCopy} disabled={!rows.length}>
+            {copied==="ok" ? "Copiado ✓" : copied==="err" ? "No se pudo copiar" : "Copiar detalle (CSV)"}
+          </button>
+        </div>
         <div className="overflow-x modal-table-wrap">
           <table>
             <thead><tr>{columns.map((c,i)=>(
@@ -1702,7 +1754,9 @@ function AuditModal({title, rows, onClose, cols, rowToArr}){
             ))}</tr></thead>
             <tbody>
               {!preview.length && <tr><td colSpan={columns.length} style={{textAlign:"center",color:"var(--muted)",padding:"14px 0"}}>Sin filas.</td></tr>}
-              {preview.map((p,i)=>(<tr key={i}>{p.a.map((v,j)=><td key={j}>{v}</td>)}</tr>))}
+              {preview.map((p,i)=>(<tr key={i}>{p.a.map((v,j)=><td key={j}>{j===colSancion && v
+                ? <span title={v} style={{fontSize:11.5, whiteSpace:"nowrap", color: v.startsWith("✔") ? "var(--good)" : v.startsWith("✎") ? "var(--warning)" : "var(--muted)"}}>{v.length>44 ? v.slice(0,42)+"…" : v}</span>
+                : v}</td>)}</tr>))}
             </tbody>
           </table>
         </div>
@@ -2166,6 +2220,94 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
 }
 
 /* ===================== tabs ===================== */
+/* ---- Resumen: cuadro por agrupador (como el cuadro mensual de RRHH) ----
+   Por unidad: base de jornadas y dotación (del plantel, igual que «Cumplimiento del objetivo»), ausencias pagas (ENF, ART, LIC VS) y no pagas
+   (NO JUST, JUST, SUSP) según el «Agrupador cuadro presidencia» de cada día, totales y vacaciones (agrupador de presentismo = V). % = cantidad ÷ base
+   de jornadas. Cuenta TODAS las ausencias del período y de los filtros de arriba (no aplica los motivos excluidos del cálculo del objetivo).
+   Si aparece un agrupador que no es ninguno de esos, va a una columna «Otros» (solo se muestra si hay). Cada cantidad abre el detalle. */
+const CUADRO_AP = ["ENF","ART","LIC VS"];
+const CUADRO_ANP = ["NO JUST","JUST","SUSP"];
+const cuadroPres = r => String(r.presidencia||"").trim().toUpperCase();
+function CuadroAgrupadorCard({rankingUnits, scopeUnitsMap, plantelActive, dotacionTotal, jornalesTotal, scopeEmpleados, openAudit, auditDotacion}){
+  const fila = (name, rows, base, dot) => {
+    const c = {}; let vac = 0; const otrosAP = new Set(), otrosANP = new Set();
+    rows.forEach(r=>{
+      if(r.cat==="V"){ vac++; return; }
+      if(r.cat!=="AP" && r.cat!=="ANP") return;
+      const p = cuadroPres(r), grupo = r.cat==="AP" ? CUADRO_AP : CUADRO_ANP;
+      let k = p;
+      if(!grupo.includes(p)){ k = r.cat==="AP" ? "__OAP" : "__OANP"; (r.cat==="AP" ? otrosAP : otrosANP).add(p||"(vacío)"); }
+      c[k] = (c[k]||0)+1;
+    });
+    const ap = CUADRO_AP.reduce((t,k)=>t+(c[k]||0),0)+(c.__OAP||0);
+    const anp = CUADRO_ANP.reduce((t,k)=>t+(c[k]||0),0)+(c.__OANP||0);
+    return {name, rows, base, dot, c, ap, anp, tot:ap+anp, vac, otrosAP, otrosANP};
+  };
+  const filas = useMemo(()=> rankingUnits.map(u=>fila(u.name, scopeUnitsMap.get(u.name)||[], plantelActive ? u.jornalesDotacion : u.base, plantelActive ? u.dotacionEquivalente : u.dotacion)), [rankingUnits, scopeUnitsMap, plantelActive]);
+  const total = useMemo(()=> fila("Total", filas.flatMap(f=>f.rows), plantelActive ? jornalesTotal : filas.reduce((t,f)=>t+(f.base||0),0), plantelActive ? dotacionTotal : scopeEmpleados), [filas, plantelActive, jornalesTotal, dotacionTotal, scopeEmpleados]);
+  const verOAP = (total.c.__OAP||0)>0, verOANP = (total.c.__OANP||0)>0;
+  // qué filas cuenta cada columna (para abrir el detalle)
+  const PRED = {
+    "__OAP": r=>r.cat==="AP" && !CUADRO_AP.includes(cuadroPres(r)), "__OANP": r=>r.cat==="ANP" && !CUADRO_ANP.includes(cuadroPres(r)),
+    "__AP": r=>r.cat==="AP", "__ANP": r=>r.cat==="ANP", "__TOT": r=>isCountedCat(r.cat), "__VAC": r=>r.cat==="V"
+  };
+  const predDe = k => PRED[k] || (r=>(CUADRO_AP.includes(k) ? r.cat==="AP" : r.cat==="ANP") && cuadroPres(r)===k);
+  const NOMBRE = {"__OAP":"Otros pagos", "__OANP":"Otros no pagos", "__AP":"Total ausentes pagos", "__ANP":"Total ausentes no pagos", "__TOT":"Total ausentes", "__VAC":"Vacaciones"};
+  const pct = (n, base) => base>0 ? fmtPct(n/base*100, 1) : "—";
+  const par = (f, k, n, fuerte) => [
+    <td key={k} className="num" style={fuerte ? {fontWeight:700} : undefined}>{n ? <CellLink onClick={()=>openAudit((NOMBRE[k]||k)+" — "+f.name, f.rows.filter(predDe(k)))}>{fmt(n)}</CellLink> : <span className="hint">0</span>}</td>,
+    <td key={k+"%"} className="num hint" style={fuerte ? {fontWeight:700, color:"var(--ink)"} : undefined}>{pct(n, f.base)}</td>
+  ];
+  const colsAP = [...CUADRO_AP, ...(verOAP ? ["__OAP"] : [])], colsANP = [...CUADRO_ANP, ...(verOANP ? ["__OANP"] : [])];
+  const banda = (color) => ({background:"color-mix(in srgb, "+color+" 16%, transparent)", textAlign:"center", letterSpacing:".06em"});
+  const renderFila = (f, esTotal) => (
+    <tr key={f.name} className={esTotal ? "total-row" : undefined}>
+      <td style={{whiteSpace:"nowrap"}}>{f.name}</td>
+      <td className="num">{!esTotal && f.base ? <CellLink onClick={()=>auditDotacion({name:f.name})}>{fmt(f.base)}</CellLink> : fmt(f.base)}</td>
+      <td className="num">{!esTotal && f.dot ? <CellLink onClick={()=>auditDotacion({name:f.name})}>{fmt(f.dot)}</CellLink> : fmt(f.dot)}</td>
+      {colsAP.map(k=>par(f, k, f.c[k]||0))}
+      {par(f, "__AP", f.ap, true)}
+      {colsANP.map(k=>par(f, k, f.c[k]||0))}
+      {par(f, "__ANP", f.anp, true)}
+      {par(f, "__TOT", f.tot, true)}
+      {par(f, "__VAC", f.vac)}
+    </tr>
+  );
+  return (
+    <div className="card table-card">
+      <h3>Cuadro de ausentismo por agrupador</h3>
+      <div className="caption">Ausencias pagas y no pagas según el «Agrupador cuadro presidencia», y vacaciones, por unidad. El % es sobre la base de jornadas{plantelActive ? " (jornales de dotación del plantel)" : ""}. Cuenta todas las ausencias del período y los filtros elegidos arriba (no descuenta los motivos excluidos del objetivo). Hacé clic en una cantidad para ver y descargar el detalle.
+        {(verOAP || verOANP) && <React.Fragment> «Otros» = agrupadores distintos: {[...total.otrosAP, ...total.otrosANP].join(", ")}.</React.Fragment>}</div>
+      <div className="overflow-x">
+        <table>
+          <thead>
+            <tr>
+              <th rowSpan="2" style={{verticalAlign:"bottom"}}>Unidad</th>
+              <th colSpan="2" style={banda("var(--cat-p)")}>PRESENTES</th>
+              <th colSpan={colsAP.length*2+2} style={banda("var(--cat-ap)")}>AUSENTES PAGOS</th>
+              <th colSpan={colsANP.length*2+2} style={banda("var(--cat-anp)")}>AUSENTES NO PAGOS</th>
+              <th colSpan="2" style={banda("var(--critical)")}>TOTAL AUSENTES</th>
+              <th colSpan="2" style={banda("var(--cat-v)")}>VACACIONES</th>
+            </tr>
+            <tr>
+              <th className="num">Base jornadas</th><th className="num">Dotación</th>
+              {colsAP.map(k=>[<th key={k} className="num">{NOMBRE[k]||k}</th>, <th key={k+"%"} className="num">%</th>])}
+              <th className="num">Total</th><th className="num">%</th>
+              {colsANP.map(k=>[<th key={k} className="num">{NOMBRE[k]||k}</th>, <th key={k+"%"} className="num">%</th>])}
+              <th className="num">Total</th><th className="num">%</th>
+              <th className="num">Total</th><th className="num">%</th>
+              <th className="num">Vacaciones</th><th className="num">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filas.map(f=>renderFila(f, false))}
+            {renderFila(total, true)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs, verFiltros}){
   const [audit, setAudit] = useState(null);
   const unitSort = useTableSort(rankingUnits, {
@@ -2256,6 +2398,8 @@ function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, set
         </div>
         {objetivoNote && <p className="caption" style={{marginTop:4}}>{objetivoNote}</p>}
       </div>
+      <CuadroAgrupadorCard rankingUnits={rankingUnits} scopeUnitsMap={scopeUnitsMap} plantelActive={plantelActive} dotacionTotal={dotacionTotal} jornalesTotal={jornalesTotal}
+        scopeEmpleados={scopeEmpleados} openAudit={openAudit} auditDotacion={auditDotacion} />
       {verFiltros && <MotivoChecklist motivoUniverse={motivoUniverse} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />}
       {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} cols={audit.cols} rowToArr={audit.rowToArr} />}
     </div>
@@ -3197,9 +3341,9 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
     if(!puedeVerSanciones || !legajoSel) return;
     (async ()=>{
       try{
-        const {data, error} = await supabaseClient.from(SL_T.items).select("id,legajo,fechas,incluir,sancion,dias,enviado_ts").eq("legajo", legajoSel);
+        const {data, error} = await supabaseClient.from(SL_T.items).select("*").eq("legajo", legajoSel);
         if(error) throw error;
-        if(vivo) setLoteLeg((data||[]).filter(it=>it.incluir));
+        if(vivo) setLoteLeg(data||[]);   // incluidas y también las omitidas (con el motivo que cargó el usuario)
       }catch(e){ /* sin la migración de Sanciones por lote: la columna sigue como antes */ }
     })();
     return ()=>{ vivo = false; };
@@ -3210,9 +3354,13 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
     const hitLote = loteLeg.filter(it=>(it.fechas||[]).some(d=>d>=desdeISO && d<=hastaISO));
     if(!hit.length && !hitLote.length) return <span className="hint">—</span>;
     const color = {emitida:"var(--good)", definida:"var(--accent)", marcada:"var(--warning)"};
-    const lineasLote = hitLote.map(it=>(
+    const lineasLote = hitLote.map(it=> !it.incluir ? (
+      <div key={it.id} style={{color:"var(--warning)", fontWeight:600, fontSize:12}} title="Menú Sanciones por lote: se decidió no sancionar">
+        ✎ No sancionada: {it.motivo_omision || "sin motivo cargado"}
+      </div>
+    ) : (
       <div key={it.id} style={{color: it.enviado_ts ? "var(--good)" : "var(--accent)", fontWeight:700}} title="Menú Sanciones por lote">
-        {it.enviado_ts ? "✔ Sancionada (lote): "+(it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "")+" · enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")
+        {it.enviado_ts ? "✔ Sancionada (lote): "+(it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "")+(it.n_interno ? " · N° "+it.n_interno : "")+" · enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")
           : "En lote de sanción: "+(it.sancion||"")+" (sin enviar)"}
       </div>
     ));
@@ -7436,6 +7584,14 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
 
   const [activeTab, setActiveTab] = useState(perms.tabs[0]);
   const shownTab = perms.tabs.includes(activeTab) ? activeTab : perms.tabs[0]; // nunca se muestra un menú que el perfil no tiene
+  // sanción / intervención por día de ausencia (para los informes de detalle): solo quien ve sanciones; se relee al cambiar de menú
+  const [sancIdx, setSancIdx] = useState(null);
+  useEffect(()=>{
+    if(!perms.sancionar) return;
+    let vivo = true;
+    cargarSancionesIdx().then(m=>{ if(vivo) setSancIdx(m); }).catch(()=>{});
+    return ()=>{ vivo = false; };
+  }, [shownTab]);
   const [objetivo, setObjetivo] = useState(3);
   const [FILTERS, setFiltersState] = useState({mes:null, departamento:null, gerencia:null, sector:null});
   const [empresaIncluded, setEmpresaIncluded] = useState(null);
@@ -7959,6 +8115,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
 
   return (
     <PlantelAuditCtx.Provider value={plantelIndexOf(plantel)}>
+    <SancionAuditCtx.Provider value={sancIdx}>
     <div className="app">
       <div className="masthead no-print">
         <div className="masthead-text">
@@ -8162,6 +8319,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
         </React.Fragment>
       )}
     </div>
+    </SancionAuditCtx.Provider>
     </PlantelAuditCtx.Provider>
   );
 }
