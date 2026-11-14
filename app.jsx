@@ -6933,6 +6933,24 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       </div>
       {error && <div className="warn-banner">{sinTablas ? "Falta crear las tablas de Sanciones por lote: corré supabase-migracion-sanciones-lote.sql en el SQL Editor de Supabase." : "No se pudieron leer los datos ("+error+")."}</div>}
       {loading && <div className="card table-card"><div className="hint">Cargando…</div></div>}
+      {!loading && !error && (()=>{
+        // último período evaluado = el lote con la fecha "hasta" más reciente (lotesOrden[0])
+        const ult = lotesOrden[0];
+        if(!ult) return <div className="card controls" style={{paddingTop:10, paddingBottom:10}}><span className="hint">Todavía no se evaluó ningún período: elegí «desde» y «hasta» y creá el primer lote.</span></div>;
+        const its = items.filter(i=>i.lote_id===ult.id), env = its.filter(i=>i.enviado_ts).length;
+        const sig = slAddDays(ult.hasta, 1);
+        return (
+          <div className="card controls" style={{paddingTop:10, paddingBottom:10, borderLeft:"4px solid var(--accent)"}}>
+            <div style={{display:"flex", flexDirection:"column", gap:2}}>
+              <span><b>Último período evaluado:</b> {slLoteNombre(ult)}</span>
+              <span className="hint">{its.length} empleados{env ? " · "+env+" con envío marcado" : " · sin envíos marcados"}{ult.creado_ts ? " · lote creado el "+new Date(ult.creado_ts).toLocaleDateString("es-AR") : ""}{ult.creado_por ? " por "+ult.creado_por : ""}</span>
+            </div>
+            <span className="hint">El próximo período empezaría el {isoToDMY(sig)}.</span>
+            <button type="button" className="btn secondary small" onClick={()=>{ setNuevoDesde(sig); if(nuevoHasta && nuevoHasta<sig) setNuevoHasta(""); }} title="Completa «Nuevo lote: desde» con el día siguiente al último período evaluado">Usar como «desde»</button>
+            {ult.id!==loteId && <button type="button" className="btn secondary small" onClick={()=>{ flushItems(); setLoteId(ult.id); setOmitidas(null); setConfirmar(""); }}>Abrir ese lote</button>}
+          </div>
+        );
+      })()}
       <SlAntecedentes plantel={plantel} parsed={parsed} hist={hist} items={items} lotes={lotes} crSan={crSan} codigosNoJust={codigosNoJust} />
 
       {lote && (
