@@ -3435,7 +3435,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
     return "<div class='card table-card cron-hist print-page-break'>"+titulo+casos.map(c=>{
       const datos = [["Tipo", c.m.tipo], ["Opinión médica", c.m.opinionMedica], ["Táctico empleado", c.m.tactoEmpleado], ["Posible alta", c.m.posibleAlta]].filter(x=>x[1])
         .map(x=>"<div><span class='lbl'>"+e(x[0])+"</span><span class='val' style='font-weight:400'>"+e(x[1])+"</span></div>").join("");
-      return "<div class='cron-caso'><h4>"+e(c.motivo)+" · "+e(c.row.anio)+"</h4>"+
+      return "<div class='cron-caso' style='margin-top:12px'><h4 style='margin:0 0 6px;font-size:13px;color:var(--accent,#0c2e80)'>"+e(c.motivo)+" · "+e(c.row.anio)+"</h4>"+
         (datos ? "<div class='ficha-grid' style='margin-bottom:8px'>"+datos+"</div>" : "")+
         "<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Registró</th></tr></thead><tbody>"+
         c.movs.map(o=>"<tr><td style='white-space:nowrap;vertical-align:top'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='vertical-align:top'>"+e(o.tipoMov)+etiquetaOrigen(o)+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td><td style='vertical-align:top'>"+e(o.autor||"—")+"</td></tr>").join("")+
@@ -3443,10 +3443,28 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
     }).join("")+"</div>";
   }
 
+  // Historial de Crónicos EN PANTALLA: con la casilla tildada se lee del servidor al elegir el empleado (o al tocar "Actualizar") y se
+  // muestra al final de la hoja; ese mismo bloque (`de-print-block`) es el que sale en la impresión, sin volver a leerlo.
+  const [cronHist, setCronHist] = useState({key:"", estado:"idle", html:"", error:""});
+  const [cronHistReload, setCronHistReload] = useState(0);
+  const cronHistKey = (conCronicos && !soloFicha && legajoSel) ? String(legajoSel)+"|"+cronHistReload : "";
+  useEffect(()=>{
+    if(!cronHistKey){ setCronHist(h=> h.estado==="idle" ? h : {key:"", estado:"idle", html:"", error:""}); return; }
+    let vivo = true;
+    setCronHist({key:cronHistKey, estado:"cargando", html:"", error:""});
+    historialCronicosHtml().then(
+      h=>{ if(vivo) setCronHist({key:cronHistKey, estado:"ok", html:h, error:""}); },
+      err=>{ if(vivo) setCronHist({key:cronHistKey, estado:"error", html:"", error:(err && err.message) || "error"}); }
+    );
+    return ()=>{ vivo = false; };
+  }, [cronHistKey]);   // eslint-disable-line
+  const cronHistListo = !!cronHistKey && cronHist.key===cronHistKey && cronHist.estado==="ok";
+
   async function handlePrint(){
     const blocks = Array.from(document.querySelectorAll(".de-print-block"));
     if(!blocks.length) return;
     let html = blocks.map(el=>el.outerHTML).join("\n");
+    const yaIncluido = blocks.some(el=>el.querySelector(".cron-hist"));   // el historial ya está en pantalla: va en la hoja tal cual
     const printCss = `
       *{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
       .cron-caso{margin-top:12px;}
@@ -3477,7 +3495,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
       alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo.");
       return;
     }
-    if(conCronicos && !soloFicha){
+    if(conCronicos && !soloFicha && !yaIncluido){
       win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title></head><body style="font-family:Arial,sans-serif;margin:24px">Preparando el historial de Crónicos…</body></html>');
       try{
         html += "\n" + await historialCronicosHtml();
@@ -3524,7 +3542,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
           <input type="checkbox" checked={agrupar} onChange={e=>setAgrupar(e.target.checked)} />
           Agrupar días consecutivos (inicio y fin)
         </label>
-        {!soloFicha && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Agrega al final de la hoja lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
+        {!soloFicha && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Muestra al final de la hoja (en pantalla y al imprimir) lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
           <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
           Incluir historial de Crónicos (últimos 12 meses)
         </label>}
@@ -3699,6 +3717,26 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
           </div>
         )}
       </div>
+
+      {conCronicos && !soloFicha && (
+        cronHistListo ? (
+          <div>
+            <div className="no-print" style={{display:"flex", justifyContent:"flex-end", marginBottom:6}}>
+              <button type="button" className="btn secondary small" onClick={()=>setCronHistReload(n=>n+1)} title="Vuelve a leer el historial de Crónicos (para ver lo que cargaron otros usuarios)">Actualizar historial</button>
+            </div>
+            <div className="de-print-block cron-hist-wrap" dangerouslySetInnerHTML={{__html: cronHist.html}} />
+          </div>
+        ) : (
+          <div className="card table-card no-print">
+            <h3>Historial de Crónicos — últimos 12 meses</h3>
+            {cronHist.estado==="error" && cronHist.key===cronHistKey ? (
+              <p className="desc">No se pudo leer el historial de Crónicos ({cronHist.error}). <button type="button" className="cell-link" onClick={()=>setCronHistReload(n=>n+1)}>Reintentar</button></p>
+            ) : (
+              <p className="desc">Leyendo el historial de Crónicos…</p>
+            )}
+          </div>
+        )
+      )}
     </div>
   );
 }
