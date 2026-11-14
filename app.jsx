@@ -168,6 +168,7 @@ function plantelRecordToRow(p){
     estado: p.estado||"", unidad: p.unidad||"", sector: p.sector||"", gerencia: p.gerencia||"",
     departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
     puesto: p.puesto||"", jefe: p.jefe||"", celular: p.celular||"",
+    domicilio: p.domicilio||"", sindicato: p.sindicato||"",
     updated_at: new Date().toISOString()
   };
 }
@@ -175,7 +176,7 @@ function plantelRowToRecord(row){
   return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
     nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
     gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||"",
-    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||""};
+    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||"", domicilio:row.domicilio||"", sindicato:row.sindicato||""};
 }
 
 function LoginForm({onSignedIn}){
@@ -504,12 +505,14 @@ const PLANTEL_FIELD_ALIASES = {
   grupo: ["Grupo"],
   puesto: ["Puesto"],
   jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"],
-  celular: ["Celular","Teléfono","Telefono","Teléfono celular","Telefono celular","Tel. Celular","Tel","Tel.","Móvil","Movil"]
+  celular: ["Celular","Teléfono","Telefono","Teléfono celular","Telefono celular","Tel. Celular","Tel","Tel.","Móvil","Movil"],
+  domicilio: ["Domicilio","Dirección","Direccion"],
+  sindicato: ["Sindicato"]
 };
 const PLANTEL_REQUIRED_FIELDS = ["legajo","fechaAlta"];
 const PLANTEL_FIELD_LABELS = {legajo:"Legajo", nombre:"Apellido y Nombre", fechaAlta:"Fecha de Alta", fechaBaja:"Fecha de Baja",
-  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)"};
-const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular"];
+  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)", domicilio:"Domicilio", sindicato:"Sindicato"};
+const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular","domicilio","sindicato"];
 function findColByAliases(headerRow, aliases){
   for(let a=0;a<aliases.length;a++){
     const idx = findColIndex(headerRow, aliases[a]);
@@ -1480,6 +1483,9 @@ function groupStreakTramos(rows){
   });
   return tramos;
 }
+// Un empleado del plantel está vigente si NO tiene fecha de baja y su Estado es «Vigente» (o viene vacío). Cualquier otro Estado
+// (Renuncia, Despido, Fin Período Prueba, Vto. Contrato, Baja Definitiva…) = dado de baja: no se lista más en Crónicos.
+function plantelVigente(p){ return !!p && p.bajaTs==null && (!p.estado || normTxt(p.estado)==="vigente"); }
 function buildCronicoCases(records, plantel, motivoIncluded){
   if(!motivoIncluded || !motivoIncluded.size) return [];
   // Fila que puede formar un caso: una ausencia (AP/ANP) o cualquier día cuyo Id Motivo esté tildado en el filtro (ej. VAC, que no es AP/ANP).
@@ -1542,7 +1548,7 @@ function buildCronicoCases(records, plantel, motivoIncluded){
     const continua = lastRec && esCaso(lastRec) && lastRec.ts===last.ts;
     if(!continua) return;
     // sólo empleados activos: con plantel, sin fecha de baja; sin plantel, que su último registro no sea CE/BAJA.
-    const activo = p ? (p.bajaTs==null) : (lastRec.cat!=="CE" && lastRec.cat!=="BAJA");
+    const activo = p ? plantelVigente(p) : (lastRec.cat!=="CE" && lastRec.cat!=="BAJA");
     if(!activo) return;
     // para mostrar el motivo/diagnóstico, preferir una fila real (no CA) dentro de la racha
     const motivoRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA") || last;
@@ -1848,13 +1854,14 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   const header = rows2d[0] || [];
   const dataRows = rows2d.slice(1);
   const idxIngreso = findColByAliases(header, ["Fecha de Ingreso","Fecha Ingreso"]);
+  const idxLocalidad = findColByAliases(header, ["Localidad"]);   // se suma al Domicilio ("Calle 123, Localidad")
   const existingByLegajo = new Map(existingPlantel.map(p=>[p.legajo, p]));
   const seen = new Set();
   const records = [];
   const changedRecords = [];
   const errors = [];
   let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
-  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular"];
+  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular","domicilio","sindicato"];
   dataRows.forEach((row, i) => {
     const excelRow = i + 2 + (rows2d.headerOffset||0);   // número de fila real del Excel (si hay títulos arriba de los encabezados)
     const legajo = cellStr(row, mapping.legajo).trim();
@@ -1904,7 +1911,9 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
       grupo: cellStr(row, mapping.grupo),
       puesto: cellStr(row, mapping.puesto),
       jefe: cellStr(row, mapping.jefe),
-      celular: cellStr(row, mapping.celular)
+      celular: cellStr(row, mapping.celular),
+      domicilio: [cellStr(row, mapping.domicilio), cellStr(row, idxLocalidad)].filter(Boolean).join(", "),
+      sindicato: cellStr(row, mapping.sindicato)
     };
     seen.add(legajoKey);
     const prev = existingByLegajo.get(legajo);
@@ -3551,8 +3560,12 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
               <div><span className="lbl">Sector</span><span className="val">{fichaDato("sector") || "—"}</span></div>
               <div><span className="lbl">Puesto</span><span className="val">{fichaDato("puesto") || "—"}</span></div>
               <div><span className="lbl">Jefe directo</span><span className="val">{fichaDato("jefe") || "—"}</span></div>
+              <div><span className="lbl">Sindicato</span><span className="val">{(plantelFicha && plantelFicha.sindicato) || (ficha && ficha.sindicato) || "—"}</span></div>
               <div><span className="lbl">Celular</span><span className="val">{(plantelFicha && plantelFicha.celular) || "—"}</span></div>
+              <div><span className="lbl">Domicilio</span><span className="val">{(plantelFicha && plantelFicha.domicilio) || "—"}</span></div>
               <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
+              <div><span className="lbl">Estado</span><span className="val">{(plantelFicha && plantelFicha.estado) || "—"}</span></div>
+              <div><span className="lbl">Fecha de Baja</span><span className="val">{plantelFicha && plantelFicha.bajaTs!=null ? <span style={{color:"var(--critical)", fontWeight:700}}>{fmtDateFromTs(plantelFicha.bajaTs)}</span> : "—"}</span></div>
               <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
             </div>
           </div>
@@ -4189,7 +4202,7 @@ function employeeOptionsForCita(plantel, records){
   (plantel||[]).forEach(p=>{
     const k = (p.legajo||"").toUpperCase(); if(!k) return;
     enPlantel.add(k);
-    if(p.bajaTs==null) map.set(k, {legajo:p.legajo, nombre:p.nombre||"", unidad:p.unidad||""});
+    if(plantelVigente(p)) map.set(k, {legajo:p.legajo, nombre:p.nombre||"", unidad:p.unidad||""});
   });
   (records||[]).forEach(r=>{
     if(!r.legajo) return;
