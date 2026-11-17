@@ -22,6 +22,33 @@ const SUPABASE_URL = "https://rfavfuibywwaytlgpcqp.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_SiBV5y1l6xs2bLr8HvCl6A_Syc89Xkn";
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+/* ===================== modo claro / oscuro (botón de la cabecera) =====================
+   Se guarda en este navegador (radar.theme). Sin elegir, sigue el del sistema. La Carga Geo (iframe) lo recibe por mensaje. */
+const THEME_KEY = "radar.theme";
+function getTheme(){ try{ const v = localStorage.getItem(THEME_KEY); return v==="light" || v==="dark" ? v : null; }catch(e){ return null; } }
+function applyTheme(t){ if(t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); }
+function effectiveTheme(){ return getTheme() || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); }
+const themeListeners = new Set();
+function setThemeSaved(t){ try{ localStorage.setItem(THEME_KEY, t); }catch(e){} applyTheme(t); themeListeners.forEach(f=>f(t)); }
+applyTheme(getTheme());
+function ThemeToggle(){
+  const [t, setT] = useState(effectiveTheme());
+  useEffect(()=>{ const f = v=>setT(v); themeListeners.add(f); return ()=>{ themeListeners.delete(f); }; }, []);
+  const dark = t==="dark";
+  // interruptor deslizante  ☀ (  ●) ☾
+  return (
+    <label title={dark ? "Pasar al modo claro" : "Pasar al modo oscuro"} style={{display:"inline-flex", alignItems:"center", gap:6, cursor:"pointer", userSelect:"none", color:"var(--muted)", fontSize:15, position:"relative"}}>
+      <span aria-hidden="true">☀</span>
+      <input type="checkbox" role="switch" aria-label="Modo oscuro" checked={dark} onChange={e=>setThemeSaved(e.target.checked ? "dark" : "light")}
+        style={{position:"absolute", opacity:0, width:42, height:22, left:20, margin:0, cursor:"pointer"}} />
+      <span aria-hidden="true" style={{width:42, height:22, borderRadius:999, position:"relative", flex:"none", background:dark ? "var(--accent)" : "var(--grid)", border:"1px solid "+(dark ? "var(--accent)" : "var(--border)"), transition:"background .18s"}}>
+        <span style={{position:"absolute", top:2, left:2, width:16, height:16, borderRadius:"50%", background:dark ? "var(--accent-ink)" : "var(--ink)", transform:dark ? "translateX(20px)" : "none", transition:"transform .18s"}} />
+      </span>
+      <span aria-hidden="true">☾</span>
+    </label>
+  );
+}
+
 /* ===================== guardado en Supabase: ausentismo + plantel ===================== */
 const AUSENTISMO_TABLE = "ausentismo_registros";
 const PLANTEL_TABLE = "plantel_empleados";
@@ -147,9 +174,16 @@ function ausRecordToRow(r){
     id_motivo: r.idMotivo||"", motivo: r.motivo||"", estado: r.estado||"", razon: r.razon||"",
     puesto: r.puesto||"", jefe: r.jefe||"", presidencia: r.presidencia||"", sindicato: r.sindicato||"",
     tipo_contrat: r.tipoContrat||"",
+    // origen: "geo" = fila provisoria armada desde la Carga Geo (la reemplaza Calipso); vacío = viene de Calipso. Solo se envía si hay algo que marcar o limpiar
+    // (así todo sigue funcionando aunque todavía no se haya corrido supabase-migracion-geo.sql).
+    // ausTieneOrigen: la columna ya existe en el servidor (se vio en las filas bajadas); con eso toda fila de Calipso manda origen vacío, y así
+    // una fila de Calipso nunca queda con la marca "geo" ni "geo-anulada" de una provisoria anterior.
+    ...((r.origen || r.origenLimpiar || ausTieneOrigen) ? {origen: r.origen||""} : {}),
     updated_at: new Date().toISOString()
   };
 }
+let ausTieneOrigen = false;
+const ausVisible = row => row.origen!=="geo-anulada";   // "geo-anulada" = fila provisoria de Geo que ya no corresponde: sigue en la base (para que todos los navegadores se enteren) pero no se usa
 function ausRowToRecord(row){
   const ts = Date.UTC(row.anio, row.mes-1, row.dia);
   const monthKey = row.anio+"-"+pad2(row.mes);
@@ -157,7 +191,7 @@ function ausRowToRecord(row){
   return {legajo:row.legajo||"", agrup:row.agrup||"", cat:row.agrup||"F", unidad:row.unidad||"", sector:row.sector||"",
     gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", nombre:row.nombre||"",
     idMotivo:row.id_motivo||"", motivo:row.motivo||"", estado:row.estado||"", razon:row.razon||"", puesto:row.puesto||"",
-    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"", tipoContrat:row.tipo_contrat||"",
+    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"", tipoContrat:row.tipo_contrat||"", origen:row.origen||"",
     valid:true, dia:row.dia, mes:row.mes, anio:row.anio, ts, monthKey, dateKey};
 }
 function plantelRecordToRow(p){
@@ -316,7 +350,7 @@ function AuthGate(){
 /* ===================== perfiles y permisos ===================== */
 // Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
 // ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
-const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel"];
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel","carga_geo","presentismo","permisos_geo"];
 const ROLES = {
   admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
     tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
@@ -862,9 +896,13 @@ function mergeAusentismoRecords(existingRecords, newRecords){
       const prev = map.get(key);
       // si la carga nueva trae una columna opcional vacía, no borra el valor ya cargado para esa fila
       const mergedRow = {...r};
-      AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
+      // fila provisoria de Geo (o la que llega es de Geo): se reemplaza completa; si no, una columna opcional vacía no borra lo ya cargado
+      const provisoria = prev.origen==="geo" || r.origen==="geo";
+      if(!provisoria) AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
+      // Calipso reemplaza una fila provisoria de Geo: además de los campos, hay que limpiar la marca "geo"
+      if(prev.origen==="geo" && r.origen!=="geo"){ mergedRow.origen = ""; mergedRow.origenLimpiar = true; }
       // la empresa se compara sin mayúsculas: escribirla distinto no es un cambio real
-      const changed = AUS_UPDATE_CMP_FIELDS.some(f=> f==="empresa" ? normTxt(prev[f])!==normTxt(mergedRow[f]) : (prev[f]||"")!==(mergedRow[f]||""));
+      const changed = (prev.origen==="geo" && r.origen!=="geo") || AUS_UPDATE_CMP_FIELDS.some(f=> f==="empresa" ? normTxt(prev[f])!==normTxt(mergedRow[f]) : (prev[f]||"")!==(mergedRow[f]||""));
       map.set(key, mergedRow);
       if(changed){ modificados++; changedRows.push(mergedRow); } else sinCambios++;
     } else {
@@ -7614,6 +7652,449 @@ function SlMotivos({motivos, setMotivos, estado, setEstado, esAdmin, say}){
   );
 }
 
+/* ---- Permisos de Geo <-> CODPLA de Calipso (tabla `geo_permisos`, migración supabase-migracion-permisos-geo.sql) ----
+   Cada permiso de GeoVictoria (nombre y N°) con el CODPLA (Id Motivo) que le corresponde en Calipso. Es la base para actualizar el día
+   desde la carga de Geo. La edita el Administrador; RRHH la ve. Mientras la tabla esté vacía se usa GEO_PERMISOS_DEF (la que pasó RRHH el 16/11/2026)
+   y la primera edición la guarda completa. Sin el SQL se usa la de por defecto, sin poder editarla. */
+const GEO_PERMISOS_TABLE = "geo_permisos";
+// [CODPLA, Permiso, N° de Geo, Goce de sueldo, Permite marcar]; CODPLA vacío = sin equivalente en Calipso (hoy no se podría cargar)
+const GEO_PERMISOS_DEF = [
+  ["AT","Accidente de trabajo","54","Si","No"], ["","Accidentes","-9","Si","Si"], ["","Amamantamiento (Fuero)","-11","Si","Si"],
+  ["CA","Ausente C/ Aviso","44","No","No"], ["CAE","Ausente C/ Aviso Enfermedad","45","No","No"], ["SA","Ausente S/ Aviso","46","No","No"],
+  ["","Capacitación","-6","Si","Si"], ["CE","Cesante","10","No","No"], ["CJ","Citacion Judicial","11","Si","No"], ["","Compensación","-10","Si","Si"],
+  ["DAC","Dia a Compensar","48","No","Si"], ["","Dia Compensado","49","Si","Si"], ["DS","Donación de sangre","12","Si","No"],
+  ["EN","Enfermedad","34","Si","No"], ["EFS","Enfermedad Familiar Sgbatos Art 21","14","Si","No"], ["ET","Enfermedad trabajo (ET)","15","Si","No"],
+  ["EX","Examen","16","Si","No"], ["ED","Excedencia","13","No","No"], ["FA","Fallecimiento abuelos","35","Si","No"], ["FA","Fallecimiento Esposo/a","36","Si","No"],
+  ["FA","Fallecimiento Hermano","37","Si","No"], ["FA","Fallecimiento Hermanos","37","No","No"], ["FA","Fallecimiento Hijo","38","Si","No"],
+  ["FA","Fallecimiento nieto","39","Si","No"], ["FA","Fallecimiento nietos","39","No","No"], ["FA","Fallecimiento Padres","40","Si","No"], ["FA","Fallecimiento suegros","41","Si","No"],
+  ["","Horas Salida Entre jornada C/Goce","51","Si","--:--"], ["","Horas Salida Entre jornada S/Goce","52","No","--:--"], ["JDL","Jornada de Lluvia","66","No","No"],
+  ["LSP","Lic Sanitaria Preventiva","21","Si","No"], ["","Licencia Médica Estándar","-2","No","No"], ["LVC","Licencia por Vacuna contra Covid","23","Si","No"],
+  ["LSS","Licencia Sin Goce de Haberes","57","No","Si"], ["MT","Maternidad","25","Si","No"], ["MA","Matrimonio","24","Si","No"], ["MU","Mudanza (Sgbatos)","26","No","No"],
+  ["NAC","Nacimiento","27","Si","No"], ["","Otro","-3","No","Si"], ["PH","Paro / huelga","5","No","No"], ["","P. Administrativo","-4","Si","Si"],
+  ["","P. Fallecimiento","-5","Si","Si"], ["PSI","P. Sindical","-7","Si","Si"], ["PCG","Permiso con Goce","-12","Si","Si"], ["PCT","Permiso Contratista","63","Si","Si"],
+  ["JRP","Permiso Sgbatos Art 20.1 (JRP)","19","Si","--:--"], ["PSG","Permiso sin Goce","-13","No","Si"], ["PHO","Pres Home Office","47","Si","Si"],
+  ["","Presente Eventual B","56","Si","Si"], ["PGC","Presente Gerente/Coordinador","55","Si","Si"], ["PCT","Presente Contratista","63","Si","Si"],
+  ["PRD","Proceso Desvinculacion","65","No","No"], ["PHO","Presente Home Office","28","Si","No"], ["RP","Reserva de puesto","30","No","No"], ["","Reunión","-8","Si","Si"],
+  ["SFT","Suspension falta de trabajo","158","No","No"], ["SUS","Suspension","33","No","No"], ["","Suspension Preventiva Art 224 LCT","50","No","No"],
+  ["TEC","Trabajo en Comisión","53","Si","Si"], ["VAC","Vacaciones","42","Si","No"], ["VAP","Vacaciones Pendientes","43","Si","No"]
+].map((r,i)=>({id:"G"+String(i+1).padStart(3,"0"), orden:i+1, codpla:r[0], permiso:r[1], numero:r[2], goce:r[3], permite_marcar:r[4]}));
+
+function GeoPermisosTab({parsed, esAdmin}){
+  const [rows, setRows] = useState(GEO_PERMISOS_DEF);
+  const [estado, setEstado] = useState("cargando");   // cargando | base (guardada en el servidor) | def (por defecto, sin guardar) | sintabla (falta el SQL) | error
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [q, setQ] = useState("");
+  const [soloSin, setSoloSin] = useState(false);
+  const ref = useRef(rows); ref.current = rows;
+  const estRef = useRef(estado); estRef.current = estado;
+  const timers = useRef({});
+  useEffect(()=>{
+    let vivo = true;
+    (async ()=>{
+      try{
+        const d = await slFetchAll(GEO_PERMISOS_TABLE, "orden");
+        if(!vivo) return;
+        if(d.length){ setRows(d); setEstado("base"); } else { setRows(GEO_PERMISOS_DEF); setEstado("def"); }
+      }catch(e){
+        if(!vivo) return;
+        if(/PGRST205|42P01|does not exist|schema cache/i.test(String(e && e.code)+" "+String(e && e.message))) setEstado("sintabla");
+        else { setEstado("error"); setErr((e && e.message) || String(e)); }
+      }
+    })();
+    return ()=>{ vivo = false; };
+  }, []);
+  const ro = !esAdmin || estado==="sintabla" || estado==="error" || estado==="cargando";
+  // la primera vez que se edita se guarda la tabla completa (hasta entonces es la de por defecto); después, solo la fila tocada
+  async function guardar(id){
+    const now = new Date().toISOString();
+    if(estRef.current!=="base"){
+      const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).upsert(ref.current.map(r=>({...r, updated_at:now})));
+      if(error){ setMsg("No se pudo guardar la tabla: "+error.message); return; }
+      setEstado("base"); setMsg("Tabla guardada"); return;
+    }
+    const r = ref.current.find(x=>x.id===id); if(!r) return;
+    const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).upsert({...r, updated_at:now});
+    setMsg(error ? "No se pudo guardar: "+error.message : "Cambio guardado");
+  }
+  function cambiar(id, patch){
+    setRows(list=>list.map(r=>r.id===id ? {...r, ...patch} : r));
+    clearTimeout(timers.current[id]); timers.current[id] = setTimeout(()=>guardar(id), 700);
+  }
+  function agregar(){
+    const orden = ref.current.reduce((mx,r)=>Math.max(mx, r.orden||0), 0)+1;
+    const r = {id:"G"+Date.now().toString(36), orden, codpla:"", permiso:"", numero:"", goce:"Si", permite_marcar:"No"};
+    setRows(list=>[...list, r]); setQ(""); setSoloSin(false);
+    clearTimeout(timers.current[r.id]); timers.current[r.id] = setTimeout(()=>guardar(r.id), 700);
+  }
+  async function quitar(r){
+    if(estRef.current==="base"){
+      const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).delete().eq("id", r.id);
+      if(error){ setMsg("No se pudo quitar: "+error.message); return; }
+    }
+    clearTimeout(timers.current[r.id]);
+    setRows(list=>list.filter(x=>x.id!==r.id));
+    if(estRef.current!=="base") setTimeout(()=>guardar(null), 60);
+    setMsg("Permiso quitado: "+(r.permiso||r.codpla||"(vacío)"));
+  }
+  async function restaurar(){
+    if(!window.confirm("¿Volver a la tabla original (la que pasó RRHH el 16/11/2026)? Se pierden los permisos agregados, quitados o cambiados.")) return;
+    try{
+      if(estRef.current==="base"){ const {error:eD} = await supabaseClient.from(GEO_PERMISOS_TABLE).delete().neq("id", ""); if(eD) throw eD; }
+      const now = new Date().toISOString();
+      const {error:eI} = await supabaseClient.from(GEO_PERMISOS_TABLE).insert(GEO_PERMISOS_DEF.map(r=>({...r, updated_at:now})));
+      if(eI) throw eI;
+      setRows(GEO_PERMISOS_DEF); setEstado("base"); setMsg("Tabla original restaurada");
+    }catch(e){ setMsg("No se pudo restaurar: "+((e && e.message) || String(e))); }
+  }
+  function descargar(){
+    const aoa = [["CODPLA","Permiso","N°","Goce de Sueldo","Permite Marcar"]].concat(rows.map(r=>[r.codpla||"", r.permiso||"", r.numero||"", r.goce||"", r.permite_marcar||""]));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Permisos Geo");
+    XLSX.writeFile(wb, "equivalencias-geo-codpla-"+localISO(Date.now())+".xlsx");
+  }
+  // controles
+  const codplaTabla = new Set(rows.map(r=>String(r.codpla||"").trim().toUpperCase()).filter(Boolean));
+  const universo = parsed && parsed.idMotivoUniverse ? parsed.idMotivoUniverse : [];
+  const enDatos = new Set(universo.map(m=>String(m.key).toUpperCase()));
+  const sinPermiso = universo.filter(m=>!codplaTabla.has(String(m.key).toUpperCase()));
+  const codsPorNumero = new Map();
+  rows.forEach(r=>{ const n = String(r.numero||"").trim(), c = String(r.codpla||"").trim().toUpperCase(); if(!n || !c) return; if(!codsPorNumero.has(n)) codsPorNumero.set(n, new Set()); codsPorNumero.get(n).add(c); });
+  const numConflicto = n => { const s = codsPorNumero.get(String(n||"").trim()); return !!s && s.size>1; };
+  const nSinCodpla = rows.filter(r=>!String(r.codpla||"").trim()).length;
+  const qn = normTxt(q);
+  const lista = rows.filter(r=>(!soloSin || !String(r.codpla||"").trim()) && (!qn || [r.codpla, r.permiso, r.numero].some(v=>normTxt(v).includes(qn))));
+  const celda = (r, k, w, extra) => ro ? <span>{r[k]||""}</span>
+    : <input type="text" value={r[k]||""} style={{width:w, fontSize:12.5, padding:"4px 6px"}} list={extra && extra.list}
+        onChange={e=>cambiar(r.id, {[k]: k==="codpla" ? e.target.value.toUpperCase() : e.target.value})} />;
+  const sel = (r, k, opts) => ro ? <span>{r[k]||""}</span>
+    : <select value={r[k]||""} onChange={e=>cambiar(r.id, {[k]:e.target.value})} style={{fontSize:12.5, padding:"4px 6px"}}>{opts.concat(r[k] && !opts.includes(r[k]) ? [r[k]] : []).map(o=>(<option key={o} value={o}>{o}</option>))}</select>;
+  const datalistCods = Array.from(new Set([...codplaTabla, ...enDatos])).sort();
+  return (
+    <div className="tabpanel">
+      <div className="card table-card">
+        <h3>Permisos de Geo ↔ CODPLA de Calipso</h3>
+        <p className="desc" style={{marginTop:0}}>
+          Cada permiso de GeoVictoria (nombre y N°) con el <b>CODPLA</b> (Id Motivo) que le corresponde en Calipso. Es la tabla que se va a usar para pasar a Calipso lo que se cargó en Geo.
+          Si Geo suma o quita un permiso, agregalo o quitalo acá. Un permiso <b>sin CODPLA</b> no se puede cargar al Radar.
+          {esAdmin ? " Los cambios se guardan solos." : " La tabla la edita el Administrador; acá solo se consulta."}
+        </p>
+        {estado==="cargando" && <div className="hint">Cargando…</div>}
+        {estado==="def" && <div className="hint">Se muestra la tabla original (todavía no se modificó): la primera vez que cambies algo se guarda completa en el servidor.</div>}
+        {estado==="sintabla" && <div className="warn-banner">Se muestra la tabla original y no se puede editar: falta correr supabase-migracion-permisos-geo.sql en el SQL Editor de Supabase.</div>}
+        {estado==="error" && <div className="warn-banner">No se pudo leer la tabla del servidor ({err}). Se muestra la original, sin poder editarla.</div>}
+        <div style={{display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap", marginTop:8}}>
+          <div className="field"><label>Buscar</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Permiso, CODPLA o N°" style={{minWidth:220}} /></div>
+          <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}><input type="checkbox" checked={soloSin} onChange={e=>setSoloSin(e.target.checked)} /> Solo los sin CODPLA ({nSinCodpla})</label>
+          <span className="hint">Mostrando {lista.length} de {rows.length}</span>
+          {!ro && <button type="button" className="btn small" onClick={agregar}>+ Agregar permiso</button>}
+          <button type="button" className="btn secondary small" onClick={descargar}>Descargar Excel</button>
+          {!ro && estado==="base" && <button type="button" className="btn secondary small" onClick={restaurar}>Volver a la tabla original</button>}
+          <span className="hint">{msg}</span>
+        </div>
+      </div>
+
+      {parsed && sinPermiso.length>0 && (
+        <div className="card table-card">
+          <h3>Códigos de Calipso sin ningún permiso de Geo ({sinPermiso.length})</h3>
+          <p className="desc" style={{marginTop:0}}>Estos Id Motivo figuran en los datos cargados en el Radar, pero ningún permiso de la tabla los usa: una ausencia con ese permiso en Geo no se podría pasar a Calipso. Revisá si falta completar el CODPLA de algún permiso (o agregar el permiso).</p>
+          <div style={{display:"flex", flexWrap:"wrap", gap:8}}>
+            {sinPermiso.map(m=>(<span key={m.key} className="hint" style={{margin:0, border:"1px solid var(--border)", borderRadius:6, padding:"3px 8px"}}><b>{m.key}</b>{String(m.label||"").replace(new RegExp("^"+m.key+"\\s*[—-]\\s*"), "") ? " — "+String(m.label).replace(new RegExp("^"+m.key+"\\s*[—-]\\s*"), "") : ""}</span>))}
+          </div>
+        </div>
+      )}
+
+      <div className="card table-card">
+        <datalist id="geo-codplas">{datalistCods.map(c=>(<option key={c} value={c} />))}</datalist>
+        <div className="overflow-x" style={{maxHeight:620, overflowY:"auto"}}>
+          <table>
+            <thead><tr><th>CODPLA</th><th>Permiso (Geo)</th><th>N° (Geo)</th><th>Goce de sueldo</th><th>Permite marcar</th><th>Estado</th>{!ro && <th></th>}</tr></thead>
+            <tbody>
+              {lista.map(r=>{
+                const cod = String(r.codpla||"").trim().toUpperCase();
+                let est = null;
+                if(!cod) est = <span style={{color:"var(--warning)", fontWeight:700}}>Sin CODPLA: no se carga</span>;
+                else if(numConflicto(r.numero)) est = <span style={{color:"var(--critical)", fontWeight:700}}>N° repetido con otro CODPLA</span>;
+                else if(parsed && universo.length && !enDatos.has(cod)) est = <span className="hint" style={{margin:0}} title="Ese Id Motivo todavía no aparece en los datos cargados en el Radar (puede ser normal si nunca se usó).">Sin uso en los datos</span>;
+                else est = <span style={{color:"var(--good)"}}>✓</span>;
+                return (
+                  <tr key={r.id} style={!cod ? {background:"color-mix(in srgb, var(--warning) 8%, transparent)"} : undefined}>
+                    <td>{celda(r, "codpla", 70, {list:"geo-codplas"})}</td>
+                    <td>{celda(r, "permiso", 280)}</td>
+                    <td>{celda(r, "numero", 60)}</td>
+                    <td>{sel(r, "goce", ["Si","No"])}</td>
+                    <td>{sel(r, "permite_marcar", ["Si","No","--:--"])}</td>
+                    <td>{est}</td>
+                    {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitar(r)}>Quitar</button></td>}
+                  </tr>
+                ); })}
+              {!lista.length && <tr><td colSpan="7" className="hint">Ningún permiso con este filtro.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Carga Geo dentro del Radar + paso a Crónicos (provisorio) ----
+   La «Carga de Novedades GeoVictoria» (carga-geo.html, con geo-shim.js) corre en un iframe y guarda en la tabla `geo_docs`.
+   De ahí el Radar arma, por empleado y día, una fila de ausentismo PROVISORIA (origen "geo") con el mismo formato que Calipso:
+   así Crónicos, Resumen, etc. se actualizan con lo que se va resolviendo en Geo, sin esperar la carga de Calipso. Cuando se carga
+   Calipso, sus filas (misma clave legajo+fecha) reemplazan a las de Geo. Nunca se pisa una fila de Calipso. */
+const GEO_DOCS_TABLE = "geo_docs";
+const geoNorm = s => normTxt(String(s==null ? "" : s).trim());
+// permisos de Geo -> CODPLA, por nombre y por N° (solo los que tienen CODPLA)
+function geoIndicePermisos(filas){
+  const porNombre = new Map(), porNumero = new Map();
+  (filas||[]).forEach(f=>{
+    const cod = String(f.codpla||"").trim().toUpperCase(); if(!cod) return;
+    const n = geoNorm(f.permiso); if(n && !porNombre.has(n)) porNombre.set(n, cod);
+    const num = String(f.numero||"").trim(); if(num && !porNumero.has(num)) porNumero.set(num, cod);
+  });
+  return {porNombre, porNumero};
+}
+// por Id Motivo: lo más frecuente que Calipso ya trae en los datos cargados (motivo, Estado, agrupador de presentismo y de presidencia)
+function geoInfoMotivos(records){
+  const cnt = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.idMotivo) return;
+    const k = r.idMotivo.toUpperCase(), v = [r.motivo||"", r.estado||"", r.agrup||"", r.presidencia||""].join("\u0001");
+    let m = cnt.get(k); if(!m){ m = new Map(); cnt.set(k, m); }
+    m.set(v, (m.get(v)||0)+1);
+  });
+  const out = new Map();
+  cnt.forEach((m,k)=>{ let best = null, bn = 0; m.forEach((n,v)=>{ if(n>bn){ bn = n; best = v; } }); const p = best.split("\u0001"); out.set(k, {motivo:p[0], estado:p[1], agrup:p[2], presidencia:p[3]}); });
+  return out;
+}
+function geoUltimoPorLegajo(records){
+  const m = new Map();
+  records.forEach(r=>{ if(!r.valid || !r.legajo) return; const k = r.legajo.toUpperCase(), p = m.get(k); if(!p || r.ts>=p.ts) m.set(k, r); });
+  return m;
+}
+const geoTipoContrat = v => /eventual/i.test(v||"") ? "Eventual" : /pzo|plazo/i.test(v||"") ? "Cto. Pzo. Fijo" : "Propios";
+// datos del empleado (los que Calipso trae en cada fila): los de su última fila de Calipso; si no tiene, el padrón de la Carga Geo y el plantel del Radar
+function geoDescriptivos(last, x2, pl){
+  const L = last || {}, P = pl || {};
+  const v = (a, b, c) => (a!=null && a!=="") ? a : (b!=null && b!=="") ? b : (c||"");
+  return {
+    nombre: v(L.nombre, x2.Nombre, P.nombre),
+    unidad: v(L.unidad, unidadBase(x2["Unidad de Negocio"]), unidadBase(P.unidad)),
+    sector: v(L.sector, x2.Sector, P.sector), gerencia: v(L.gerencia, x2.Gerencia, P.gerencia),
+    departamento: v(L.departamento, x2.Departamento, P.departamento), empresa: v(L.empresa, x2.Empresa, P.empresa),
+    puesto: v(L.puesto, x2.Puesto, P.puesto), jefe: v(L.jefe, P.jefe), sindicato: v(L.sindicato, P.sindicato),
+    tipoContrat: v(L.tipoContrat, geoTipoContrat(x2["Tipo de Contratación"]))
+  };
+}
+// Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, ...}}.
+function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes}){
+  const p = dia.split("-").map(Number), anio = p[0], mes = p[1], d = p[2];
+  const ts = Date.UTC(anio, mes-1, d), monthKey = anio+"-"+pad2(mes), dateKey = monthKey+"-"+pad2(d);
+  // retirar = filas provisorias de Geo ya guardadas que hoy Geo ya no respalda (se sacó la novedad, quedó sin informar, etc.): se marcan "geo-anulada"
+  const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, total:rows.length};
+  rows.forEach(x=>{
+    const x2 = x.x || {};
+    const legajo = String(x2.Legajo||"").trim();
+    const nom = (x.a||"")+", "+(x.n||"");
+    if(!legajo){ res.sinLegajo.push({dni:x.d, nombre:nom}); return; }
+    const retiro = () => { const ex = existentes.get(legajo.toUpperCase()+"|"+dateKey); if(ex && ex.origen==="geo") res.retirar.push(ex); };
+    const st = (x.s==="ni" && /descanso/i.test(x.t||"")) ? "de" : x.s;
+    const nov = novMap[x.d];
+    const code = nov ? String(nov.code==null ? "" : nov.code).trim() : "";
+    let cod = null, razon = "";
+    if(code){
+      if(!/^0+$/.test(code)){            // 00 = «Falta fichada» (reclamo interno): cuenta como presente
+        cod = permIdx.porNumero.get(code) || null;
+        if(!cod){ res.sinEquivalente.push({legajo, nombre:nom, permiso:"N° "+code}); retiro(); return; }
+        razon = String(nov.com||"").trim();
+      }
+    }
+    else if(st==="fi"){ /* presente */ }
+    else if(st==="pe"){
+      cod = permIdx.porNombre.get(geoNorm(x.p)) || null;
+      if(!cod){ res.sinEquivalente.push({legajo, nombre:nom, permiso:x.p||""}); retiro(); return; }
+    }
+    else if(st==="fe"){ cod = "FER"; }
+    else if(st==="de"){ res.descanso++; retiro(); return; }
+    else { res.pendientes.push({legajo, nombre:nom, grupo:x.g||"", turno:x.t||""}); retiro(); return; }
+    const info = cod ? motInfo.get(cod) : null;
+    if(cod && !info){ res.sinInfo.push({legajo, nombre:nom, codpla:cod}); retiro(); return; }
+    const ex = existentes.get(legajo.toUpperCase()+"|"+dateKey);
+    if(ex && ex.origen!=="geo"){ res.oficiales++; return; }          // ya cargado desde Calipso: no se toca
+    const agrup = cod ? info.agrup : "P";
+    const desc = geoDescriptivos(ultimo.get(legajo.toUpperCase()), x2, plantelMap.get(legajo.toUpperCase()));
+    res.records.push({legajo, agrup, cat:agrup||"F", ...desc, idMotivo:cod||"", motivo:cod ? info.motivo : "", estado:cod ? info.estado : "P", razon,
+      presidencia:cod ? info.presidencia : "", valid:true, dia:d, mes, anio, ts, monthKey, dateKey, origen:"geo"});
+    if(cod && agrup!=="P") res.ausentes++; else res.presentes++;
+  });
+  return res;
+}
+// Suma/actualiza las filas provisorias y retira las que Geo ya no respalda. Devuelve los registros resultantes y las filas a guardar en Supabase
+// (las retiradas se guardan con origen "geo-anulada": no se borran, así todos los navegadores se enteran por la sincronización y dejan de usarlas).
+function geoAplicarEnRecords(prevRecords, records, retirar){
+  const clave = r => (r.legajo||"").toUpperCase()+"|"+r.dateKey;
+  const m = mergeAusentismoRecords(prevRecords, records);
+  const ret = (retirar||[]).filter(r=>r && r.origen==="geo");
+  let merged = m.merged;
+  if(ret.length){ const claves = new Set(ret.map(clave)); merged = merged.filter(r=>!(r.valid && r.origen==="geo" && claves.has(clave(r)))); }
+  const filas = m.changedRows.map(ausRecordToRow).concat(ret.map(r=>ausRecordToRow({...r, origen:"geo-anulada"})));
+  return {merged, filas, nuevos:m.nuevos, modificados:m.modificados, sinCambios:m.sinCambios, retiradas:ret.length};
+}
+// lee de geo_docs los empleados y novedades de un día
+async function geoLeerDia(dia){
+  const pull = async parent => {
+    let out = [], from = 0;
+    while(true){
+      const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id,data").eq("parent", parent).order("doc_id").range(from, from+999);
+      if(error) throw error;
+      out = out.concat(data||[]);
+      if(!data || data.length<1000) break;
+      from += 1000;
+    }
+    return out;
+  };
+  const [emps, nov] = await Promise.all([pull("days/"+dia+"/emps"), pull("days/"+dia+"/nov")]);
+  const rows = [];
+  emps.forEach(dc=>((dc.data && dc.data.rows) || []).forEach(x=>rows.push(x)));
+  const novMap = {};
+  nov.forEach(dc=>Object.entries(dc.data||{}).forEach(([dni,v])=>{ if(dni.charAt(0)==="_" || typeof v!=="string") return; try{ novMap[dni] = JSON.parse(v); }catch(e){} }));
+  return {rows, novMap};
+}
+async function geoListarDias(){
+  const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id").eq("parent", "days").order("doc_id", {ascending:false}).range(0, 199);
+  if(error) throw error;
+  return (data||[]).map(r=>r.doc_id);
+}
+async function geoPermisosActuales(){
+  try{ const d = await slFetchAll("geo_permisos", "orden"); return d.length ? d : GEO_PERMISOS_DEF; }catch(e){ return GEO_PERMISOS_DEF; }
+}
+
+const GEO_RETENCION_DIAS = 90;   // los días de Geo más viejos se borran solos (los de Calipso quedan para siempre en el ausentismo)
+function GeoFrame({view, parsed, plantel, puedeCargar, onAplicar, limpiar}){
+  const ref = useRef(null);
+  useEffect(()=>{ if(limpiar) supabaseClient.rpc("geo_limpiar", {p_dias:GEO_RETENCION_DIAS}).then(()=>{}, ()=>{}); }, []);
+  useEffect(()=>{
+    const f = t=>{ try{ if(ref.current && ref.current.contentWindow) ref.current.contentWindow.postMessage({type:"radar-theme", theme:t}, location.origin); }catch(e){} };
+    themeListeners.add(f);
+    return ()=>{ themeListeners.delete(f); };
+  }, []);
+  return (
+    <div className="tabpanel" style={{gap:10}}>
+      {!view && puedeCargar && onAplicar && <GeoCronicosBar parsed={parsed} plantel={plantel} onAplicar={onAplicar} />}
+      <iframe ref={ref} title={view==="pres" ? "Cuadro de Presentismo diario" : "Carga de Novedades GeoVictoria"}
+        src={"carga-geo.html"+(view ? "?v="+view : "")} allow="clipboard-write"
+        style={{width:"100%", height:"calc(100vh - 210px)", minHeight:560, border:"1px solid var(--border)", borderRadius:12, background:"var(--surface)"}} />
+    </div>
+  );
+}
+
+// Barra «Paso a Crónicos»: muestra qué se pasaría del día elegido de Geo al ausentismo del Radar, y lo pasa (a mano o solo cada vez que cambia Geo)
+function GeoCronicosBar({parsed, plantel, onAplicar}){
+  const [dias, setDias] = useState([]);
+  const [dia, setDia] = useKeptState("geo.dia", "");
+  const [auto, setAuto] = useState(()=>{ try{ return localStorage.getItem("geo.auto")==="1"; }catch(e){ return false; } });
+  const [prev, setPrev] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ref = useRef({}); ref.current = {parsed, plantel, onAplicar, auto, dia};
+  const cola = useRef(Promise.resolve());
+  const diaEfectivo = dia && dias.includes(dia) ? dia : (dias[0]||"");
+  async function calcular(d, aplicar){
+    const P = ref.current.parsed;
+    if(!P) throw new Error("Primero cargá en el Radar el archivo de Calipso (hace falta para conocer los motivos y los datos de cada legajo).");
+    const [dd, permisos] = await Promise.all([geoLeerDia(d), geoPermisosActuales()]);
+    const records = P.records;
+    const plantelMap = new Map((ref.current.plantel||[]).map(x=>[String(x.legajo||"").toUpperCase(), x]));
+    const existentes = new Map();
+    records.forEach(r=>{ if(r.valid && r.dateKey===d) existentes.set((r.legajo||"").toUpperCase()+"|"+r.dateKey, r); });
+    const res = geoArmarFilas({dia:d, rows:dd.rows, novMap:dd.novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
+      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes});
+    const m = mergeAusentismoRecords(records, res.records);
+    res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
+    if(aplicar && (m.nuevos+m.modificados+res.retirar.length)>0){ const r = await ref.current.onAplicar(res.records, "Geo "+d, res.retirar); res.aplicado = r; }
+    return res;
+  }
+  async function verDias(){ try{ const l = await geoListarDias(); setDias(l); }catch(e){ setMsg("No se pudieron leer los días de Geo ("+((e && e.message)||e)+"). ¿Corriste supabase-migracion-geo.sql?"); } }
+  useEffect(()=>{ verDias(); }, []);
+  // cada vez que la Carga Geo guarda algo, avisa; con el paso automático activado, se actualiza Crónicos
+  useEffect(()=>{
+    const h = ev=>{
+      if(ev.origin!==location.origin || !ev.data || ev.data.type!=="geo-changed") return;
+      verDias();
+      if(!ref.current.auto) return;
+      const lista = (ev.data.days||[]).slice(-3);
+      cola.current = cola.current.then(async ()=>{
+        for(const d of lista){
+          try{
+            const r = await calcular(d, true);
+            const n = (r.aplicado ? r.aplicado.nuevos+r.aplicado.modificados : 0), nr = (r.aplicado ? r.aplicado.retiradas : 0);
+            setMsg("Crónicos actualizado con Geo "+dateKeyToLabel(d)+" ("+new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})+"): "+n+" fila"+(n===1?"":"s")+" nueva"+(n===1?"":"s")+" o modificada"+(n===1?"":"s")+(nr ? " y "+nr+" retirada"+(nr===1?"":"s") : "")+". Faltan informar: "+r.pendientes.length+".");
+          }catch(e){ setMsg("No se pudo pasar a Crónicos: "+((e && e.message)||e)); }
+        }
+      });
+    };
+    window.addEventListener("message", h);
+    return ()=>window.removeEventListener("message", h);
+  }, []);
+  function cambiarAuto(v){
+    if(v && !window.confirm("Con esto, cada vez que se guarde algo en la Carga Geo, el Radar va a escribir en la base REAL filas provisorias de ese día (que después reemplaza Calipso). ¿Activarlo?")) return;
+    setAuto(v); try{ localStorage.setItem("geo.auto", v ? "1" : "0"); }catch(e){}
+  }
+  async function ver(){ if(!diaEfectivo) return; setBusy(true); setMsg(""); try{ setPrev(await calcular(diaEfectivo, false)); }catch(e){ setPrev(null); setMsg((e && e.message)||String(e)); } setBusy(false); }
+  async function pasar(){
+    if(!diaEfectivo) return;
+    if(!window.confirm("Pasar a Crónicos (base real) lo de Geo del "+dateKeyToLabel(diaEfectivo)+"? Son filas provisorias: la carga de Calipso las reemplaza. No se toca ninguna fila que ya venga de Calipso.")) return;
+    setBusy(true); setMsg("");
+    try{
+      const r = await calcular(diaEfectivo, true); setPrev(r);
+      setMsg(r.aplicado ? "Listo: "+r.aplicado.nuevos+" fila(s) nueva(s) y "+r.aplicado.modificados+" modificada(s)"+(r.aplicado.retiradas ? ", "+r.aplicado.retiradas+" retirada(s)" : "")+". Crónicos ya lo muestra." : "No había nada para cambiar: lo de Geo ya está en el Radar.");
+    }catch(e){ setMsg("No se pudo pasar a Crónicos: "+((e && e.message)||String(e))); }
+    setBusy(false);
+  }
+  const lista = (arr, f) => arr.slice(0, 40).map((x,i)=>(<li key={i}>{f(x)}</li>)).concat(arr.length>40 ? [<li key="m" className="hint">… y {arr.length-40} más</li>] : []);
+  return (
+    <CollapsibleCard id="geo-cronicos" title="Paso a Crónicos (filas provisorias desde Geo)"
+      summary={auto ? "Automático: ACTIVADO" : "Automático: apagado"} defaultOpen={false}>
+      <p className="desc" style={{marginTop:0}}>
+        Con lo que se va resolviendo en esta carga (fichadas, permisos y novedades), el Radar arma por empleado y día una fila <b>provisoria</b> con el mismo formato que Calipso,
+        para que Crónicos y el resto se actualicen sin esperar el archivo de Calipso. Los <b>no informados</b> sin novedad todavía no se pasan (no se sabe qué son).
+        Cuando cargues Calipso, sus filas reemplazan a las de Geo. Nunca se pisa una fila que ya viene de Calipso.
+        Si después sacás una novedad (o el empleado vuelve a quedar sin informar), la fila provisoria se retira en el siguiente paso.
+      </p>
+      <div style={{display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap"}}>
+        <div className="field"><label>Día de Geo</label>
+          <select value={diaEfectivo} onChange={e=>{ setDia(e.target.value); setPrev(null); }} disabled={!dias.length}>
+            {!dias.length && <option value="">Sin días cargados</option>}
+            {dias.map(d=>(<option key={d} value={d}>{dateKeyToLabel(d)}</option>))}
+          </select>
+        </div>
+        <button type="button" className="btn secondary small" onClick={ver} disabled={busy || !diaEfectivo}>Ver qué se pasaría</button>
+        <button type="button" className="btn small" onClick={pasar} disabled={busy || !diaEfectivo}>Pasar a Crónicos ahora</button>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}} title="Escribe en la base real cada vez que cambie algo en la Carga Geo">
+          <input type="checkbox" checked={auto} onChange={e=>cambiarAuto(e.target.checked)} /> Pasar automáticamente a Crónicos cada vez que cambie Geo
+        </label>
+        {busy && <span className="hint">Procesando…</span>}
+      </div>
+      {msg && <p className="hint" style={{marginTop:8}}>{msg}</p>}
+      {prev && (
+        <div style={{marginTop:10}}>
+          <p style={{margin:"0 0 6px"}}>
+            <b>{dateKeyToLabel(prev.dia)}</b>: {prev.total} empleados en Geo · {prev.presentes} presentes y {prev.ausentes} ausentes se pasarían ·
+            {" "}<b>{prev.nuevos}</b> filas nuevas, <b>{prev.modificados}</b> modificadas, {prev.sinCambios} sin cambios ·
+            {" "}{prev.oficiales} ya vienen de Calipso (no se tocan) · {prev.descanso} en descanso (no se pasan)
+            {prev.retirar.length>0 && <React.Fragment> · <b style={{color:"var(--warning)"}}>{prev.retirar.length}</b> provisorias que Geo ya no respalda se retirarían</React.Fragment>}
+          </p>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))", gap:10}}>
+            <details open={prev.pendientes.length>0}><summary><b style={{color:prev.pendientes.length ? "var(--warning)" : "var(--good)"}}>{prev.pendientes.length}</b> no informados sin novedad (no se pasan)</summary><ul>{lista(prev.pendientes, x=>x.legajo+" "+x.nombre+" · "+x.grupo)}</ul></details>
+            <details open={prev.sinEquivalente.length>0}><summary><b style={{color:prev.sinEquivalente.length ? "var(--critical)" : "var(--good)"}}>{prev.sinEquivalente.length}</b> con permiso de Geo sin CODPLA (completalo en «Permisos Geo»)</summary><ul>{lista(prev.sinEquivalente, x=>x.legajo+" "+x.nombre+" · "+x.permiso)}</ul></details>
+            <details open={prev.sinInfo.length>0}><summary><b style={{color:prev.sinInfo.length ? "var(--critical)" : "var(--good)"}}>{prev.sinInfo.length}</b> con un CODPLA que nunca vino de Calipso (no se sabe su agrupador)</summary><ul>{lista(prev.sinInfo, x=>x.legajo+" "+x.nombre+" · "+x.codpla)}</ul></details>
+            <details open={prev.sinLegajo.length>0}><summary><b style={{color:prev.sinLegajo.length ? "var(--warning)" : "var(--good)"}}>{prev.sinLegajo.length}</b> sin legajo (no están en el padrón de la Carga Geo)</summary><ul>{lista(prev.sinLegajo, x=>x.dni+" "+x.nombre)}</ul></details>
+          </div>
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
+
 /* ---- Historial de sanciones (Excel SANCION del sistema) y carga de mails ---- */
 function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstado, setMotivos, setMotivosEstado}){
   const [prog, setProg] = useState("");
@@ -7793,6 +8274,8 @@ function SimuladorTab({rankingUnits, objetivo}){
 /* ===================== app ===================== */
 function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const perms = ROLES[rol] || ROLES.gerencias;
+  // lo que la Carga Geo (iframe, mismo sitio) toma del Radar: la conexión a Supabase y quién es el usuario
+  window.__RADAR = {supabase: supabaseClient, userId, email: userEmail, rol, theme: effectiveTheme()};
   // Visor: solo se trabaja con las filas de su(s) Unidad(es) de Negocio (el servidor ya no le manda las demás; acá se vuelve a filtrar por seguridad)
   // y su caché local es aparte (por usuario y por unidades), para que nunca mezcle datos de otros perfiles del mismo navegador.
   const unidadesSet = perms.visor ? new Set((unidades||[]).map(unidadBase).filter(Boolean)) : null;
@@ -7955,7 +8438,8 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           setPlantelUpdatedAt(new Date());
         }
         if(ausRows.length){
-          const records = ausRows.map(ausRowToRecord);
+          if("origen" in ausRows[0]) ausTieneOrigen = true;
+          const records = ausRows.filter(ausVisible).map(ausRowToRecord);
           const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
           prevAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
           // en un reintento con datos ya en pantalla no se vuelven a aplicar (no se pierden los filtros que la persona ya eligió)
@@ -7979,7 +8463,8 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
         }
         if(newAusRows.filter(enAlcance).length){
           ausRows = mergeRawRowsById(ausRows, newAusRows.filter(enAlcance), "id");
-          const records = ausRows.map(ausRowToRecord);
+          if(ausRows.length && "origen" in ausRows[0]) ausTieneOrigen = true;
+          const records = ausRows.filter(ausVisible).map(ausRowToRecord);
           const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
           const nextAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
           if(prevAggregate){
@@ -8105,6 +8590,44 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
     reader.readAsArrayBuffer(file);
   }, [parsed, handleFile]);
 
+  // Pasar filas de Geo (provisorias) a la base del Radar: las suma/actualiza igual que "Actualizar datos" y las guarda en Supabase.
+  // Devuelve {nuevos, modificados, sinCambios}. Las filas oficiales (Calipso) las filtra antes `geoArmarFilas`: acá no se pisa nada.
+  async function aplicarMergeAus(records, nombre, retirar){
+    const prev = parsedRef.current;
+    if(!prev) throw new Error("Todavía no hay datos de ausentismo cargados en el Radar.");
+    const g = geoAplicarEnRecords(prev.records, records, retirar);
+    if(g.filas.length){
+      const next = buildParsedAggregates(g.merged, nombre || prev.fileName, prev.hasMotivo);
+      commitAusParsed(prev, next);
+      setCloudError(null);
+      ausTieneOrigen = true;   // la columna origen existe (si no, el guardado de abajo falla y avisa)
+      setSyncStatus({label:"Guardando en el servidor (Geo)", done:0, total:g.filas.length});
+      try{ await upsertInBatches(AUSENTISMO_TABLE, g.filas, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor (Geo)", done, total})); }
+      finally{ setSyncStatus(null); }
+    }
+    return {nuevos:g.nuevos, modificados:g.modificados, sinCambios:g.sinCambios, retiradas:g.retiradas};
+  }
+  // altas de motivos/agrupadores nuevos en los filtros y estado nuevo de los datos (lo comparten "Actualizar datos" y "Geo")
+  function commitAusParsed(prevParsed, next){
+    setExcludedMotivos(prevSet => {
+      const out = new Set(prevSet);
+      next.motivoUniverse.forEach(m=>{ if(!prevParsed.motivoUniverse.some(om=>om.key===m.key) && isDefaultExcludedMotivoKey(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingIdIncluded(prevSet => {
+      const out = new Set(prevSet);
+      next.idMotivoUniverse.forEach(m=>{ if(!prevParsed.idMotivoUniverse.some(om=>om.key===m.key) && isDefaultIncludedMotivoCode(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingPresIncluded(prevSet => {
+      const out = new Set(prevSet);
+      next.presidenciaUniverse.forEach(v=>{ if(!prevParsed.presidenciaUniverse.includes(v) && RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)) out.add(v); });
+      return out;
+    });
+    parsedRef.current = next;   // ya (sin esperar al próximo dibujo): si se aplican dos días seguidos, el segundo parte de lo del primero
+    setParsed(next);
+    setFileName(next.fileName);
+  }
   function confirmAusUpdate(){
     if(!ausUpdatePreview || !parsed) return;
     const next = ausUpdatePreview.nextParsed;
@@ -8335,6 +8858,9 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
     {key:"ranking", label:"Ranking", color:"#e5a000"},
     {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
     {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
+    {key:"carga_geo", label:"Carga Geo", color:"#1f8a70"},
+    {key:"presentismo", label:"Presentismo diario", color:"#e8590c"},
+    {key:"permisos_geo", label:"Permisos Geo", color:"#3a8f8f"},
     {key:"usuarios", label:"Usuarios y permisos", color:"#7b8794"}
   ];
   const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
@@ -8367,6 +8893,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           )}
           <span title={perms.desc}>{userEmail} · <b>{perms.label}</b></span>
           <InstallButton />
+          <ThemeToggle />
           <ChangePasswordButton userEmail={userEmail} />
           <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
         </div>
@@ -8541,6 +9068,9 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="carga_geo" && <GeoFrame key="geo-full" view="" parsed={parsedRaw} plantel={plantel} puedeCargar={!!perms.cargar} onAplicar={aplicarMergeAus} limpiar={!!perms.esAdmin} />}
+          {shownTab==="presentismo" && <GeoFrame key="geo-pres" view="pres" />}
+          {shownTab==="permisos_geo" && <GeoPermisosTab parsed={parsed} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
         </React.Fragment>
       )}
