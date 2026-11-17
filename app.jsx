@@ -8239,6 +8239,21 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
             {prev.retroactivas>0 && <React.Fragment> · {prev.retroactivas} días anteriores de licencias con «Desde» (incluidos en las filas nuevas/modificadas)</React.Fragment>}
             {prev.retirar.length>0 && <React.Fragment> · <b style={{color:"var(--warning)"}}>{prev.retirar.length}</b> provisorias que Geo ya no respalda se retirarían</React.Fragment>}
           </p>
+          {(()=>{
+            const aus = prev.records.filter(r=>r.agrup && r.agrup!=="P").sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"","es") || a.dateKey.localeCompare(b.dateKey));
+            return (
+              <details open style={{margin:"0 0 10px"}}>
+                <summary><b style={{color:"var(--accent)"}}>{aus.length}</b> ausentes (con permiso o novedad) que se pasarían a Crónicos — tocá para ver quiénes</summary>
+                <div style={{maxHeight:280, overflow:"auto", marginTop:6}}>
+                  <table>
+                    <thead><tr><th>Legajo</th><th>Nombre</th><th>Día</th><th>Id Motivo</th><th>Motivo</th><th>Razón</th><th>Unidad</th></tr></thead>
+                    <tbody>{aus.map((r,i)=>(<tr key={i}><td>{r.legajo}</td><td>{r.nombre}</td><td>{dateKeyToLabel(r.dateKey)}</td><td>{r.idMotivo}</td><td>{r.motivo}</td><td>{r.razon}</td><td>{r.unidad}</td></tr>))}
+                      {!aus.length && <tr><td colSpan={7} className="hint">Ninguno.</td></tr>}</tbody>
+                  </table>
+                </div>
+              </details>
+            );
+          })()}
           <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))", gap:10}}>
             <details open={prev.pendientes.length>0}><summary><b style={{color:prev.pendientes.length ? "var(--warning)" : "var(--good)"}}>{prev.pendientes.length}</b> no informados sin novedad (no se pasan)</summary><ul>{lista(prev.pendientes, x=>x.legajo+" "+x.nombre+" · "+x.grupo)}</ul></details>
             <details open={prev.sinEquivalente.length>0}><summary><b style={{color:prev.sinEquivalente.length ? "var(--critical)" : "var(--good)"}}>{prev.sinEquivalente.length}</b> con permiso de Geo sin CODPLA (completalo en «Permisos Geo»)</summary><ul>{lista(prev.sinEquivalente, x=>x.legajo+" "+x.nombre+" · "+x.permiso)}</ul></details>
