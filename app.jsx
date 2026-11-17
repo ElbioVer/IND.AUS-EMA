@@ -8027,6 +8027,45 @@ function geoNovMapDe(nov){
 }
 // solo las novedades de un día (sin los empleados)
 async function geoLeerNovedades(dia){ return geoNovMapDe(await geoPull("days/"+dia+"/nov")); }
+// Explica en castellano qué pasó (o qué falta) para que un empleado del día de Geo llegue a Crónicos.
+// res = resultado de geoArmarFilas sobre ese empleado (con res.merged y res.novMap); records = los registros ya cargados en el Radar.
+function geoExplicarEmpleado({x, dia, res, records, padron, plantel, automatico}){
+  const x2 = padron.get(x.d) || x.x || {}, legajo = String(x2.Legajo||"").trim(), L = u => u.toUpperCase();
+  const nombre = ((x.a||"")+", "+(x.n||"")).trim();
+  const estadoGeo = (x.s==="fi" ? "con fichada" : x.s==="pe" ? "con permiso «"+(x.p||"")+"»" : x.s==="fe" ? "feriado" : (x.s==="ni" && /descanso/i.test(x.t||"")) ? "turno Descanso, sin fichada" : "no informado");
+  const nov = res.novMap && res.novMap[x.d], novCode = nov && String(nov.code==null ? "" : nov.code).trim();
+  const lineas = [];
+  lineas.push("En Geo (" + dateKeyToLabel(dia) + "): " + estadoGeo + (novCode ? " · novedad cargada en «Novedades del día»: ID " + novCode + (nov.com ? " («" + nov.com + "»)" : "") : " · sin novedad cargada") + ".");
+  const resultado = (ok, texto) => ({nombre, legajo, ok, lineas: lineas.concat([texto])});
+  if(!legajo) return resultado(false, "NO PASA: el DNI " + x.d + " no figura en Gestión de Plantel (hay que volver a cargar el plantel con la columna Documento), y sin legajo no se puede armar la fila.");
+  const mismo = a => a && String(a.legajo||"").toUpperCase()===L(legajo);
+  if((res.pendientes||[]).some(mismo)) return resultado(false, "NO PASA: figura «No informado» y no tiene novedad cargada, así que no se sabe qué fue (por eso no se pasa). Cargale la novedad en «Novedades del día» (ej.: Enfermedad) y volvé a pasar.");
+  const se = (res.sinEquivalente||[]).find(mismo); if(se) return resultado(false, "NO PASA: el permiso/novedad «" + se.permiso + "» de Geo no tiene CODPLA en el menú «Permisos Geo». Completá su equivalencia (ej.: Enfermedad → EN) y volvé a pasar.");
+  const si = (res.sinInfo||[]).find(mismo); if(si) return resultado(false, "NO PASA: su CODPLA (" + si.codpla + ") nunca vino de Calipso, así que no se conoce su agrupador. Se completa cuando Calipso traiga ese código.");
+  if(x.s==="ni" && /descanso/i.test(x.t||"") && !novCode) return resultado(false, "NO PASA: figura con turno Descanso y sin fichada ni novedad; los descansos no se pasan. Revisá si el turno está bien asignado.");
+  const reg = (res.records||[]).find(r=>mismo(r) && r.dateKey===dia);
+  const clave = L(legajo)+"|"+dia, previa = (records||[]).find(r=>r.valid && L(r.legajo||"")+"|"+r.dateKey===clave);
+  if(!reg){
+    if(previa && previa.origen!=="geo") return resultado(false, "NO SE TOCA: ese día ya hay una fila de Calipso (" + (previa.idMotivo||"—") + "); lo de Calipso manda y no se pisa.");
+    return resultado(false, "NO PASA: no se pudo armar la fila de ese día (revisá los avisos de arriba).");
+  }
+  const yaPaso = !!(previa && previa.origen==="geo" && (previa.idMotivo||"")===(reg.idMotivo||""));
+  lineas.push((yaPaso ? "Ya está pasado a las filas del Radar" : "Está listo para pasar, pero TODAVÍA NO SE PASÓ" + (automatico ? "" : " (el pasaje automático está apagado: hay que apretar «Pasar a Crónicos ahora»)")) + ": " + (reg.idMotivo ? reg.idMotivo + " — " + (reg.motivo||"") : "presente") + ".");
+  // ¿llega a Crónicos? (con la selección «Por defecto» de motivos y suponiendo que ya está pasado)
+  const merged = res.merged || records, caso = buildCronicoCases(merged, plantel, CRONICOS_DEFAULT_MOTIVOS).find(c=>L(c.legajo||"")===L(legajo));
+  const sufijo = yaPaso ? "" : " (una vez que se pase)";
+  if(caso) return resultado(yaPaso, "EN CRÓNICOS" + sufijo + ": caso desde " + dateKeyToLabel(tsToYmd(caso.inicioTs)) + " · " + caso.motivoLabel + ". Si no lo ves, revisá los filtros de la pantalla de Crónicos (Salud, Unidad de negocio, Buscar) y, si sos Servicio médico, que sea de Propios.");
+  let causa = "";
+  const esAus = reg.cat==="AP" || reg.cat==="ANP";
+  const post = merged.filter(r=>r.valid && L(r.legajo||"")===L(legajo) && r.ts>reg.ts).sort((a,b)=>b.ts-a.ts)[0];
+  const pl = (plantel||[]).find(p=>L(p.legajo||"")===L(legajo));
+  if(!esAus && !CRONICOS_DEFAULT_MOTIVOS.has(motivoKeyOf(reg))) causa = "ese día no es una ausencia (AP/ANP) ni un motivo tildado para Crónicos: no genera caso.";
+  else if(!CRONICOS_DEFAULT_MOTIVOS.has(motivoKeyOf(reg))) causa = "el Id Motivo " + (reg.idMotivo||"—") + " no está en la selección «Por defecto» de Crónicos (tildalo en «Motivos que generan un caso crónico» para verlo).";
+  else if(post) causa = "tiene un registro posterior (" + dateKeyToLabel(post.dateKey) + ", " + (post.idMotivo||"presente") + ") que cierra el caso: Crónicos solo muestra a quien sigue ausente en su último día cargado.";
+  else if(pl && !plantelVigente(pl)) causa = "en el plantel figura dado de baja (" + (pl.estado||"con fecha de baja") + ").";
+  else causa = "no cumple las condiciones de un caso vigente (revisá el último registro del empleado).";
+  return resultado(false, "NO LLEGA A CRÓNICOS" + sufijo + ": " + causa);
+}
 // lee de geo_docs los empleados y novedades de un día
 async function geoLeerDia(dia){
   const [emps, nov] = await Promise.all([geoPull("days/"+dia+"/emps"), geoPull("days/"+dia+"/nov")]);
@@ -8070,10 +8109,12 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
   const [prev, setPrev] = useState(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [consulta, setConsulta] = useKeptState("geo.consulta", "");
+  const [diag, setDiag] = useState(null);
   const ref = useRef({}); ref.current = {parsed, plantel, onAplicar, auto, dia, dias};
   const cola = useRef(Promise.resolve());
   const diaEfectivo = dia && dias.includes(dia) ? dia : (dias[0]||"");
-  async function calcular(d, aplicar){
+  async function calcular(d, aplicar, filtro){
     const P = ref.current.parsed;
     if(!P) throw new Error("Primero cargá en el Radar el archivo de Calipso (hace falta para conocer los motivos y los datos de cada legajo).");
     const [dd, permisos] = await Promise.all([geoLeerDia(d), geoPermisosActuales()]);
@@ -8093,10 +8134,11 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
         if(geoDiasNovedad(n, l).includes(d)) novMap[dni] = {code:n.code, com:n.com};
       });
     }
-    const res = geoArmarFilas({dia:d, rows:dd.rows, novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
+    const res = geoArmarFilas({dia:d, rows:(filtro ? dd.rows.filter(filtro) : dd.rows), novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
       ultimo:geoUltimoPorLegajo(records), plantelMap, existentes, padron:plantelPadronMap(ref.current.plantel).map});
     const m = mergeAusentismoRecords(records, res.records);
     res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
+    if(filtro){ res.merged = m.merged; res.novMap = novMap; res.filasDia = dd.rows.filter(filtro); }   // para el diagnóstico de un empleado
     if(aplicar && (m.nuevos+m.modificados+res.retirar.length)>0){ const r = await ref.current.onAplicar(res.records, "Geo "+d, res.retirar); res.aplicado = r; }
     return res;
   }
@@ -8125,6 +8167,20 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
   function cambiarAuto(v){
     if(v && !window.confirm("Con esto, cada vez que se guarde algo en la Carga Geo, el Radar va a escribir en la base REAL filas provisorias de ese día (que después reemplaza Calipso). ¿Activarlo?")) return;
     setAuto(v); try{ localStorage.setItem("geo.auto", v ? "1" : "0"); }catch(e){}
+  }
+  // «¿Por qué no pasó?»: busca un empleado (apellido, legajo o DNI) en el día de Geo elegido y explica qué le falta para llegar a Crónicos
+  async function explicar(){
+    const q0 = consulta.trim(); if(!diaEfectivo || !q0) return;
+    setBusy(true); setMsg(""); setDiag(null);
+    try{
+      const q = normTxt(q0), padron = plantelPadronMap(ref.current.plantel).map;
+      const coincide = x => { const x2 = padron.get(x.d) || x.x || {}; return normTxt((x.a||"")+" "+(x.n||"")).includes(q) || String(x.d)===q0 || String(x2.Legajo||"").trim()===q0; };
+      const res = await calcular(diaEfectivo, false, coincide);
+      const hallados = res.filasDia || [];
+      if(!hallados.length){ setDiag([{nombre:q0, legajo:"", ok:false, lineas:["No encontré a nadie con «"+q0+"» en el día de Geo "+dateKeyToLabel(diaEfectivo)+". Puede que no esté en ese archivo de Geo (probá con otro día) o que esté escrito distinto (probá con el legajo o el DNI)."]}]); }
+      else setDiag(hallados.slice(0, 8).map(x=>geoExplicarEmpleado({x, dia:diaEfectivo, res, records:ref.current.parsed.records, padron, plantel:ref.current.plantel, automatico:ref.current.auto})));
+    }catch(e){ setMsg((e && e.message)||String(e)); }
+    setBusy(false);
   }
   async function ver(){ if(!diaEfectivo) return; setBusy(true); setMsg(""); try{ setPrev(await calcular(diaEfectivo, false)); }catch(e){ setPrev(null); setMsg((e && e.message)||String(e)); } setBusy(false); }
   async function pasar(){
@@ -8161,6 +8217,18 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
         </label>
         {busy && <span className="hint">Procesando…</span>}
       </div>
+      <div style={{display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap", marginTop:12}}>
+        <div className="field" style={{minWidth:260}}><label>¿Por qué un empleado no llegó a Crónicos? (apellido, legajo o DNI)</label>
+          <input type="text" value={consulta} placeholder="Ej.: Marrone" onChange={e=>{ setConsulta(e.target.value); setDiag(null); }} onKeyDown={e=>{ if(e.key==="Enter") explicar(); }} />
+        </div>
+        <button type="button" className="btn secondary small" onClick={explicar} disabled={busy || !diaEfectivo || !consulta.trim()}>Ver qué pasó con este empleado</button>
+      </div>
+      {diag && diag.map((d,i)=>(
+        <div key={i} style={{marginTop:8, padding:"8px 12px", border:"1px solid var(--border)", borderRadius:10, borderLeft:"4px solid "+(d.ok ? "var(--good)" : "var(--warning)")}}>
+          <b>{d.nombre}</b>{d.legajo ? " · legajo "+d.legajo : ""}
+          {d.lineas.map((l,j)=>(<div key={j} style={{marginTop:3, fontWeight:j===d.lineas.length-1 ? 600 : 400}}>{l}</div>))}
+        </div>
+      ))}
       {msg && <p className="hint" style={{marginTop:8}}>{msg}</p>}
       {prev && (
         <div style={{marginTop:10}}>
