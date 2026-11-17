@@ -7935,12 +7935,16 @@ function geoDiasNovedad(nov, dia){
 }
 // Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, desde, ext...}}.
 // Si una novedad tiene «desde» anterior al día, también arma las filas de los días anteriores que cubre (res.retroactivas).
-function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes, padron}){
+// Solo pasan a Crónicos los Id Motivo tildados en «Motivos que generan un caso crónico» (CRONICOS_DEFAULT_MOTIVOS, o motivosCron). Excepción: si el empleado tiene hoy un caso abierto
+// (abiertos = legajos en mayúscula), también pasa su fila de cierre (presente u otro motivo) para que el caso se cierre. soloFiltro:false = pasa todo (solo pruebas).
+function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes, padron, abiertos, motivosCron, soloFiltro}){
   padron = padron || new Map();
+  abiertos = abiertos || new Set(); motivosCron = motivosCron || CRONICOS_DEFAULT_MOTIVOS;
+  const entra = (codigo, legajoU) => soloFiltro===false || (!!codigo && motivosCron.has(codigo)) || abiertos.has(legajoU);
   const p = dia.split("-").map(Number), anio = p[0], mes = p[1], d = p[2];
   const ts = Date.UTC(anio, mes-1, d), monthKey = anio+"-"+pad2(mes), dateKey = monthKey+"-"+pad2(d);
   // retirar = filas provisorias de Geo ya guardadas que hoy Geo ya no respalda (se sacó la novedad, quedó sin informar, etc.): se marcan "geo-anulada"
-  const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, retroactivas:0, total:rows.length};
+  const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, retroactivas:0, fuera:[], total:rows.length};
   rows.forEach(x=>{
     const x2 = padron.get(x.d) || x.x || {};   // datos del empleado: el plantel del Radar; si no está, lo que quedó guardado con el día de Geo
     const legajo = String(x2.Legajo||"").trim();
@@ -7954,7 +7958,7 @@ function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap,
     if(nov && code && !/^0+$/.test(code) && nov.desde){
       const cub = geoDiasNovedad(nov, dia), previos = cub.filter(k=>k!==dateKey);
       const cp = permIdx.porNumero.get(code) || null, ip = cp ? motInfo.get(cp) : null;
-      if(previos.length && cp && ip){
+      if(previos.length && cp && ip && entra(cp, legajo.toUpperCase())){
         const desc = geoDescriptivos(ultimo.get(legajo.toUpperCase()), x2, plantelMap.get(legajo.toUpperCase()));
         previos.forEach(k=>{
           const ex = existentes.get(legajo.toUpperCase()+"|"+k);
@@ -7987,6 +7991,9 @@ function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap,
     else if(st==="de"){ res.descanso++; retiro(); return; }
     else { res.pendientes.push({legajo, nombre:nom, grupo:x.g||"", turno:x.t||""}); retiro(); return; }
     const info = cod ? motInfo.get(cod) : null;
+    if(!entra(cod, legajo.toUpperCase())){   // motivo que no está tildado para Crónicos (ni cierra un caso abierto): no se pasa (y se retira lo que ya se hubiera pasado)
+      res.fuera.push({legajo, nombre:nom, motivo:cod ? cod+(info ? " — "+info.motivo : "") : (st==="fe" ? "Feriado" : "Presente")}); retiro(); return;
+    }
     if(cod && !info){ res.sinInfo.push({legajo, nombre:nom, codpla:cod}); retiro(); return; }
     const ex = existentes.get(legajo.toUpperCase()+"|"+dateKey);
     if(ex && ex.origen!=="geo"){ res.oficiales++; return; }          // ya cargado desde Calipso: no se toca
@@ -8043,6 +8050,8 @@ function geoExplicarEmpleado({x, dia, res, records, padron, plantel, automatico}
   const se = (res.sinEquivalente||[]).find(mismo); if(se) return resultado(false, "NO PASA: el permiso/novedad «" + se.permiso + "» de Geo no tiene CODPLA en el menú «Permisos Geo». Completá su equivalencia (ej.: Enfermedad → EN) y volvé a pasar.");
   const si = (res.sinInfo||[]).find(mismo); if(si) return resultado(false, "NO PASA: su CODPLA (" + si.codpla + ") nunca vino de Calipso, así que no se conoce su agrupador. Se completa cuando Calipso traiga ese código.");
   if(x.s==="ni" && /descanso/i.test(x.t||"") && !novCode) return resultado(false, "NO PASA: figura con turno Descanso y sin fichada ni novedad; los descansos no se pasan. Revisá si el turno está bien asignado.");
+  const fu = (res.fuera||[]).find(mismo);
+  if(fu) return resultado(false, "NO PASA A CRÓNICOS: «" + fu.motivo + "» no está tildado en «Motivos que generan un caso crónico» (selección «Por defecto»), y el empleado no tiene un caso abierto que cerrar. Solo pasan los motivos de ese filtro.");
   const reg = (res.records||[]).find(r=>mismo(r) && r.dateKey===dia);
   const clave = L(legajo)+"|"+dia, previa = (records||[]).find(r=>r.valid && L(r.legajo||"")+"|"+r.dateKey===clave);
   if(!reg){
@@ -8134,8 +8143,11 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
         if(geoDiasNovedad(n, l).includes(d)) novMap[dni] = {code:n.code, com:n.com};
       });
     }
+    // empleados con un caso de Crónicos abierto antes de este día (sin contar lo que Geo ya pasó de este día en adelante): su fila de cierre también se pasa
+    const previos = records.filter(r=>!(r.origen==="geo" && r.dateKey>=d));
+    const abiertos = new Set(buildCronicoCases(previos, ref.current.plantel, CRONICOS_DEFAULT_MOTIVOS).map(c=>(c.legajo||"").toUpperCase()));
     const res = geoArmarFilas({dia:d, rows:(filtro ? dd.rows.filter(filtro) : dd.rows), novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
-      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes, padron:plantelPadronMap(ref.current.plantel).map});
+      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes, padron:plantelPadronMap(ref.current.plantel).map, abiertos});
     const m = mergeAusentismoRecords(records, res.records);
     res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
     if(filtro){ res.merged = m.merged; res.novMap = novMap; res.filasDia = dd.rows.filter(filtro); }   // para el diagnóstico de un empleado
@@ -8198,8 +8210,10 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
     <CollapsibleCard id="geo-cronicos" title="Paso a Crónicos (filas provisorias desde Geo)"
       summary={auto ? "Automático: ACTIVADO" : "Automático: apagado"} defaultOpen={false}>
       <p className="desc" style={{marginTop:0}}>
-        Con lo que se va resolviendo en esta carga (fichadas, permisos y novedades), el Radar arma por empleado y día una fila <b>provisoria</b> con el mismo formato que Calipso,
-        para que Crónicos y el resto se actualicen sin esperar el archivo de Calipso. Los <b>no informados</b> sin novedad todavía no se pasan (no se sabe qué son).
+        Con lo que se va resolviendo en esta carga (permisos y novedades), el Radar arma por empleado y día una fila <b>provisoria</b> con el mismo formato que Calipso,
+        para que Crónicos se actualice sin esperar el archivo de Calipso. <b>Solo pasan los motivos tildados en «Motivos que generan un caso crónico»</b> (selección «Por defecto»);
+        lo demás (presentes, feriados, vacaciones, otros permisos) no se pasa, salvo la fila de cierre de quien tiene un caso abierto y hoy volvió o cambió de motivo.
+        Los <b>no informados</b> sin novedad todavía no se pasan (no se sabe qué son).
         Cuando cargues Calipso, sus filas reemplazan a las de Geo. Nunca se pisa una fila que ya viene de Calipso.
         Si después sacás una novedad (o el empleado vuelve a quedar sin informar), la fila provisoria se retira en el siguiente paso.
       </p>
@@ -8233,7 +8247,7 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
       {prev && (
         <div style={{marginTop:10}}>
           <p style={{margin:"0 0 6px"}}>
-            <b>{dateKeyToLabel(prev.dia)}</b>: {prev.total} empleados en Geo · {prev.presentes} presentes y {prev.ausentes} ausentes se pasarían ·
+            <b>{dateKeyToLabel(prev.dia)}</b>: {prev.total} empleados en Geo · {prev.ausentes} ausentes con motivo de Crónicos{prev.presentes>0 ? " y "+prev.presentes+" cierres (empleados con caso abierto que hoy no están ausentes)" : ""} se pasarían · {prev.fuera.length} no se pasan (su motivo no está tildado en Crónicos) ·
             {" "}<b>{prev.nuevos}</b> filas nuevas, <b>{prev.modificados}</b> modificadas, {prev.sinCambios} sin cambios ·
             {" "}{prev.oficiales} ya vienen de Calipso (no se tocan) · {prev.descanso} en descanso (no se pasan)
             {prev.retroactivas>0 && <React.Fragment> · {prev.retroactivas} días anteriores de licencias con «Desde» (incluidos en las filas nuevas/modificadas)</React.Fragment>}
