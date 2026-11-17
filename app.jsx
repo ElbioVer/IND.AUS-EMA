@@ -203,6 +203,9 @@ function plantelRecordToRow(p){
     departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
     puesto: p.puesto||"", jefe: p.jefe||"", celular: p.celular||"",
     domicilio: p.domicilio||"", sindicato: p.sindicato||"",
+    // datos que usa también la Carga Geo como padrón (supabase-migracion-plantel-geo.sql)
+    documento: p.documento||"", tipo_contratacion: p.tipoContratacion||"", centro_costos: p.centroCostos||"", categoria: p.categoria||"",
+    fecha_ingreso: p.ingresoTs!=null ? tsToISODate(p.ingresoTs) : null, fecha_fin_contrato: p.finContratoTs!=null ? tsToISODate(p.finContratoTs) : null,
     updated_at: new Date().toISOString()
   };
 }
@@ -210,7 +213,9 @@ function plantelRowToRecord(row){
   return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
     nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
     gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||"",
-    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||"", domicilio:row.domicilio||"", sindicato:row.sindicato||""};
+    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||"", domicilio:row.domicilio||"", sindicato:row.sindicato||"",
+    documento:row.documento||"", tipoContratacion:row.tipo_contratacion||"", centroCostos:row.centro_costos||"", categoria:row.categoria||"",
+    ingresoTs: isoDateToTs(row.fecha_ingreso), finContratoTs: isoDateToTs(row.fecha_fin_contrato)};
 }
 
 function LoginForm({onSignedIn}){
@@ -541,12 +546,39 @@ const PLANTEL_FIELD_ALIASES = {
   jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"],
   celular: ["Celular","Teléfono","Telefono","Teléfono celular","Telefono celular","Tel. Celular","Tel","Tel.","Móvil","Movil"],
   domicilio: ["Domicilio","Dirección","Direccion"],
-  sindicato: ["Sindicato"]
+  sindicato: ["Sindicato"],
+  documento: ["Documento","DNI","Nro Documento","N° Documento","Nro. Documento"],
+  tipoContratacion: ["Tipo de Contratación","Tipo de Contratacion","Tipo Contratación","Tipo Contratacion"],
+  centroCostos: ["Centro de Costos","Centro de Costo","Centro Costos"],
+  categoria: ["Categoría","Categoria"],
+  fechaIngreso: ["Fecha de Ingreso","Fecha Ingreso"],
+  fechaFinContrato: ["Fecha fin contrato","Fecha Fin Contrato","Fecha fin de contrato"]
 };
 const PLANTEL_REQUIRED_FIELDS = ["legajo","fechaAlta"];
 const PLANTEL_FIELD_LABELS = {legajo:"Legajo", nombre:"Apellido y Nombre", fechaAlta:"Fecha de Alta", fechaBaja:"Fecha de Baja",
-  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)", domicilio:"Domicilio", sindicato:"Sindicato"};
-const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular","domicilio","sindicato"];
+  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)", domicilio:"Domicilio", sindicato:"Sindicato",
+  documento:"Documento (DNI)", tipoContratacion:"Tipo de Contratación", centroCostos:"Centro de Costos", categoria:"Categoría", fechaIngreso:"Fecha de Ingreso", fechaFinContrato:"Fecha fin de contrato"};
+const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular","domicilio","sindicato","documento","tipoContratacion","centroCostos","categoria","fechaIngreso","fechaFinContrato"];
+// DNI como lo usa la Carga Geo (Identificador de Geo): solo números y sin ceros a la izquierda
+const normDocumento = v => String(v==null ? "" : v).replace(/\D/g,"").replace(/^0+/,"");
+// Padrón para la Carga Geo, armado con el PLANTEL del Radar (Gestión de Plantel): DNI -> datos del empleado (mismas columnas que el padrón que antes se subía a mano).
+// Si hay dos legajos con el mismo documento se queda el vigente, y entre iguales el de ingreso más reciente.
+let padronVersion = 0;
+function plantelPadronMap(plantel){
+  const map = new Map();
+  const peso = p => (plantelVigente(p) ? 1 : 0)*1e15 + (p.ingresoTs!=null ? p.ingresoTs : (p.altaTs||0));
+  (plantel||[]).forEach(p=>{
+    const dni = p.documento; if(!dni) return;
+    const prev = map.get(dni); if(prev && peso(prev.p) >= peso(p)) return;
+    map.set(dni, {p, rec:{
+      "Legajo":p.legajo, "Unidad de Negocio":p.unidad||"", "Sector":p.sector||"", "Empresa":p.empresa||"", "Tipo de Contratación":p.tipoContratacion||"",
+      "Fecha de Ingreso":p.ingresoTs!=null ? fmtDateFromTs(p.ingresoTs) : "", "Puesto":p.puesto||"", "Gerencia":p.gerencia||"", "Departamento":p.departamento||"",
+      "Centro de Costos":p.centroCostos||"", "Categoría":p.categoria||"", "Fecha fin contrato":p.finContratoTs!=null ? fmtDateFromTs(p.finContratoTs) : "",
+      "Nombre":p.nombre||"", "Estado Empleado":p.estado||""}});
+  });
+  const out = new Map(); map.forEach((v,k)=>out.set(k, v.rec));
+  return {map:out, n:out.size, version:++padronVersion, at:Date.now()};
+}
 function findColByAliases(headerRow, aliases){
   for(let a=0;a<aliases.length;a++){
     const idx = findColIndex(headerRow, aliases[a]);
@@ -1899,7 +1931,8 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
   const changedRecords = [];
   const errors = [];
   let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
-  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular","domicilio","sindicato"];
+  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular","domicilio","sindicato","documento","tipoContratacion","centroCostos","categoria"];
+  const optTs = raw => { if(String(raw==null?"":raw).trim()==="") return null; const q = parseEntrada(raw); return q.valid ? Date.UTC(q.anio, q.mes-1, q.dia) : null; };
   dataRows.forEach((row, i) => {
     const excelRow = i + 2 + (rows2d.headerOffset||0);   // número de fila real del Excel (si hay títulos arriba de los encabezados)
     const legajo = cellStr(row, mapping.legajo).trim();
@@ -1951,13 +1984,17 @@ function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
       jefe: cellStr(row, mapping.jefe),
       celular: cellStr(row, mapping.celular),
       domicilio: [cellStr(row, mapping.domicilio), cellStr(row, idxLocalidad)].filter(Boolean).join(", "),
-      sindicato: cellStr(row, mapping.sindicato)
+      sindicato: cellStr(row, mapping.sindicato),
+      documento: mapping.documento!=null && mapping.documento!==-1 ? normDocumento(row[mapping.documento]) : "",
+      tipoContratacion: cellStr(row, mapping.tipoContratacion), centroCostos: cellStr(row, mapping.centroCostos), categoria: cellStr(row, mapping.categoria),
+      ingresoTs: mapping.fechaIngreso!=null && mapping.fechaIngreso!==-1 ? optTs(row[mapping.fechaIngreso]) : null,
+      finContratoTs: mapping.fechaFinContrato!=null && mapping.fechaFinContrato!==-1 ? optTs(row[mapping.fechaFinContrato]) : null
     };
     seen.add(legajoKey);
     const prev = existingByLegajo.get(legajo);
     if(!prev){ nuevos++; changedRecords.push(rec); }
     else {
-      const changed = prev.altaTs!==rec.altaTs || prev.bajaTs!==rec.bajaTs || prev.nacimientoTs!==rec.nacimientoTs || FIELD_KEYS.some(k=>(prev[k]||"")!==(rec[k]||""));
+      const changed = prev.altaTs!==rec.altaTs || prev.bajaTs!==rec.bajaTs || prev.nacimientoTs!==rec.nacimientoTs || (prev.ingresoTs==null ? null : prev.ingresoTs)!==rec.ingresoTs || (prev.finContratoTs==null ? null : prev.finContratoTs)!==rec.finContratoTs || FIELD_KEYS.some(k=>(prev[k]||"")!==(rec[k]||""));
       if(changed){ modificados++; changedRecords.push(rec); } else sinCambios++;
     }
     records.push(rec);
@@ -7886,13 +7923,14 @@ function geoDescriptivos(last, x2, pl){
   };
 }
 // Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, ...}}.
-function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes}){
+function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes, padron}){
+  padron = padron || new Map();
   const p = dia.split("-").map(Number), anio = p[0], mes = p[1], d = p[2];
   const ts = Date.UTC(anio, mes-1, d), monthKey = anio+"-"+pad2(mes), dateKey = monthKey+"-"+pad2(d);
   // retirar = filas provisorias de Geo ya guardadas que hoy Geo ya no respalda (se sacó la novedad, quedó sin informar, etc.): se marcan "geo-anulada"
   const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, total:rows.length};
   rows.forEach(x=>{
-    const x2 = x.x || {};
+    const x2 = padron.get(x.d) || x.x || {};   // datos del empleado: el plantel del Radar; si no está, lo que quedó guardado con el día de Geo
     const legajo = String(x2.Legajo||"").trim();
     const nom = (x.a||"")+", "+(x.n||"");
     if(!legajo){ res.sinLegajo.push({dni:x.d, nombre:nom}); return; }
@@ -8007,7 +8045,7 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
     const existentes = new Map();
     records.forEach(r=>{ if(r.valid && r.dateKey===d) existentes.set((r.legajo||"").toUpperCase()+"|"+r.dateKey, r); });
     const res = geoArmarFilas({dia:d, rows:dd.rows, novMap:dd.novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
-      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes});
+      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes, padron:plantelPadronMap(ref.current.plantel).map});
     const m = mergeAusentismoRecords(records, res.records);
     res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
     if(aplicar && (m.nuevos+m.modificados+res.retirar.length)>0){ const r = await ref.current.onAplicar(res.records, "Geo "+d, res.retirar); res.aplicado = r; }
@@ -8311,6 +8349,9 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const [plantelHistorial, setPlantelHistorial] = useState([]);
   const [plantelUpdatedAt, setPlantelUpdatedAt] = useState(null);
   const plantelActive = plantel.length>0;
+  // la Carga Geo (iframe) toma el padrón de acá: es el mismo plantel de Gestión de Plantel (se reconstruye solo cuando cambia el plantel)
+  const padronGeo = useMemo(()=>plantelPadronMap(plantel), [plantel]);
+  window.__RADAR.padron = padronGeo;
   // datos de ausentismo con el nombre de empresa unificado según el plantel (ver withCanonEmpresa)
   const parsed = useMemo(()=> withCanonEmpresa(parsedRaw, plantel), [parsedRaw, plantel]);
   // Unidades de Negocio existentes (para que el Administrador asigne las de cada Visor)

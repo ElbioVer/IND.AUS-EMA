@@ -574,7 +574,8 @@ async function handle(file,kindHint){
         finally{CL.uploading=false}
         const f=(a,t)=>a.length?`${t}: ${a.join(", ")}`:"";
         toast(`${file.name}: ${g.days.length} día${g.days.length>1?"s":""}. `+[f(res.new,"Nuevos"),f(res.upd,"Actualizados"),f(res.mrg,"Parciales, sumados a lo que había"),f(res.same,"Sin cambios")].filter(Boolean).join(" · ")+". Elegí el día arriba, en la fecha.")}
-      else{const p=parsePad(rows);S.padLocal=p.map;S.padLocalName=file.name;
+      else{if(radarPad()){toast("El padrón se toma de Gestión de Plantel (mismo archivo): actualizalo allá, no hace falta subirlo acá.");return}
+        const p=parsePad(rows);S.padLocal=p.map;S.padLocalName=file.name;
         $("padInfo").textContent=`${file.name} · ${p.map.size} DNIs`;$("dropPad").classList.add("done");
         if(CL.rowsAll)await cloudSaveRows(CL.rowsAll.map(r=>({...r,pad:padKeep(p.map.get(r.dni))||r.pad})),null,file.name);
         else toast("Padrón listo. Cargá la base de Geo o abrí una fecha guardada para cruzarlo.")}
@@ -1303,6 +1304,13 @@ const MODE_LAB={only:"Solo estas UN",except:"Todas menos estas",all:"Todas las U
 const unNorm=u=>nrm(u).replace(/\s*\(o\)\s*$/,"");
 const unSlug=u=>unNorm(u).replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"sin-un";
 const padKeep=p=>{if(!p)return null;const o={};PAD_KEEP.forEach(k=>{if(!empty(p[k]))o[k]=String(p[k])});return o};
+// [Radar] Padrón desde Gestión de Plantel: dentro del Radar el padrón es el plantel (mismo archivo), así que no se sube acá ni se guarda copiado en cada día.
+const radarPad=()=>{try{const R=window.parent&&window.parent!==window?window.parent.__RADAR:null;const p=R&&R.padron;return p&&p.map&&p.map.size?p:null}catch(e){return null}};
+const planPad=dni=>{const p=radarPad();const r=p&&p.map.get(dni);return r?padKeep(r):null};
+function padronUI(){const p=radarPad();if(!p)return false;
+  $("padInfo").textContent=`Se toma de Gestión de Plantel · ${p.n} legajos con documento`;$("dropPad").classList.add("done");$("filePad").disabled=true;
+  $("dropPad").title="El padrón se actualiza en Gestión de Plantel (mismo archivo): no hace falta subirlo acá.";
+  setStamp("padWhen",p.at,null,"Plantel leído");return true}
 const dayIdOf=d=>`${d.y}-${p2(d.m)}-${p2(d.d)}`;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 var CL={on:false,db:null,user:null,uid:null,owner:false,cfg:null,access:null,day:null,days:[],rowsAll:null,empDocs:null,novDocs:null,synced:{},dirty:new Set(),subs:{},exps:[],names:{},padCache:new Map()};
@@ -1372,7 +1380,7 @@ async function openDay(id){if(CL.day===id)return;await flushNov();
 }
 // Reconstruye los empleados de la fecha desde la base y aplica el alcance del rol
 function applyRows(){if(!CL.empDocs)return;
-  const all=[];CL.empDocs.slice().sort((a,b)=>a.id.localeCompare(b.id)).forEach(d=>(d.rows||[]).forEach(x=>all.push({dni:x.d,ape:x.a||"",nom:x.n||"",grupo:x.g||"",turno:x.t||"",cargo:x.c||"",perm:x.p||"",marks:x.m||[],st:x.s==="ni"&&isDescT(x.t)?"de":x.s,pad:x.x||null})));
+  const all=[];CL.empDocs.slice().sort((a,b)=>a.id.localeCompare(b.id)).forEach(d=>(d.rows||[]).forEach(x=>all.push({dni:x.d,ape:x.a||"",nom:x.n||"",grupo:x.g||"",turno:x.t||"",cargo:x.c||"",perm:x.p||"",marks:x.m||[],st:x.s==="ni"&&isDescT(x.t)?"de":x.s,pad:planPad(x.d)||x.x||null})));
   CL.rowsAll=all;CL.rowMap=new Map(all.map(r=>[r.dni,r]));all.forEach(r=>{if(r.pad)CL.padCache.set(r.dni,r.pad)});
   const meta=CL.days.find(d=>d.id===CL.day)||{};
   S.geo=all.filter(r=>inScopeUN(rowUN(r)));
@@ -1433,7 +1441,7 @@ async function cloudUploadGeo(g,fname,quiet){const id=dayIdOf(g.date);
   await CL.empReady;
   const prev=CL.rowMap||new Map(),had=!!(CL.rowsAll&&CL.rowsAll.length);
   // Padrón: el recién cargado, si no el que ya tenía esa fecha, si no el último conocido de otra fecha
-  let rows=g.rows.map(r=>({...r,pad:padKeep(S.padLocal&&S.padLocal.get(r.dni))||(prev.get(r.dni)||{}).pad||CL.padCache.get(r.dni)||null}));
+  let rows=g.rows.map(r=>({...r,pad:planPad(r.dni)||padKeep(S.padLocal&&S.padLocal.get(r.dni))||(prev.get(r.dni)||{}).pad||CL.padCache.get(r.dni)||null}));
   // Reporte parcial (trae menos del 90% de los empleados ya guardados): se suma a lo que había, no lo reemplaza
   let merged=false;
   if(had){const up=new Set(rows.map(r=>r.dni)),old=[...prev.values()],cov=old.filter(r=>up.has(r.dni)).length/old.length;
@@ -1445,7 +1453,7 @@ async function cloudUploadGeo(g,fname,quiet){const id=dayIdOf(g.date);
 }
 async function cloudSaveRows(rows,geoMeta,padName,quiet){const id=CL.day;if(!id)return;
   if(!quiet)toast("Guardando la base de la fecha para todos…");
-  const groups={};rows.forEach(r=>{const k=unSlug(rowUN(r));(groups[k]=groups[k]||[]).push({d:r.dni,a:r.ape,n:r.nom,g:r.grupo,t:r.turno,c:r.cargo,p:r.perm,m:r.marks,s:r.st,x:r.pad||null})});
+  const groups={};rows.forEach(r=>{const k=unSlug(rowUN(r));(groups[k]=groups[k]||[]).push({d:r.dni,a:r.ape,n:r.nom,g:r.grupo,t:r.turno,c:r.cargo,p:r.perm,m:r.marks,s:r.st,...(r.pad&&!planPad(r.dni)?{x:r.pad}:{})})});
   const docs={};Object.entries(groups).forEach(([k,list])=>{let part=[],size=0,i=0;
     list.forEach(x=>{const s=JSON.stringify(x).length;if(size+s>150000&&part.length){docs[`${k}~${i++}`]=part;part=[];size=0}part.push(x);size+=s});
     if(part.length)docs[`${k}~${i}`]=part});
@@ -1471,7 +1479,7 @@ const nameOf=id=>CL.names[id]||(id===CL.uid?"Vos":"Usuario");
 // "Actualizado: lun 16/11 16:09 · por Matías"
 const whenTxt=t=>{const d=new Date(t);return ["dom","lun","mar","mié","jue","vie","sáb"][d.getDay()]+` ${p2(d.getDate())}/${p2(d.getMonth()+1)} ${p2(d.getHours())}:${p2(d.getMinutes())}`};
 // Padrón: el de esta fecha si se subió con ella; si no, el último padrón subido en cualquier fecha
-function padStamp(){const meta=(CL.days||[]).find(d=>d.id===CL.day)||{};
+function padStamp(){if(radarPad()){padronUI();return}const meta=(CL.days||[]).find(d=>d.id===CL.day)||{};
   if(meta.pad){setStamp("padWhen",meta.padAt||meta.at,meta.padAt?meta.padBy:meta.by);return}
   const tAt=d=>d.padAt||d.at||0,last=(CL.days||[]).filter(d=>d.pad).sort((a,b)=>tAt(b)-tAt(a))[0];
   if(!last){setStamp("padWhen",0);return}
@@ -1551,6 +1559,8 @@ $("uHits").addEventListener("click",async e=>{const b=e.target.closest("[data-ha
   if(await saveCfg({users})){toast("Usuario agregado. Recordá compartirle el artifact como Colaborador.");$("uSearch").value="";$("uHits").innerHTML=""}});
 
 render();renderArt();cloudInit();
+// [Radar] si el plantel del Radar cambia (o recién termina de cargar), se vuelve a cruzar el día abierto con el padrón nuevo
+padronUI();let padV=null;setInterval(()=>{const p=radarPad(),v=p?p.version:null;if(v===padV)return;padV=v;if(!p)return;if(CL.on&&CL.empDocs)applyRows();padronUI()},2500);
 })();
 </script>
 
