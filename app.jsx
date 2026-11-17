@@ -7922,13 +7922,25 @@ function geoDescriptivos(last, x2, pl){
     tipoContrat: v(L.tipoContrat, geoTipoContrat(x2["Tipo de Contratación"]))
   };
 }
-// Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, ...}}.
+// Licencias que empiezan antes del día de la base (columna «Desde» de la Carga Geo): hasta cuántos días atrás y cuántos días de otros días se miran hacia adelante
+const GEO_DESDE_MAX_ATRAS = 60, GEO_MIRAR_ADELANTE = 10;
+const geoIsoAdd = (iso, n) => { const q = iso.split("-").map(Number), t = new Date(Date.UTC(q[0], q[1]-1, q[2]+n)); return t.getUTCFullYear()+"-"+pad2(t.getUTCMonth()+1)+"-"+pad2(t.getUTCDate()); };
+// Días (AAAA-MM-DD, hasta el día de Geo) que cubre una novedad: arranca en «desde» (si es anterior al día; vacío = el día) y dura «ext» días corridos
+function geoDiasNovedad(nov, dia){
+  const okIso = s => /^\d{4}-\d{2}-\d{2}$/.test(s||"");
+  const ini = (nov && okIso(nov.desde) && nov.desde < dia && nov.desde >= geoIsoAdd(dia, -GEO_DESDE_MAX_ATRAS)) ? nov.desde : dia;
+  const n = Math.max(1, parseInt(nov && nov.ext, 10) || 1), out = [];
+  for(let i=0; i<n; i++){ const k = geoIsoAdd(ini, i); if(k>dia) break; out.push(k); }
+  return out;
+}
+// Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, desde, ext...}}.
+// Si una novedad tiene «desde» anterior al día, también arma las filas de los días anteriores que cubre (res.retroactivas).
 function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes, padron}){
   padron = padron || new Map();
   const p = dia.split("-").map(Number), anio = p[0], mes = p[1], d = p[2];
   const ts = Date.UTC(anio, mes-1, d), monthKey = anio+"-"+pad2(mes), dateKey = monthKey+"-"+pad2(d);
   // retirar = filas provisorias de Geo ya guardadas que hoy Geo ya no respalda (se sacó la novedad, quedó sin informar, etc.): se marcan "geo-anulada"
-  const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, total:rows.length};
+  const res = {dia, records:[], retirar:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, retroactivas:0, total:rows.length};
   rows.forEach(x=>{
     const x2 = padron.get(x.d) || x.x || {};   // datos del empleado: el plantel del Radar; si no está, lo que quedó guardado con el día de Geo
     const legajo = String(x2.Legajo||"").trim();
@@ -7936,8 +7948,28 @@ function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap,
     if(!legajo){ res.sinLegajo.push({dni:x.d, nombre:nom}); return; }
     const retiro = () => { const ex = existentes.get(legajo.toUpperCase()+"|"+dateKey); if(ex && ex.origen==="geo") res.retirar.push(ex); };
     const st = (x.s==="ni" && /descanso/i.test(x.t||"")) ? "de" : x.s;
-    const nov = novMap[x.d];
-    const code = nov ? String(nov.code==null ? "" : nov.code).trim() : "";
+    let nov = novMap[x.d];
+    let code = nov ? String(nov.code==null ? "" : nov.code).trim() : "";
+    // licencia con «Desde» anterior: filas de los días anteriores que cubre; si ya terminó antes de este día, hoy no cuenta
+    if(nov && code && !/^0+$/.test(code) && nov.desde){
+      const cub = geoDiasNovedad(nov, dia), previos = cub.filter(k=>k!==dateKey);
+      const cp = permIdx.porNumero.get(code) || null, ip = cp ? motInfo.get(cp) : null;
+      if(previos.length && cp && ip){
+        const desc = geoDescriptivos(ultimo.get(legajo.toUpperCase()), x2, plantelMap.get(legajo.toUpperCase()));
+        previos.forEach(k=>{
+          const ex = existentes.get(legajo.toUpperCase()+"|"+k);
+          if(ex && ex.origen!=="geo"){ res.oficiales++; return; }
+          const q = k.split("-").map(Number);
+          res.records.push({legajo, agrup:ip.agrup, cat:ip.agrup||"F", ...desc, idMotivo:cp, motivo:ip.motivo, estado:ip.estado, razon:String(nov.com||"").trim(),
+            presidencia:ip.presidencia, valid:true, dia:q[2], mes:q[1], anio:q[0], ts:Date.UTC(q[0], q[1]-1, q[2]), monthKey:q[0]+"-"+pad2(q[1]), dateKey:k, origen:"geo"});
+          res.retroactivas++;
+        });
+      }
+      if(!cub.includes(dateKey)){
+        if(!cp) res.sinEquivalente.push({legajo, nombre:nom, permiso:"N° "+code}); else if(!ip) res.sinInfo.push({legajo, nombre:nom, codpla:cp});
+        nov = null; code = "";
+      }
+    }
     let cod = null, razon = "";
     if(code){
       if(!/^0+$/.test(code)){            // 00 = «Falta fichada» (reclamo interno): cuenta como presente
@@ -7977,25 +8009,30 @@ function geoAplicarEnRecords(prevRecords, records, retirar){
   const filas = m.changedRows.map(ausRecordToRow).concat(ret.map(r=>ausRecordToRow({...r, origen:"geo-anulada"})));
   return {merged, filas, nuevos:m.nuevos, modificados:m.modificados, sinCambios:m.sinCambios, retiradas:ret.length};
 }
-// lee de geo_docs los empleados y novedades de un día
-async function geoLeerDia(dia){
-  const pull = async parent => {
-    let out = [], from = 0;
-    while(true){
-      const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id,data").eq("parent", parent).order("doc_id").range(from, from+999);
-      if(error) throw error;
-      out = out.concat(data||[]);
-      if(!data || data.length<1000) break;
-      from += 1000;
-    }
-    return out;
-  };
-  const [emps, nov] = await Promise.all([pull("days/"+dia+"/emps"), pull("days/"+dia+"/nov")]);
-  const rows = [];
-  emps.forEach(dc=>((dc.data && dc.data.rows) || []).forEach(x=>rows.push(x)));
+async function geoPull(parent){
+  let out = [], from = 0;
+  while(true){
+    const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id,data").eq("parent", parent).order("doc_id").range(from, from+999);
+    if(error) throw error;
+    out = out.concat(data||[]);
+    if(!data || data.length<1000) break;
+    from += 1000;
+  }
+  return out;
+}
+function geoNovMapDe(nov){
   const novMap = {};
   nov.forEach(dc=>Object.entries(dc.data||{}).forEach(([dni,v])=>{ if(dni.charAt(0)==="_" || typeof v!=="string") return; try{ novMap[dni] = JSON.parse(v); }catch(e){} }));
-  return {rows, novMap};
+  return novMap;
+}
+// solo las novedades de un día (sin los empleados)
+async function geoLeerNovedades(dia){ return geoNovMapDe(await geoPull("days/"+dia+"/nov")); }
+// lee de geo_docs los empleados y novedades de un día
+async function geoLeerDia(dia){
+  const [emps, nov] = await Promise.all([geoPull("days/"+dia+"/emps"), geoPull("days/"+dia+"/nov")]);
+  const rows = [];
+  emps.forEach(dc=>((dc.data && dc.data.rows) || []).forEach(x=>rows.push(x)));
+  return {rows, novMap:geoNovMapDe(nov)};
 }
 async function geoListarDias(){
   const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id").eq("parent", "days").order("doc_id", {ascending:false}).range(0, 199);
@@ -8033,7 +8070,7 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
   const [prev, setPrev] = useState(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
-  const ref = useRef({}); ref.current = {parsed, plantel, onAplicar, auto, dia};
+  const ref = useRef({}); ref.current = {parsed, plantel, onAplicar, auto, dia, dias};
   const cola = useRef(Promise.resolve());
   const diaEfectivo = dia && dias.includes(dia) ? dia : (dias[0]||"");
   async function calcular(d, aplicar){
@@ -8042,9 +8079,21 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
     const [dd, permisos] = await Promise.all([geoLeerDia(d), geoPermisosActuales()]);
     const records = P.records;
     const plantelMap = new Map((ref.current.plantel||[]).map(x=>[String(x.legajo||"").toUpperCase(), x]));
-    const existentes = new Map();
-    records.forEach(r=>{ if(r.valid && r.dateKey===d) existentes.set((r.legajo||"").toUpperCase()+"|"+r.dateKey, r); });
-    const res = geoArmarFilas({dia:d, rows:dd.rows, novMap:dd.novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
+    // filas ya cargadas del día y de los días anteriores que una licencia con «Desde» puede cubrir
+    const existentes = new Map(), desdeMinKey = geoIsoAdd(d, -GEO_DESDE_MAX_ATRAS);
+    records.forEach(r=>{ if(r.valid && r.dateKey<=d && r.dateKey>=desdeMinKey) existentes.set((r.legajo||"").toUpperCase()+"|"+r.dateKey, r); });
+    // licencias cargadas en los días siguientes con «Desde» en este día o antes: valen también para este día (así procesar este día no retira lo que esas licencias ya pasaron)
+    const novMap = {...dd.novMap};
+    const siguientes = (ref.current.dias||[]).filter(x=>x>d && x<=geoIsoAdd(d, GEO_DESDE_MAX_ATRAS)).sort().slice(0, GEO_MIRAR_ADELANTE);
+    for(const l of siguientes){
+      let nm = {}; try{ nm = await geoLeerNovedades(l); }catch(e){ continue; }
+      Object.entries(nm).forEach(([dni, n])=>{
+        if(!n || !n.desde || novMap[dni]) return;
+        const c = String(n.code==null ? "" : n.code).trim(); if(!c || /^0+$/.test(c)) return;
+        if(geoDiasNovedad(n, l).includes(d)) novMap[dni] = {code:n.code, com:n.com};
+      });
+    }
+    const res = geoArmarFilas({dia:d, rows:dd.rows, novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
       ultimo:geoUltimoPorLegajo(records), plantelMap, existentes, padron:plantelPadronMap(ref.current.plantel).map});
     const m = mergeAusentismoRecords(records, res.records);
     res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
@@ -8119,6 +8168,7 @@ function GeoCronicosBar({parsed, plantel, onAplicar}){
             <b>{dateKeyToLabel(prev.dia)}</b>: {prev.total} empleados en Geo · {prev.presentes} presentes y {prev.ausentes} ausentes se pasarían ·
             {" "}<b>{prev.nuevos}</b> filas nuevas, <b>{prev.modificados}</b> modificadas, {prev.sinCambios} sin cambios ·
             {" "}{prev.oficiales} ya vienen de Calipso (no se tocan) · {prev.descanso} en descanso (no se pasan)
+            {prev.retroactivas>0 && <React.Fragment> · {prev.retroactivas} días anteriores de licencias con «Desde» (incluidos en las filas nuevas/modificadas)</React.Fragment>}
             {prev.retirar.length>0 && <React.Fragment> · <b style={{color:"var(--warning)"}}>{prev.retirar.length}</b> provisorias que Geo ya no respalda se retirarían</React.Fragment>}
           </p>
           <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))", gap:10}}>
