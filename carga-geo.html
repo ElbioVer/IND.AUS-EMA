@@ -1092,12 +1092,13 @@ const ACT=["pp","pc","ap","anp","ce","v"];
 const PCODE={P:"P · Presente",AP:"AP · Ausente pago",ANP:"ANP · Ausente no pago",V:"V · Vacaciones",CE:"CE · Sin tareas",X:"No contar","?":"Sin clasificar"};
 const PDEF={};
 [["P","Falta fichada;Presente Gerente/Coordinador;Pres Home Office;Presente Home Office;Trabajo en Comisión;P. Sindical;Dia a Compensar;Vacaciones Pendientes;Presente Contratista;Presente Eventual B;Capacitación;Reunión;Horas Salida Entre jornada C/Goce;Horas Salida Entre jornada S/Goce"],
- ["AP","Accidente de trabajo;Accidentes;Enfermedad;Enfermedad trabajo (ET);Enfermedad Familiar Sgbatos Art 21;Licencia Médica Estándar;Lic Sanitaria Preventiva;Licencia por Vacuna contra Covid;Amamantamiento (Fuero);Maternidad;Matrimonio;Nacimiento;Mudanza (Sgbatos);Fallecimiento abuelos;Fallecimiento Esposo/a;Fallecimiento Hermano/s;Fallecimiento Hijo;Fallecimiento nieto/s;Fallecimiento Padres;Fallecimiento suegros;P. Fallecimiento;P. Administrativo;Permiso con Goce;Permiso Sgbatos Art 20.1 (JRP);Citacion Judicial;Donación de sangre;Examen;Dia Compensado;Compensación;Jornada de Lluvia"],
+ ["AP","Accidente de trabajo;Accidentes;Enfermedad;Enfermedad trabajo (ET);Enfermedad Familiar Sgbatos Art 21;Licencia Médica Estándar;Lic Sanitaria Preventiva;Licencia por Vacuna contra Covid;Amamantamiento (Fuero);Maternidad;Matrimonio;Nacimiento;Mudanza (Sgbatos);Fallecimiento abuelos;Fallecimiento Esposo/a;Fallecimiento Hermano/s;Fallecimiento Hermano;Fallecimiento Hermanos;Fallecimiento Hijo;Fallecimiento nieto/s;Fallecimiento nieto;Fallecimiento nietos;Fallecimiento Padres;Fallecimiento suegros;P. Fallecimiento;P. Administrativo;Permiso con Goce;Permiso Sgbatos Art 20.1 (JRP);Citacion Judicial;Donación de sangre;Examen;Dia Compensado;Compensación;Jornada de Lluvia"],
  ["ANP","Ausente S/ Aviso;Ausente C/ Aviso;Ausente C/ Aviso Enfermedad;Suspension;Suspension Preventiva Art 224 LCT;Reserva de puesto;Licencia Sin Goce de Haberes;Permiso sin Goce;Paro / huelga;Excedencia"],
  ["CE","Cesante;Suspension falta de trabajo"],["V","Vacaciones"],["X","Proceso Desvinculacion;Feriado Diferenciado;Feriado"]]
  .forEach(([c,l])=>l.split(";").forEach(n=>PDEF[nrm(n)]=c));
 S.pmap=store.get("cn.pmap",{});S.pemp=store.get("cn.pemp",{});let pmapAll=false,presCells=null,presDetKey=null;
-const pmapOf=name=>{const k=nrm(name);return S.pmap[k]||PDEF[k]||"?"};
+// Cualquier «Fallecimiento …» que Geo escriba distinto (Hermano / Hermano/s, nieto / nietos…) es una licencia paga (AP) salvo que se lo clasifique otra cosa
+const pmapOf=name=>{const k=nrm(name);return S.pmap[k]||PDEF[k]||(/^fallecimiento\b/.test(k)?"AP":"?")};
 const contratOf=p=>{const t=nrm(p["Tipo de Contratación"]),e=nrm(p.Empresa);
   if(/eventual|agencia/.test(t)||e==="eventual")return "Eventual";if(/pzo|plazo/.test(t)||/pzo|plazo/.test(e))return "Cto. Pzo. Fijo";return "Propios"};
 const empOf=p=>String(p.Empresa||"").trim();
@@ -1134,6 +1135,11 @@ function presCompute(){
     cells[ix][col].push(rec);cells[ix].ta.push(rec);rec.cell=[ix,col];
     if(ct==="Eventual"&&["P","AP","ANP","V"].includes(k.c))ev.push(rec)});
   cells.forEach(row=>PCOLS.forEach(c=>tot[c.k].push(...row[c.k])));
+  // Novedades cargadas acá que NO quedaron incluidas en el cuadro, con el motivo (se avisa siempre)
+  W.novFuera=[];det.forEach(rec=>{const n=S.nov[rec.r.dni];if(!n||empty(n.code)||rec.cell)return;
+    const k=rec.k,nom=k.name||catName(n.code)||("ID "+codeOf(n));
+    const why=!rec.p?"el empleado no está en el padrón":rec.sub?`empresa subcontratada (${rec.sub}): solo cuenta si está presente`:k.c==="?"?"permiso sin clasificar (clasificalo en «Clasificación de permisos»)":k.c==="X"?"está clasificado como «No contar»":"su UN no está en el cuadro";
+    W.novFuera.push({r:rec.r,p:rec.p,k:{...k,why:`Novedad «${nom}» no incluida: ${why}`}})});
   return {cells,tot,W,ev,perms,emps,det}}
 const fechaLarga=()=>S.date?new Date(S.date.y,S.date.m-1,S.date.d).toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long",year:"numeric"}):"";
 function renderPres(){
@@ -1154,6 +1160,7 @@ function renderPres(){
     <h2>Verificación</h2><div class="chk">${sumCols===totAct&&!rowsBad.length?`<span class="okv">✓ Total Activos (${totAct}) es igual a la suma de las 6 columnas (${ACT.map(k=>R.tot[k].length).join(" + ")}).</span>`:`<span class="badv">✗ Total Activos ${totAct} no coincide con la suma ${sumCols}.</span>`}</div>
     <div class="chk">${PROWS.map((row,i)=>`<span><b>${row.lab}</b>: ${R.cells[i].ta.length} activos${R.cells[i].sub.length?` + ${R.cells[i].sub.length} sub-cont`:""}</span>`).join("")}<span><b>Total</b>: ${totAct} activos + ${R.tot.sub.length} sub-cont</span></div>`;
   const w=[];const unk=[...R.perms.keys()].filter(n=>pmapOf(n)==="?");
+  if(R.W.novFuera.length)w.push(`<div class="wline"><b>${R.W.novFuera.length} empleado${R.W.novFuera.length>1?"s":""} con novedad cargada en «Novedades del día» NO ${R.W.novFuera.length>1?"están incluidos":"está incluido"} en el cuadro</b> (${esc([...new Set(R.W.novFuera.map(x=>x.k.why.replace(/^Novedad «.*?» no incluida: /,"")))].join("; "))}). <button data-w="novFuera">Ver quiénes</button></div>`);
   if(R.W.ni.length)w.push(`<div class="wline">${R.W.ni.length} No informados sin novedad no se cuentan en el cuadro. <button data-w="ni">Ver quiénes</button></div>`);
   if(R.W.de.length)w.push(`<div class="wline">${R.W.de.length} empleados tienen turno Descanso sin fichada ni permiso: no se cuentan. Revisá si el turno está bien asignado. <button data-w="de">Ver quiénes</button></div>`);
   if(unk.length)w.push(`<div class="wline">${R.W.sinClas.length} empleados tienen permisos sin clasificar (${esc(unk.join(", "))}). <button data-w="sinClas">Ver quiénes</button><button data-open="pmap">Clasificarlos</button></div>`);
@@ -1163,7 +1170,7 @@ function renderPres(){
   $("presWarn").innerHTML=w.join("");renderPMap();renderPEmp();
   if(presDetKey)showDet(presDetKey,true)}
 function showDet(key,keep){if(!presCells)return;const R=presCells;let list,title;
-  if(key.w){list=R.W[key.w];title={ni:"No informados sin novedad",sinClas:"Permisos sin clasificar",otraUN:"UN fuera del cuadro",sinPad:"Sin padrón",de:"Turno Descanso (revisar asignación)",ign:"Novedad cargada que no se usa porque Geo ya informa"}[key.w]}
+  if(key.w){list=R.W[key.w];title={ni:"No informados sin novedad",sinClas:"Permisos sin clasificar",otraUN:"UN fuera del cuadro",sinPad:"Sin padrón",de:"Turno Descanso (revisar asignación)",ign:"Novedad cargada que no se usa porque Geo ya informa",novFuera:"Novedades cargadas que NO están en el cuadro"}[key.w]}
   else{const col=PCOLS.find(c=>c.k===key.c);list=key.r==="t"?R.tot[key.c]:R.cells[+key.r][key.c];title=`${key.r==="t"?"Total":PROWS[+key.r].lab} · ${col.lab}`}
   presDetKey=key;$("presDet").hidden=false;$("presDetT").textContent=`${title} (${list.length})`;
   $("presDetB").innerHTML=[...list].sort((a,b)=>(a.r.ape+a.r.nom).localeCompare(b.r.ape+b.r.nom,"es")).map(x=>{const p=x.p||{};return `<tr><td class="mono">${esc(p.Legajo||"")}</td><td class="name">${esc(x.r.ape)}, ${esc(x.r.nom)}</td><td>${esc(p["Unidad de Negocio"]||"")}</td><td>${esc(p.Sector||"")}</td><td>${esc(p.Empresa||"")}</td><td>${esc(x.p?contratOf(x.p):"")}</td><td>${esc(x.k.why)}</td><td>${esc(PCODE[x.k.c])}</td></tr>`}).join("")||'<tr><td colspan="8" class="note">Nadie.</td></tr>';
