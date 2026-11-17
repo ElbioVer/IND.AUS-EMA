@@ -1,0 +1,1557 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style><script src="geo-shim.js"></script></head><body>
+<title>Carga de Novedades GeoVictoria</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;650;750&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: herramienta de una columna — carga de archivos, resumen clicable, barra de filtros, tabla editable con exportación fija arriba */
+:root{
+  --bg:#f3f5f7; --surface:#ffffff; --surface-2:#eaeef2; --line:#d5dce3;
+  --fg:#17212b; --muted:#5b6876; --accent:#1f5f8b; --accent-ink:#ffffff; --accent-soft:#dcebf5;
+  --warn:#a5520c; --warn-soft:#fbe9d7; --ok:#1d7346; --ok-soft:#dbf0e3; --info:#5b4a9a; --info-soft:#e9e4f7; --bad:#b4232c;
+  --f-display:"Archivo",system-ui,sans-serif; --f-body:"Public Sans",system-ui,sans-serif; --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+  --r:8px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#11171d; --surface:#18212a; --surface-2:#202b36; --line:#2e3b48;
+  --fg:#e5ebf1; --muted:#97a5b3; --accent:#5aa7da; --accent-ink:#0c1620; --accent-soft:#1c3446;
+  --warn:#f0a15a; --warn-soft:#3a2716; --ok:#5fcf91; --ok-soft:#173326; --info:#b3a3ef; --info-soft:#2a2442; --bad:#ff7a82; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11171d; --surface:#18212a; --surface-2:#202b36; --line:#2e3b48;
+  --fg:#e5ebf1; --muted:#97a5b3; --accent:#5aa7da; --accent-ink:#0c1620; --accent-soft:#1c3446;
+  --warn:#f0a15a; --warn-soft:#3a2716; --ok:#5fcf91; --ok-soft:#173326; --info:#b3a3ef; --info-soft:#2a2442; --bad:#ff7a82; color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.45}
+.wrap{max-width:none;margin:0 auto;padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px}
+h1{font-family:var(--f-display);font-weight:750;font-size:1.6rem;margin:0;text-wrap:balance;letter-spacing:-.01em}
+h2{font-family:var(--f-display);font-weight:650;font-size:1rem;margin:0}
+.top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px}
+.top p{margin:4px 0 0;color:var(--muted)}
+.date{font-family:var(--f-mono);font-size:.85rem;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 12px}
+.loads{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.drop{background:var(--surface);border:1.5px dashed var(--line);border-radius:var(--r);padding:14px 16px;display:flex;gap:12px;align-items:center;cursor:pointer;min-width:0}
+.drop:hover,.drop.over{border-color:var(--accent);background:var(--accent-soft)}
+.drop.done{border-style:solid}
+.drop .ic{width:36px;height:36px;border-radius:8px;background:var(--surface-2);display:grid;place-items:center;font-family:var(--f-mono);font-size:.7rem;font-weight:500;color:var(--muted);flex:none}
+.drop.done .ic{background:var(--ok-soft);color:var(--ok)}
+.drop b{display:block}.drop small{color:var(--muted);display:block;overflow-wrap:anywhere}
+.drop input{display:none}
+.drop small.stamp{margin-top:2px;color:var(--fg);opacity:.85;font-size:.78rem}
+.drop small.stamp b{display:inline;font-weight:600}
+.stats{display:flex;flex-wrap:wrap;gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 14px;display:flex;flex-direction:column;cursor:pointer;min-width:120px;font:inherit;color:inherit;text-align:left}
+.stat:hover{border-color:var(--accent)}
+.stat[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--accent-soft)}
+.stat span{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.stat strong{font-family:var(--f-display);font-size:1.35rem;font-variant-numeric:tabular-nums}
+.stat.ni strong{color:var(--warn)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.bar .grow{flex:1 1 220px;min-width:0}
+input,select,button,textarea{font:inherit;color:inherit}
+input[type=search],input[type=text],input[type=number],input[type=time],select{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-width:0}
+select{max-width:220px}
+input:focus-visible,select:focus-visible,button:focus-visible,.drop:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.bulk{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--accent-soft);border:1px solid var(--accent);border-radius:var(--r);padding:8px 12px}
+.bulk b{font-variant-numeric:tabular-nums}
+.bsep{width:1px;align-self:stretch;background:var(--accent);opacity:.4;margin:0 4px}
+.tablebox{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:auto;max-height:70vh}
+table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface-2);z-index:2;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);cursor:pointer;user-select:none}
+th.nos{cursor:default}
+th.nov,td.nov{background:color-mix(in srgb,var(--accent-soft) 45%,transparent)}
+th.nov{background:var(--accent-soft)}
+tr:hover td{background:var(--surface-2)}
+.sk{position:sticky;background:var(--surface);z-index:1}
+th.sk{z-index:3;background:var(--surface-2)}
+tr:hover td.sk{background:var(--surface-2)}
+.s0{left:0;width:36px}
+.s1{left:var(--l1,36px);min-width:64px}
+.s2{left:var(--l2,100px);min-width:210px;max-width:240px;white-space:normal}
+.s3{left:var(--l3,320px);min-width:190px;max-width:220px;white-space:normal}
+.sk.last{box-shadow:inset -1px 0 0 var(--line),8px 0 8px -6px rgba(0,0,0,.28)}
+/* Filtro de grupos */
+.gdd{position:relative}
+.gdd-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:220px;max-width:280px;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;cursor:pointer}
+.gdd-btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gdd-btn[aria-expanded="true"]{border-color:var(--accent)}
+.gdd-panel{position:absolute;top:calc(100% + 4px);left:0;z-index:15;width:min(440px,calc(100vw - 32px));max-height:60vh;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--accent);border-radius:var(--r);box-shadow:0 12px 32px rgba(0,0,0,.25)}
+.gdd-head{display:flex;flex-direction:column;gap:6px;padding:10px;border-bottom:1px solid var(--line)}
+.gdd-head input{width:100%}
+.gdd-all{border:0;background:var(--accent-soft);color:var(--accent);font-weight:600;text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer}
+.gdd-body{overflow:auto;padding:6px 10px 10px;display:flex;flex-direction:column;gap:10px}
+.gm{display:flex;flex-direction:column;gap:6px}
+.gmh{display:flex;align-items:center;gap:8px;cursor:pointer;font-family:var(--f-display);font-weight:650;text-transform:uppercase;letter-spacing:.02em}
+.gmh .cnt{margin-left:auto;color:var(--accent);font-family:var(--f-mono);font-weight:500;font-size:.8rem}
+.chips{display:flex;flex-wrap:wrap;gap:4px;padding-left:24px}
+.gc{border:1px solid var(--line);background:var(--surface-2);border-radius:4px;padding:2px 7px;font-size:.78rem;cursor:pointer;display:inline-flex;gap:5px;align-items:center}
+.gc span{font-family:var(--f-mono);color:var(--muted);font-size:.72rem}
+.gc[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.gc[aria-pressed="true"] span{color:var(--accent-ink)}
+.gmore{border:0;background:var(--accent-soft);color:var(--accent);border-radius:4px;padding:2px 7px;font-size:.75rem;cursor:pointer}
+td.mono{font-family:var(--f-mono);font-size:12px;font-variant-numeric:tabular-nums}
+td.name{font-weight:500}
+td.wrapc{white-space:normal;min-width:160px;max-width:260px}
+.pill{display:inline-block;border-radius:999px;padding:2px 9px;font-size:.75rem;font-weight:600}
+.pill.ni{background:var(--warn-soft);color:var(--warn)}
+.pill.fi{background:var(--ok-soft);color:var(--ok)}
+.pill.pe{background:var(--info-soft);color:var(--info)}
+.pill.fe{background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
+.pill.de{background:transparent;color:var(--info);border:1px dashed var(--info)}
+.stat.de strong{color:var(--info)}
+.footrow{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;justify-content:space-between}
+.footrow .note{margin:0}
+.linkdanger{border:0;background:none;padding:2px 0;color:var(--muted);font-size:.78rem;text-decoration:underline;text-underline-offset:2px;cursor:pointer;opacity:.75}
+.linkdanger:hover{color:var(--bad);opacity:1}
+.linkdanger:disabled{display:none}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+.dlg{background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;max-width:min(520px,calc(100vw - 32px));box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.dlg::backdrop{background:rgba(0,0,0,.45)}
+.dlg h2{margin-bottom:8px;color:var(--bad)}
+.dlg ul{margin:6px 0;padding-left:18px;max-height:220px;overflow:auto;font-size:.85rem}
+.dlg p{margin:6px 0}
+.dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+.miss{color:var(--bad);font-size:.78rem}
+td input{padding:4px 6px}
+.in-code{width:78px}.in-ext{width:56px}.in-com{width:200px}.in-asg{width:110px}
+.in-code.bad{border-color:var(--bad)}
+/* Lista de códigos: una línea por código */
+.acpop{position:fixed;z-index:40;min-width:260px;max-width:min(380px,calc(100vw - 32px));max-height:260px;overflow:auto;background:var(--surface);border:1px solid var(--accent);border-radius:6px;box-shadow:0 12px 32px rgba(0,0,0,.25);padding:4px 0}
+.acpop div{padding:4px 10px;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.acpop div b{font-family:var(--f-mono);font-weight:600;margin-right:6px}
+.acpop div[aria-selected="true"],.acpop div:hover{background:var(--accent-soft);color:var(--fg)}
+.acpop .none{color:var(--muted);cursor:default}
+.cname{display:inline-block;max-width:170px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;font-size:.78rem;color:var(--muted)}
+.in-code.bad+.cname{color:var(--bad)}
+.empty{padding:40px 20px;text-align:center;color:var(--muted);display:flex;flex-direction:column;gap:6px;align-items:center}
+.empty b{color:var(--fg);font-family:var(--f-display);font-size:1.05rem}
+.empty ol{text-align:left;margin:6px 0 0;padding-left:20px;max-width:560px}
+.cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 14px;max-height:220px;overflow:auto}
+.cols label{display:flex;gap:6px;align-items:center;font-size:.85rem}
+.cat{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;gap:6px;align-items:center;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:3px 4px 3px 10px;font-size:.82rem}
+.chip code{font-family:var(--f-mono);font-weight:500}
+.chip button{border:0;background:none;cursor:pointer;color:var(--muted);padding:0 6px;border-radius:999px}
+.chip button:hover{color:var(--bad)}
+.chip .hb{font-size:.72rem;border:1px solid var(--line);padding:1px 7px;opacity:.55}
+.chip .hb:hover{color:var(--accent);opacity:1}
+.chip .hb[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);opacity:1}
+.toast{position:fixed;right:max(16px,calc(16px + env(safe-area-inset-right,0px)));bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--fg);color:var(--bg);padding:10px 14px;border-radius:8px;max-width:min(420px,calc(100vw - 32px));z-index:20}
+.note{color:var(--muted);font-size:.82rem}
+details summary{cursor:pointer;font-family:var(--f-display);font-weight:650}
+.view{display:flex;flex-direction:column;gap:16px}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line)}
+.tab{border:0;border-bottom:2px solid transparent;background:none;padding:8px 14px;cursor:pointer;font-family:var(--f-display);font-weight:650;color:var(--muted);display:inline-flex;gap:8px;align-items:center}
+.tab[aria-pressed="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.tcount{font-family:var(--f-mono);font-size:.75rem;background:var(--surface-2);border-radius:999px;padding:1px 8px;color:var(--fg)}
+textarea{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:8px;width:100%;resize:vertical;font-family:var(--f-mono);font-size:12px}
+.compc input[type=date]{padding:3px 4px}
+.cext{font-size:.78rem;display:inline-flex;gap:4px;align-items:center;color:var(--muted)}
+.pill.art{background:var(--warn-soft);color:var(--warn);margin-left:4px}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
+.pill.mut{background:var(--surface-2);color:var(--muted)}
+.btn.link{border:0;background:none;color:var(--bad);padding:4px 6px}
+/* Usuarios, fechas guardadas y roles */
+#app{display:flex;flex-direction:column;gap:16px}
+.who{font-size:.82rem;color:var(--muted);text-align:right}
+.who b{color:var(--fg)}
+.dayrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.locked{align-items:flex-start}
+.uhits{display:flex;flex-wrap:wrap;gap:6px}
+.uhits:empty{display:none}
+.uhit{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:4px 6px 4px 12px;font-size:.85rem}
+.roles{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+.role{border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:var(--surface)}
+.role .bar input[type=text]{flex:1 1 140px}
+.role .uns{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px}
+.role .uns label{display:flex;gap:6px;align-items:center;font-size:.82rem}
+.role.fixed{background:var(--surface-2)}
+.sync{font-size:.75rem;color:var(--muted)}
+details.fold>summary{display:flex;align-items:center;gap:10px;list-style:none;font-family:var(--f-display);font-weight:650;font-size:1rem}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::before{content:"▸";color:var(--accent);transition:transform .15s}
+details.fold[open]>summary::before{transform:rotate(90deg)}
+details.fold>summary .note{font-family:var(--f-body);font-weight:400}
+details.fold[open]{gap:10px}
+td.mail{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.mailbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}
+.mailbox label{display:flex;flex-direction:column;gap:4px;font-size:.82rem;color:var(--muted)}
+.mailbox textarea{min-height:120px;font-size:12px}
+/* Interruptor claro / oscuro */
+.topr{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.theme{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--muted);font-size:.9rem;user-select:none}
+.theme input{position:absolute;opacity:0;width:1px;height:1px}
+.sw{width:42px;height:22px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);position:relative}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--fg)}
+.theme input:checked+.sw{background:var(--accent);border-color:var(--accent)}
+.theme input:checked+.sw::after{transform:translateX(20px);background:var(--accent-ink)}
+.theme input:focus-visible+.sw{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:no-preference){.sw,.sw::after{transition:transform .18s,background .18s}}
+/* Filtros por columna (estilo Excel) */
+.cfb{display:inline-block;margin-left:4px;padding:0 4px;border-radius:3px;color:var(--muted);cursor:pointer;font-size:.8rem;line-height:1.3}
+.cfb:hover{background:var(--line);color:var(--fg)}
+.cfb.on{background:var(--accent);color:var(--accent-ink)}
+.cfpop{position:fixed;z-index:30;width:min(300px,calc(100vw - 32px));max-height:70vh;display:flex;flex-direction:column;gap:8px;background:var(--surface);border:1px solid var(--accent);border-radius:var(--r);padding:10px;box-shadow:0 12px 32px rgba(0,0,0,.25)}
+.cfpop b{font-family:var(--f-display);font-size:.85rem}
+.cflist{overflow:auto;display:flex;flex-direction:column;gap:1px;max-height:45vh}
+.cflist label{display:flex;gap:6px;align-items:center;font-size:.85rem;padding:2px 4px;border-radius:4px;cursor:pointer;min-width:0}
+.cflist label:hover{background:var(--surface-2)}
+.cflist label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cflist label small{margin-left:auto;color:var(--muted);font-family:var(--f-mono);flex:none}
+.cflist label.sp{font-weight:600;border-bottom:1px solid var(--line);border-radius:0}
+.cflist em{color:var(--muted)}
+.cfpop.wide{width:min(440px,calc(100vw - 32px))}
+.cfpop.wide .cflist{gap:10px}
+.cfpop.wide .cflist label{padding:0}
+.cfpop.wide .cflist label:hover{background:none}
+.gdd-all small{font-family:var(--f-mono);font-weight:500;margin-left:6px}
+.gdd-all[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.gnum{color:var(--accent);font-family:var(--f-mono);min-width:1.4em;text-align:right}
+/* Cuadro de presentismo: reproduce el formato del parte (salmón, total en amarillo) */
+:root{--sal:#fabf8f;--sal-ink:#1d1206;--yel:#ffff00;--yel-ink:#1d1d00;--grid:#2b2b2b}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--sal:#7a4a26;--sal-ink:#fff3e8;--yel:#77731a;--yel-ink:#fffde0;--grid:#8a96a3}}
+:root[data-theme="dark"]{--sal:#7a4a26;--sal-ink:#fff3e8;--yel:#77731a;--yel-ink:#fffde0;--grid:#8a96a3}
+.presbox{max-height:none}
+table.pres{width:auto;min-width:min(100%,980px);border-collapse:collapse;font-family:Calibri,Carlito,var(--f-body);font-size:15px}
+table.pres th,table.pres td{border:1px solid var(--grid);padding:6px 12px;text-align:center;white-space:normal;cursor:default}
+table.pres th{position:static;background:var(--sal);color:var(--sal-ink);font-weight:700;text-transform:none;letter-spacing:0;font-size:15px;border-width:2px;min-width:96px}
+table.pres th.lab{background:var(--surface);border-width:0 0 2px 0}
+table.pres td.lab{text-align:left;white-space:nowrap;font-weight:500}
+table.pres td.n{font-variant-numeric:tabular-nums}
+table.pres td.n[data-c]{cursor:pointer}
+table.pres td.n[data-c]:hover{outline:2px solid var(--accent);outline-offset:-2px}
+table.pres tr.tot td{background:var(--sal);color:var(--sal-ink);font-weight:700;border-width:2px}
+table.pres tr.tot td.lab{background:var(--yel);color:var(--yel-ink);text-align:center}
+table.pres td.zero{color:var(--muted)}
+.pfoot{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0;max-width:980px}
+.pfoot .big{font-family:Calibri,Carlito,var(--f-body);font-weight:700;font-size:1.05rem;align-self:center;padding:8px 12px}
+.pfoot table{border-collapse:collapse;font-family:Calibri,Carlito,var(--f-body);font-size:15px}
+.pfoot td{border:2px solid var(--grid);background:var(--sal);color:var(--sal-ink);font-weight:700;padding:5px 12px}
+.pfoot td:first-child{font-style:italic;min-width:280px;text-align:center}
+.pfoot td:last-child{min-width:90px;text-align:center;font-variant-numeric:tabular-nums}
+.pwarn{display:flex;flex-direction:column;gap:6px}
+.pwarn:empty{display:none}
+.wline{background:var(--warn-soft);color:var(--warn);border-radius:6px;padding:6px 10px;font-size:.85rem;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.wline button{border:0;background:none;color:inherit;text-decoration:underline;cursor:pointer;padding:0;font:inherit;font-weight:600}
+.pmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px 18px;max-height:360px;overflow:auto}
+.pmap label{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:.85rem;border-bottom:1px dashed var(--line);padding:3px 0}
+.pmap label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pmap label small{color:var(--muted);font-family:var(--f-mono);margin-left:4px}
+.pmap select{flex:none;width:150px}
+.pmap label.unk span{color:var(--warn);font-weight:600}
+.chk{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center}
+.chk .okv{color:var(--ok);font-weight:600}.chk .badv{color:var(--bad);font-weight:600}
+@media (prefers-reduced-motion:no-preference){.drop,.stat,.btn{transition:border-color .15s,background .15s}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Carga de Novedades GeoVictoria</h1>
+      <p>Cruzá la base diaria con el padrón, completá la novedad de cada empleado sin fichada ni permiso y exportá el Excel de carga.</p>
+    </div>
+    <div class="topr">
+      <label class="theme" title="Cambiar entre modo claro y oscuro"><span aria-hidden="true">☀</span><input type="checkbox" id="themeT" role="switch" aria-label="Modo oscuro"><span class="sw" aria-hidden="true"></span><span aria-hidden="true">☾</span></label>
+      <span class="who" id="who" hidden></span>
+      <div class="dayrow"><select id="daySel" hidden aria-label="Fecha guardada"></select><span class="date" id="dateChip">Sin fecha cargada</span></div>
+    </div>
+  </header>
+
+  <section class="panel locked" id="locked" hidden>
+    <h2 id="lockedT">Cargando…</h2>
+    <p class="note" id="lockedM">Conectando con la base compartida.</p>
+  </section>
+  <div id="app">
+
+  <section class="loads" aria-label="Archivos">
+    <label class="drop" id="dropGeo" tabindex="0">
+      <span class="ic">GEO</span>
+      <span><b>Base del día (GeoVictoria)</b><small id="geoInfo">Arrastrá o elegí el .xlsx con Identificador, Permiso y fichadas</small><small class="stamp" id="geoWhen" hidden></small></span>
+      <input type="file" id="fileGeo" accept=".xlsx,.xls,.csv">
+    </label>
+    <label class="drop" id="dropPad" tabindex="0">
+      <span class="ic">PAD</span>
+      <span><b>Padrón (Plantel)</b><small id="padInfo">Arrastrá o elegí el .xls con Documento, Legajo, Sector, UN</small><small class="stamp" id="padWhen" hidden></small></span>
+      <input type="file" id="filePad" accept=".xlsx,.xls,.csv">
+    </label>
+  </section>
+
+  <nav class="tabs" aria-label="Secciones">
+    <button type="button" class="tab" data-view="nov" aria-pressed="true">Novedades del día</button>
+    <button type="button" class="tab" data-view="art" aria-pressed="false">ART · Accidentes de trabajo <span class="tcount" id="artCount">0</span></button>
+    <button type="button" class="tab" data-view="pres" aria-pressed="false">Cuadro de Presentismo</button>
+    <button type="button" class="tab" data-view="hist" aria-pressed="false" id="tabHist" hidden>Historial</button>
+    <button type="button" class="tab" data-view="users" aria-pressed="false" id="tabUsers" hidden>Usuarios y roles</button>
+  </nav>
+
+  <div class="view" id="viewHist" hidden>
+    <section class="panel">
+      <h2>Fechas guardadas</h2>
+      <p class="note">Cada vez que alguien carga la base de Geo, la fecha queda guardada con sus empleados, datos del padrón y novedades. Abrí una fecha para seguir trabajándola o volver a descargar lo exportado.</p>
+      <div class="tablebox"><table><thead><tr><th class="nos">Fecha</th><th class="nos">Empleados</th><th class="nos">Base cargada por</th><th class="nos">Actualizada</th><th class="nos"></th></tr></thead><tbody id="histDays"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2 id="histExpT">Exportaciones de la fecha abierta</h2>
+      <div class="tablebox"><table><thead><tr><th class="nos">Hora</th><th class="nos">Exportó</th><th class="nos">Alcance</th><th class="nos">Filas</th><th class="nos"></th></tr></thead><tbody id="histExps"></tbody></table></div>
+    </section>
+  </div>
+
+  <div class="view" id="viewUsers" hidden>
+    <section class="panel">
+      <h2>Usuarios</h2>
+      <p class="note">Para que alguien pueda usar el artifact, primero compartiselo desde el botón <b>Compartir</b>, invitándolo por mail. Si es de tu organización alcanza con nivel <b>Colaborador</b>; si es de afuera (por ejemplo una cuenta Free) tiene que ser nivel <b>Editor</b> y el artifact no tiene que estar compartido por enlace público, si no puede ver pero no guardar. Cuando la persona abra el link aparece abajo en <b>Solicitudes pendientes</b>: asignale un rol. Quien no tenga rol no ve ningún dato.</p>
+      <h2>Solicitudes pendientes</h2>
+      <div class="tablebox"><table><thead><tr><th class="nos">Cuenta</th><th class="nos">Mail</th><th class="nos">Pidió acceso</th><th class="nos">Rol</th><th class="nos"></th></tr></thead><tbody id="uReqs"></tbody></table></div>
+      <h2>Agregar de tu organización</h2>
+      <div class="bar"><input type="search" id="uSearch" class="grow" placeholder="Buscar por nombre o mail para agregar" autocomplete="off"></div>
+      <div class="uhits" id="uHits"></div>
+      <h2>Usuarios con rol</h2>
+      <div class="tablebox"><table><thead><tr><th class="nos">Cuenta</th><th class="nos">Mail</th><th class="nos">Rol</th><th class="nos"></th></tr></thead><tbody id="uList"></tbody></table></div>
+      <p class="note">El mail se muestra cuando la cuenta y tu organización permiten verlo. Si dice "no visible", la persona es de afuera y claude.ai no lo comparte.</p>
+    </section>
+    <details class="panel fold" id="rolesBox">
+      <summary><span class="grow">Roles</span> <span class="note" id="rolesSum"></span></summary>
+      <div class="bar"><p class="note grow">Cada rol define con qué Unidades de Negocio arranca filtrada la pantalla. Igual puede quitar el filtro, ver y gestionar las demás UN, y el cuadro de presentismo siempre sale completo. Solo vos administrás usuarios y roles. Los cambios se guardan al tocar <b>Guardar roles</b>.</p><button type="button" class="btn" id="roleAdd">Nuevo rol RRHH</button></div>
+      <div class="roles" id="roleList"></div>
+      <div class="bar"><button type="button" class="btn primary" id="roleSave">Guardar roles</button><span class="note" id="roleMsg"></span></div>
+    </details>
+  </div>
+
+  <div class="view" id="viewPres" hidden>
+    <section class="bar">
+      <h2 class="grow">Cuadro de Presentismo Diario</h2>
+      <button type="button" class="btn" id="btnPMap">Clasificación de permisos</button>
+      <button type="button" class="btn" id="btnPEmp">Empresas subcontratistas</button>
+      <button type="button" class="btn" id="btnPMail">Destinatarios del mail</button>
+      <button type="button" class="btn" id="presExport" disabled>Exportar cuadro</button>
+      <button type="button" class="btn primary" id="presMail" disabled>Descargar mail para enviar</button>
+    </section>
+    <section class="panel" id="panelPMail" hidden>
+      <h2>Destinatarios del mail del cuadro</h2>
+      <p class="note">Uno por renglón (o separados por punto y coma), como <code>Nombre Apellido &lt;mail@empresa.com.ar&gt;</code> o solo el mail. En el asunto, <code>{fecha}</code> se reemplaza por la fecha del cuadro. <span id="pmailWho"></span></p>
+      <div class="mailbox">
+        <label>Para<textarea id="mTo" spellcheck="false"></textarea></label>
+        <label>CC<textarea id="mCc" spellcheck="false"></textarea></label>
+      </div>
+      <div class="mailbox">
+        <label>Asunto<input type="text" id="mSubj" placeholder="Presentismo {fecha}"></label>
+        <label>Texto antes del cuadro (opcional)<input type="text" id="mIntro" placeholder="Buenas tardes, les comparto el presentismo del día."></label>
+      </div>
+      <div class="bar"><button type="button" class="btn primary" id="mSave">Guardar destinatarios</button><span class="note" id="mMsg"></span></div>
+    </section>
+    <section class="panel" id="panelPMap" hidden>
+      <h2>Clasificación de permisos</h2>
+      <p class="note">Cada permiso de Geo, y cada novedad que cargues acá, se cuenta en una columna del cuadro: P presente, AP ausente pago, ANP ausente no pago, V vacaciones, CE sin tareas, o "No contar". Quien fichó cuenta como P. Los feriados sin fichada no se cuentan. Los cambios se guardan en este navegador.</p>
+      <div class="pmap" id="pmapList"></div>
+      <div class="bar"><button type="button" class="btn" id="pmapAll">Ver todos los permisos</button><button type="button" class="btn" id="pmapReset">Restaurar clasificación original</button></div>
+    </section>
+    <section class="panel" id="panelPEmp" hidden>
+      <h2>Empresas subcontratistas</h2>
+      <p class="note">Las empresas del padrón que no son Propios se cuentan en SUB-CONT, solo los presentes. Elegí a qué fila del cuadro va cada empresa. "Según la UN" usa la Unidad de Negocio de cada empleado.</p>
+      <div class="pmap" id="pempList"></div>
+    </section>
+    <div class="pwarn" id="presWarn"></div>
+    <div class="tablebox presbox">
+      <div class="empty" id="presEmpty"><b>Faltan datos para el cuadro</b><span>Cargá la base del día de GeoVictoria y el padrón.</span></div>
+      <table class="pres" id="presTbl" hidden></table>
+    </div>
+    <section class="panel" id="presCheck" hidden></section>
+    <section class="panel" id="presDet" hidden>
+      <div class="bar"><h2 class="grow" id="presDetT"></h2><button type="button" class="btn" id="presDetX">Cerrar</button></div>
+      <div class="tablebox"><table><thead><tr><th class="nos">Legajo</th><th class="nos">Apellido y nombre</th><th class="nos">UN</th><th class="nos">Sector</th><th class="nos">Empresa</th><th class="nos">Contratación</th><th class="nos">Estado del día</th><th class="nos">Cuenta como</th></tr></thead><tbody id="presDetB"></tbody></table></div>
+    </section>
+  </div>
+
+  <div class="view" id="viewArt" hidden>
+    <section class="panel">
+      <h2>Pegar desde la página de la ART</h2>
+      <p class="note">En la página de la ART seleccioná la tabla completa, desde "Número Siniestro" hasta la última fila, copiala y pegala acá. Cada siniestro se cruza con el empleado por el CUIL. Quien figure acá y esté No informado en la base del día recibe la novedad con la observación "Stro" y el número de siniestro.</p>
+      <textarea id="artPaste" rows="4" placeholder="Pegá acá la tabla copiada de la ART"></textarea>
+      <div class="bar">
+        <button type="button" class="btn primary" id="artSync" disabled>Actualizar lista con lo pegado</button>
+        <button type="button" class="btn" id="artAddOnly" disabled>Solo agregar los nuevos</button>
+        <span class="note" id="artPreview"></span>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Agregar a mano</h2>
+      <div class="bar">
+        <input type="text" id="artNro" placeholder="N° de siniestro (ej. 0-653200)" style="width:220px">
+        <input type="text" id="artDoc" placeholder="DNI o CUIL" style="width:160px">
+        <select id="artTipo"><option>ACCIDENTE TRABAJO</option><option>ACCIDENTE IN ITINERE</option><option>ENFERMEDAD PROFESIONAL</option></select>
+        <input type="text" id="artFalta" placeholder="Prob. alta dd/mm/aaaa" style="width:170px">
+        <button type="button" class="btn" id="artAdd">Agregar</button>
+      </div>
+    </section>
+    <div class="tablebox">
+      <div class="empty" id="artEmpty"><b>Sin personas en ART</b><span>Pegá la tabla de la ART o agregá un siniestro a mano.</span></div>
+      <table id="artTbl" hidden><thead><tr>
+        <th class="nos">N° siniestro</th><th class="nos">Apellido y nombre</th><th class="nos">DNI</th><th class="nos">Legajo</th><th class="nos">UN</th>
+        <th class="nos">Fecha siniestro</th><th class="nos">Prob. alta</th><th class="nos">Alta médica</th><th class="nos">Días ILT</th><th class="nos">Tipo</th>
+        <th class="nos nov">ID permiso</th><th class="nos nov">Observación</th><th class="nos">En la base del día</th><th class="nos"></th>
+      </tr></thead><tbody id="artBody"></tbody></table>
+    </div>
+  </div>
+
+  <div class="view" id="viewNov">
+  <section class="stats" id="stats" aria-label="Resumen">
+    <button class="stat" data-f="all" id="st-all"><span>Total</span><strong>–</strong></button>
+    <button class="stat ni" data-f="ni" id="st-ni"><span>No informados</span><strong>–</strong></button>
+    <button class="stat" data-f="fi" id="st-fi"><span>Con fichada</span><strong>–</strong></button>
+    <button class="stat" data-f="pe" id="st-pe"><span>Con permiso</span><strong>–</strong></button>
+    <button class="stat" data-f="fe" id="st-fe"><span>Feriado</span><strong>–</strong></button>
+    <button class="stat de" data-f="de" id="st-de" title="Turno Descanso sin fichada ni permiso: no se cuentan como No informados. Revisá si el turno está bien asignado."><span>Descanso (turno)</span><strong>–</strong></button>
+    <button class="stat" data-f="nov" id="st-nov"><span>Novedad cargada</span><strong>–</strong></button>
+    <button class="stat" data-f="pend" id="st-pend"><span>No informados pendientes</span><strong>–</strong></button>
+  </section>
+
+  <section class="bar">
+    <input type="search" id="q" class="grow" placeholder="Buscar por DNI, nombre, legajo, sector…">
+    <div id="dds" style="display:contents"></div>
+    <button class="btn" id="btnCols">Columnas del padrón</button>
+    <button class="btn" id="btnCat">Tipos de permiso</button>
+    <button class="btn" id="cfReset" hidden>Quitar filtros de columnas</button>
+    <button class="btn primary" id="btnExport" disabled>Exportar Excel</button>
+  </section>
+
+  <section class="panel" id="panelCols" hidden>
+    <h2>Columnas del padrón a mostrar</h2>
+    <div class="cols" id="colsList"><span class="note">Cargá el padrón para ver sus columnas.</span></div>
+  </section>
+
+  <section class="panel" id="panelCat" hidden>
+    <h2>Tipos de permiso</h2>
+    <p class="note">Estos códigos aparecen como sugerencia al cargar y su nombre se muestra junto al ID. Los marcados con <b>🕒 Horas</b> habilitan Hora inicio y Hora fin en la tabla (de entrada, el 19 JRP); en los demás esas columnas no se muestran. El Excel para Geo sale igual que siempre. Los cambios se guardan en este navegador.</p>
+    <div class="bar">
+      <input type="number" id="catCode" placeholder="ID" style="width:90px">
+      <input type="text" id="catName" class="grow" placeholder="Descripción (ej. Enfermedad)">
+      <button class="btn" id="catAdd">Agregar</button>
+      <button class="btn" id="catReset">Restaurar lista original</button>
+    </div>
+    <div class="cat" id="catList"></div>
+  </section>
+
+  <section class="bulk" id="bulk" hidden>
+    <span><b id="selCount">0</b> seleccionados</span>
+    <input type="text" id="bCode" class="in-code" data-ac="codes" autocomplete="off" placeholder="ID">
+    <input type="number" id="bExt" class="in-ext" value="1" min="1">
+    <input type="text" id="bCom" placeholder="Comentario" style="width:220px">
+    <button class="btn primary" id="bApply">Aplicar a seleccionados</button>
+    <button class="btn" id="bClear">Quitar novedad</button>
+    <span class="bsep" aria-hidden="true"></span>
+    <button class="btn" id="bImg" title="Copia una imagen con la lista para pegarla en WhatsApp">Copiar imagen para WhatsApp</button>
+    <button class="btn" id="bXls" title="Descarga un Excel con los seleccionados">Excel de seleccionados</button>
+  </section>
+
+  <div class="tablebox" id="tbox">
+    <div class="empty" id="empty">
+      <b>Todavía no hay datos del día</b>
+      <span>La tabla se arma cuando cargás los dos archivos.</span>
+      <ol>
+        <li>Cargá la base de GeoVictoria del día. La fecha se toma de la columna Fecha.</li>
+        <li>Cargá el padrón para sumar legajo, fecha de ingreso, sector y UN por DNI.</li>
+        <li>Filtrá por <b>No informados</b> (sin fichada y con Permiso "Ninguno"), completá ID Tipo Permiso y exportá.</li>
+      </ol>
+    </div>
+    <table id="tbl" hidden><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+  </div>
+  <div class="footrow"><p class="note" id="foot"></p><button type="button" class="linkdanger" id="btnClearNov" disabled>Limpiar novedades del día</button></div>
+  <dialog id="clrDlg" class="dlg" aria-labelledby="clrT">
+    <h2 id="clrT">¿Borrar novedades?</h2>
+    <div id="clrBody"></div>
+    <div class="dlgbtns"><button type="button" class="btn" id="clrNo" autofocus>Cancelar</button><button type="button" class="btn danger" id="clrYes">Borrar</button></div>
+  </dialog>
+  </div>
+  </div>
+</div>
+<datalist id="dlCodes"></datalist>
+<div class="acpop" id="acPop" hidden role="listbox" aria-label="Códigos de permiso"></div>
+<div class="cfpop" id="cfPop" hidden role="dialog" aria-label="Filtro de columna">
+  <b id="cfTitle"></b>
+  <input type="search" id="cfQ" placeholder="Buscar en la lista">
+  <div class="cflist" id="cfList"></div>
+  <div class="bar"><button type="button" class="btn" id="cfClr">Quitar filtro</button><button type="button" class="btn primary" id="cfOk">Cerrar</button></div>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const store={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+// Modo claro / oscuro (se recuerda en este navegador)
+(function(){const t=$("themeT"),sys=window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches;
+  const apply=v=>{document.documentElement.dataset.theme=v;t.checked=v==="dark"};
+  apply(store.get("cn.theme",sys?"dark":"light"));
+  t.addEventListener("change",()=>{const v=t.checked?"dark":"light";store.set("cn.theme",v);apply(v)})})();
+const FIXED_PAD=["Legajo","Unidad de Negocio","Sector"];
+const DEFAULT_PAD_COLS=["Fecha de Ingreso"];
+const DEFAULT_CAT=`Accidente de trabajo|54;Accidentes|-9;Amamantamiento (Fuero)|-11;Ausente C/ Aviso|44;Ausente C/ Aviso Enfermedad|45;Ausente S/ Aviso|46;Capacitación|-6;Cesante|10;Citacion Judicial|11;Compensación|-10;Dia a Compensar|48;Dia Compensado|49;Donación de sangre|12;Enfermedad|34;Enfermedad Familiar Sgbatos Art 21|14;Enfermedad trabajo (ET)|15;Examen|16;Excedencia|13;Fallecimiento abuelos|35;Fallecimiento Esposo/a|36;Fallecimiento Hermano/s|37;Fallecimiento Hijo|38;Fallecimiento nieto/s|39;Fallecimiento Padres|40;Fallecimiento suegros|41;Horas Salida Entre jornada C/Goce|51;Horas Salida Entre jornada S/Goce|52;Jornada de Lluvia|66;Lic Sanitaria Preventiva|21;Licencia Médica Estándar|-2;Licencia por Vacuna contra Covid|23;Licencia Sin Goce de Haberes|57;Maternidad|25;Matrimonio|24;Mudanza (Sgbatos)|26;Nacimiento|27;Otro|-3;Paro / huelga|5;P. Administrativo|-4;P. Fallecimiento|-5;P. Sindical|-7;Permiso con Goce|-12;Presente Contratista|63;Permiso Sgbatos Art 20.1 (JRP)|19;Permiso sin Goce|-13;Pres Home Office|47;Presente Eventual B|56;Presente Gerente/Coordinador|55;Proceso Desvinculacion|65;Presente Home Office|28;Reserva de puesto|30;Reunión|-8;Suspension falta de trabajo|158;Suspension|33;Suspension Preventiva Art 224 LCT|50;Trabajo en Comisión|53;Vacaciones|42;Vacaciones Pendientes|43;Falta fichada|00`.split(";").map(x=>{const[n,c]=x.split("|");return{code:c==="00"?"00":+c,name:n}});
+let S={geo:null,pad:null,padHeaders:[],date:null,filter:"ni",sortKey:"nombre",sortDir:1,sel:new Set(),nov:{},cat:store.get("cn.cat3",DEFAULT_CAT),extraCols:store.get("cn.cols2",DEFAULT_PAD_COLS).filter(c=>!FIXED_PAD.includes(c)),grp:new Set(),gExp:new Set()};
+// Una sola vez: el 19 (Permiso Art 20.1 JRP) queda marcado como permiso que usa horas
+const HRS_DEFAULT=["19"];
+function markHrsDefault(){S.cat.forEach(c=>{if(HRS_DEFAULT.includes(String(c.code)))c.h=true})}
+if(!store.get("cn.hrs1",false)){markHrsDefault();store.set("cn.cat3",S.cat);store.set("cn.hrs1",true)}
+// 00 · Falta fichada: reclamo interno (luego fichó). Cuenta como presente en el cuadro y no se exporta a Geo.
+const FF="00",ck=v=>{v=String(v==null?"":v).trim();return /^0+$/.test(v)?FF:v},isFF=v=>ck(v)===FF;
+if(!S.cat.some(c=>isFF(c.code))){S.cat.push({code:FF,name:"Falta fichada"});store.set("cn.cat3",S.cat)}
+const splitG=g=>{const s=String(g||"").trim();const m=s.match(/^(.*?)\s*-\s*(.+)$/);return m?[m[1].trim(),m[2].trim()]:[s,""]};
+// Turno "Descanso": ese día no trabaja; sin fichada ni permiso no es No informado (se marca para revisar el turno)
+const isDescT=t=>/descanso/i.test(String(t||""));
+const catName=code=>{const k=ck(code);const c=S.cat.find(x=>ck(x.code)===k);return c?c.name:""};
+
+const normDni=v=>{const s=String(v==null?"":v).replace(/\D/g,"").replace(/^0+/,"");return s};
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const empty=v=>v==null||String(v).trim()==="";
+function toast(msg){const t=$("toast");t.textContent=msg;t.hidden=false;clearTimeout(toast._t);toast._t=setTimeout(()=>t.hidden=true,3500)}
+
+function readFile(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>{try{const wb=XLSX.read(new Uint8Array(r.result),{type:"array",cellDates:false});const ws=wb.Sheets[wb.SheetNames[0]];res(XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:null,blankrows:false}))}catch(e){rej(e)}};r.onerror=()=>rej(r.error);r.readAsArrayBuffer(file)})}
+function findHeader(rows,needle){for(let i=0;i<Math.min(15,rows.length);i++){const r=rows[i]||[];if(r.some(c=>String(c||"").trim().toLowerCase()===needle))return i}return -1}
+
+function parseGeo(rows){
+  const h=findHeader(rows,"identificador");if(h<0)throw new Error("No encontré la columna Identificador en la base de GeoVictoria.");
+  const head=rows[h].map(c=>String(c||"").trim());
+  const ix=n=>head.findIndex(c=>c.toLowerCase()===n.toLowerCase());
+  const iA=ix("Apellidos"),iN=ix("Nombre"),iD=ix("Identificador"),iG=ix("Grupo"),iF=ix("Fecha"),iP=ix("Permiso"),iT=ix("Turno"),iC=ix("Cargo");
+  const punch=[];head.forEach((c,i)=>{if(/^(entr|sali)\S{1,3}$/i.test(c))punch.push(i)});
+  // Una base puede traer varios días: se separa por la columna Fecha (un día por fecha, sin DNIs repetidos)
+  const days=new Map();let first=null;
+  for(let r=h+1;r<rows.length;r++){const row=rows[r];if(!row)continue;const dni=normDni(row[iD]);if(!dni)continue;
+    // Usuario técnico del exportador de Geo: no es un empleado
+    if(/geovictoria|api\s*ema\s*servicios/i.test(`${row[iA]||""} ${row[iN]||""}`))continue;
+    const perm=String(row[iP]||"").trim();const marks=punch.map(i=>row[i]).filter(v=>!empty(v));
+    let date=null;if(iF>=0){const m=String(row[iF]||"").match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);if(m)date={d:+m[1],m:+m[2],y:+m[3],txt:String(row[iF])}}
+    if(!date)date=first;if(!date)continue;if(!first)first=date;
+    const key=`${date.y}-${p2(date.m)}-${p2(date.d)}`;if(!days.has(key))days.set(key,{date,rows:[],seen:new Set()});
+    const D=days.get(key);if(D.seen.has(dni))continue;D.seen.add(dni);
+    const fer=/\(\s*f\s*\)\s*$/i.test(String(row[iF]||""));
+    let st=perm&&perm.toLowerCase()!=="ninguno"?"pe":(marks.length?"fi":(fer?"fe":(isDescT(row[iT])?"de":"ni")));
+    D.rows.push({dni,ape:row[iA]||"",nom:row[iN]||"",grupo:row[iG]||"",turno:row[iT]||"",cargo:iC>=0?row[iC]||"":"",perm,marks,st});
+  }
+  const list=[...days.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([id,D])=>({id,date:D.date,rows:D.rows}));
+  const last=list[list.length-1]||{rows:[],date:null};
+  return {days:list,rows:last.rows,date:last.date};
+}
+function parsePad(rows){
+  const h=findHeader(rows,"documento");if(h<0)throw new Error("No encontré la columna Documento en el padrón.");
+  const head=rows[h].map(c=>String(c||"").trim());const iD=head.indexOf("Documento"),iE=head.indexOf("Estado Empleado"),iI=head.indexOf("Fecha de Ingreso");
+  const map=new Map();
+  const dt=s=>{const m=String(s||"").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?+m[3]*10000+ +m[2]*100+ +m[1]:0};
+  for(let r=h+1;r<rows.length;r++){const row=rows[r];if(!row)continue;const dni=normDni(row[iD]);if(!dni)continue;
+    const rec={};head.forEach((c,i)=>{if(c)rec[c]=row[i]==null?"":row[i]});
+    const prev=map.get(dni);
+    if(!prev){map.set(dni,rec);continue}
+    const vig=x=>String(x["Estado Empleado"]||"").toLowerCase()==="vigente";
+    if((vig(rec)&&!vig(prev))||(vig(rec)===vig(prev)&&dt(rec["Fecha de Ingreso"])>dt(prev["Fecha de Ingreso"])))map.set(dni,rec);
+  }
+  return {map,headers:head.filter(Boolean)};
+}
+
+const novKey=()=>S.date?`cn.nov.${S.date.y}-${S.date.m}-${S.date.d}`:null;
+// Con base compartida las novedades se guardan en la nube (CL); sin ella, en este navegador
+function saveNov(){if(CL.on){cloudQueueNov();return}const k=novKey();if(k)store.set(k,S.nov)}
+function setDateChip(){const fer=(S.geo||[]).some(r=>r.st==="fe");
+  $("dateChip").textContent=S.date?`Fecha: ${p2(S.date.d)}/${p2(S.date.m)}/${S.date.y}${fer?" · Feriado":""}`:"Sin fecha cargada"}
+
+async function handle(file,kindHint){
+  try{
+    const rows=await readFile(file);
+    let kind=kindHint;
+    if(findHeader(rows,"identificador")>=0)kind="geo";else if(findHeader(rows,"documento")>=0)kind="pad";
+    if(CL.on){if(!CL.access){toast("Necesitás un rol asignado para cargar archivos.");return}
+      if(kind==="geo"){const g=parseGeo(rows);if(!g.days.length){toast("No pude detectar la fecha en la columna Fecha de la base.");return}
+        if(CL.uploading){toast("Esperá a que termine la carga anterior.");return}CL.uploading=true;
+        const res={new:[],upd:[],mrg:[],same:[]};
+        try{for(const [i,D] of g.days.entries()){toast(`Guardando ${D.id.split("-").reverse().join("/")} (${i+1} de ${g.days.length})…`);
+            res[await cloudUploadGeo(D,file.name,true)].push(D.id.split("-").reverse().slice(0,2).join("/"))}}
+        catch(e){return}   // writeErr ya avisó el motivo
+        finally{CL.uploading=false}
+        const f=(a,t)=>a.length?`${t}: ${a.join(", ")}`:"";
+        toast(`${file.name}: ${g.days.length} día${g.days.length>1?"s":""}. `+[f(res.new,"Nuevos"),f(res.upd,"Actualizados"),f(res.mrg,"Parciales, sumados a lo que había"),f(res.same,"Sin cambios")].filter(Boolean).join(" · ")+". Elegí el día arriba, en la fecha.")}
+      else{const p=parsePad(rows);S.padLocal=p.map;S.padLocalName=file.name;
+        $("padInfo").textContent=`${file.name} · ${p.map.size} DNIs`;$("dropPad").classList.add("done");
+        if(CL.rowsAll)await cloudSaveRows(CL.rowsAll.map(r=>({...r,pad:padKeep(p.map.get(r.dni))||r.pad})),null,file.name);
+        else toast("Padrón listo. Cargá la base de Geo o abrí una fecha guardada para cruzarlo.")}
+      return}
+    if(kind==="geo"){const g=parseGeo(rows);if(!g.days.length){toast("No pude detectar la fecha en la columna Fecha de la base.");return}
+      S.localDays=g.days;S.localName=file.name;S.localAt=Date.now();localDay(g.days[g.days.length-1].id);
+      if(g.days.length>1)toast(`La base trae ${g.days.length} días. Abrí el último; elegí otro arriba, en la fecha.`);
+      return}
+    const p=parsePad(rows);S.pad=p.map;S.padHeaders=p.headers;
+    $("padInfo").textContent=`${file.name} · ${p.map.size} DNIs`;$("dropPad").classList.add("done");setStamp("padWhen",Date.now(),null);renderCols();
+    buildFilters();render();renderArt();renderPres();
+  }catch(e){toast("No pude leer "+file.name+": "+(e&&e.message||e))}
+}
+// Modo local (sin base compartida): abre uno de los días de la base cargada
+function localDay(id){const D=(S.localDays||[]).find(x=>x.id===id);if(!D)return;
+  S.geo=D.rows;S.date=D.date;S.sel.clear();S.nov=store.get(novKey(),{})||{};
+  $("geoInfo").textContent=`${S.localName} · ${D.rows.length} empleados`+(S.localDays.length>1?` · ${S.localDays.length} días en el archivo`:"");$("dropGeo").classList.add("done");
+  const sel=$("daySel");sel.hidden=S.localDays.length<2;
+  sel.innerHTML=S.localDays.slice().reverse().map(x=>`<option value="${esc(x.id)}"${x.id===id?" selected":""}>${esc(x.id.split("-").reverse().join("/"))}</option>`).join("");
+  setDateChip();setStamp("geoWhen",S.localAt||(S.localAt=Date.now()),null);
+  const saved=Object.values(S.nov).filter(n=>!empty(n.code)&&n.src!=="art").length;applyArt();
+  const artN=Object.values(S.nov).filter(n=>n.src==="art").length;
+  if(saved||artN)toast([saved?`Recuperé ${saved} novedades guardadas para esta fecha.`:"",artN?`Cargué ${artN} novedades de ART.`:""].filter(Boolean).join(" "));
+  buildFilters();render();renderArt();renderPres()}
+function wireDrop(dropId,inputId,kind){const d=$(dropId),inp=$(inputId);
+  inp.addEventListener("change",()=>{if(inp.files[0])handle(inp.files[0],kind);inp.value=""});
+  d.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();inp.click()}});
+  ["dragenter","dragover"].forEach(ev=>d.addEventListener(ev,e=>{e.preventDefault();d.classList.add("over")}));
+  ["dragleave","drop"].forEach(ev=>d.addEventListener(ev,e=>{e.preventDefault();d.classList.remove("over")}));
+  d.addEventListener("drop",e=>{[...(e.dataTransfer.files||[])].forEach(f=>handle(f,kind))});
+}
+wireDrop("dropGeo","fileGeo","geo");wireDrop("dropPad","filePad","pad");
+
+const padOf=r=>S.pad?S.pad.get(r.dni):null;
+const padVal=(r,c)=>{const p=padOf(r);return p?p[c]:""};
+function hasNov(r){const n=S.nov[r.dni];return !!(n&&!empty(n.code))}
+
+// DAC (Día a Compensar) ↔ DC (Día Compensado)
+const DAC="48",DC="49";
+const p2=n=>String(n).padStart(2,"0");
+const baseTxt=()=>S.date?`${p2(S.date.d)}/${p2(S.date.m)}/${S.date.y}`:"";
+const isoTxt=iso=>{const m=String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);return m?`${m[3]}/${m[2]}/${m[1]}`:""};
+const codeOf=n=>String(n&&n.code||"").trim();
+function compCell(n){const c=codeOf(n);if(c!==DAC&&c!==DC)return '<span class="note">—</span>';
+  return `<input type="date" data-f="cdate" value="${esc(n.cdate||"")}"${n.cext?" disabled":""} aria-label="${c===DAC?"Fecha del Día Compensado":"Fecha del Día a Compensar"}">`
+    +(c===DAC?` <label class="cext"><input type="checkbox" data-f="cext"${n.cext?" checked":""}> Jorn. ext.</label>`:"")}
+function autoCom(n){const c=codeOf(n);
+  if(c===DAC){if(n.cext)n.com="Comp en jornadas ext.";else if(n.cdate)n.com="Comp "+isoTxt(n.cdate)}
+  else if(c===DC&&n.cdate)n.com="Comp "+isoTxt(n.cdate)}
+
+function buildFilters(){renderDDs()}
+
+function statusOk(r){const f=S.filter;
+  if(f==="ni"&&r.st!=="ni")return false;if(f==="fi"&&r.st!=="fi")return false;if(f==="pe"&&r.st!=="pe")return false;if(f==="fe"&&r.st!=="fe")return false;if(f==="de"&&r.st!=="de")return false;
+  if(f==="nov"&&!hasNov(r))return false;if(f==="pend"&&!(r.st==="ni"&&!hasNov(r)))return false;return true}
+
+// Filtros desplegables con tildes: UN, Sector (agrupado por UN) y Grupo (agrupado por lo que va antes del guion)
+const unOf=r=>padVal(r,"Unidad de Negocio")||"(sin UN)",secOf=r=>padVal(r,"Sector")||"(sin sector)";
+const DD={
+  un:{all:"Todas las UN",ph:"Escribí el nombre de la UN",many:"UN",val:unOf,main:unOf,sub:null},
+  sector:{all:"Todos los sectores",ph:"Escribí la UN o el sector",many:"sectores",val:secOf,main:unOf,sub:secOf},
+  grupo:{all:"Todos los grupos",ph:"Escribí número o nombre del grupo",many:"subgrupos",val:r=>r.grupo,main:r=>splitG(r.grupo)[0],sub:r=>splitG(r.grupo)[1]||"(sin subgrupo)"}};
+Object.values(DD).forEach(d=>{d.sel=new Set();d.exp=new Set()});
+const ddScope=()=>Object.keys(DD).filter(k=>DD[k].sel.size).map(k=>{const s=[...DD[k].sel];return s.length===1?s[0]:`${s.length} ${DD[k].many}`}).join(" · ");
+const ddPass=(r,skip)=>Object.keys(DD).every(k=>k===skip||!DD[k].sel.size||DD[k].sel.has(DD[k].val(r)));
+function ddTree(k){const d=DD[k],t=new Map();
+  (S.geo||[]).filter(statusOk).forEach(r=>{const m=d.main(r),v=d.val(r),on=ddPass(r,k);
+    if(!t.has(m))t.set(m,new Map());const sm=t.get(m);const e=sm.get(v)||{val:v,sub:d.sub?d.sub(r):v,n:0};if(on)e.n++;sm.set(v,e)});
+  return [...t.entries()].map(([m,sm])=>({main:m,subs:[...sm.values()].filter(s=>s.n||d.sel.has(s.val)).sort((a,b)=>b.n-a.n||String(a.sub).localeCompare(String(b.sub),"es"))}))
+    .filter(g=>g.subs.length).sort((a,b)=>String(a.main).localeCompare(String(b.main),"es"))}
+$("dds").innerHTML=Object.keys(DD).map(k=>`<div class="gdd" data-dd="${k}">
+  <button type="button" class="gdd-btn" aria-expanded="false"><span class="lbl">${DD[k].all}</span><span aria-hidden="true">▾</span></button>
+  <div class="gdd-panel" hidden><div class="gdd-head"><input type="search" id="ddq-${k}" placeholder="${DD[k].ph}"><button type="button" class="gdd-all">${DD[k].all}</button></div>
+  <div class="gdd-body"><span class="note">Cargá la base del día para ver las opciones.</span></div></div></div>`).join("");
+const ddEl=k=>document.querySelector(`.gdd[data-dd="${k}"]`);
+function renderDD(k){const d=DD[k],el=ddEl(k),lbl=el.querySelector(".lbl");
+  if(!d.sel.size)lbl.textContent=d.all;
+  else if(d.sel.size===1)lbl.textContent=[...d.sel][0];
+  else{const mains=new Set(ddTree(k).filter(g=>g.subs.some(s=>d.sel.has(s.val))).map(g=>g.main));
+    lbl.textContent=d.sub&&mains.size===1?`${[...mains][0]} (${d.sel.size})`:`${d.sel.size} ${d.many}`}
+  const panel=el.querySelector(".gdd-panel");if(panel.hidden||!S.geo)return;
+  const q=$("ddq-"+k).value.trim().toLowerCase();
+  const html=ddTree(k).map((g,i)=>{const num=d.sub?String(i+1):"";
+    const mainHit=!q||(num&&num===q)||String(g.main).toLowerCase().includes(q);
+    const subs=mainHit?g.subs:g.subs.filter(s=>String(s.sub).toLowerCase().includes(q));
+    if(!subs.length)return"";
+    const total=g.subs.reduce((a,s)=>a+s.n,0),sel=g.subs.filter(s=>d.sel.has(s.val)).length,st=sel===0?"none":sel===g.subs.length?"all":"some";
+    let chips="";
+    if(d.sub){const exp=d.exp.has(g.main)||!!q,LIM=4,shown=exp?subs:subs.slice(0,LIM);
+      chips=`<div class="chips">`+shown.map(s=>`<button type="button" class="gc" data-val="${esc(s.val)}" aria-pressed="${d.sel.has(s.val)}">${esc(s.sub)} <span>${s.n}</span></button>`).join("")
+        +(subs.length>LIM&&!q?`<button type="button" class="gmore" data-exp="${esc(g.main)}">${exp?"Ver menos":`+${subs.length-LIM} más`}</button>`:"")+`</div>`}
+    return `<div class="gm"><label class="gmh"><input type="checkbox" data-main="${esc(g.main)}" data-state="${st}"${st==="all"?" checked":""}>${num?`<span class="gnum">${num}</span>`:""} ${esc(g.main)}<span class="cnt">${total}</span></label>${chips}</div>`}).join("");
+  const body=el.querySelector(".gdd-body");
+  body.innerHTML=html||'<span class="note">Nada coincide con la búsqueda.</span>';
+  body.querySelectorAll('input[data-state="some"]').forEach(i=>i.indeterminate=true);
+}
+function renderDDs(){Object.keys(DD).forEach(renderDD)}
+function openDD(k,open){Object.keys(DD).forEach(o=>{const el=ddEl(o),on=o===k&&open;el.querySelector(".gdd-panel").hidden=!on;el.querySelector(".gdd-btn").setAttribute("aria-expanded",on)});
+  if(open){renderDD(k);$("ddq-"+k).focus()}}
+Object.keys(DD).forEach(k=>{const d=DD[k],el=ddEl(k),body=el.querySelector(".gdd-body");
+  el.querySelector(".gdd-btn").addEventListener("click",()=>openDD(k,el.querySelector(".gdd-panel").hidden));
+  $("ddq-"+k).addEventListener("input",()=>renderDD(k));
+  el.querySelector(".gdd-all").addEventListener("click",()=>{d.sel.clear();render()});
+  body.addEventListener("click",e=>{
+    const c=e.target.closest(".gc");if(c){const v=c.dataset.val;d.sel.has(v)?d.sel.delete(v):d.sel.add(v);render();return}
+    const m=e.target.closest(".gmore");if(m){const x=m.dataset.exp;d.exp.has(x)?d.exp.delete(x):d.exp.add(x);renderDD(k)}});
+  body.addEventListener("change",e=>{const i=e.target.closest("input[data-main]");if(!i)return;
+    const g=ddTree(k).find(x=>String(x.main)===i.dataset.main);if(!g)return;
+    const all=g.subs.every(s=>d.sel.has(s.val));g.subs.forEach(s=>all?d.sel.delete(s.val):d.sel.add(s.val));render()});
+});
+document.addEventListener("click",e=>{const path=e.composedPath();if(!Object.keys(DD).some(k=>path.includes(ddEl(k))))openDD(null,false)});
+document.addEventListener("keydown",e=>{if(e.key!=="Escape")return;const k=Object.keys(DD).find(k=>!ddEl(k).querySelector(".gdd-panel").hidden);if(k){openDD(k,false);ddEl(k).querySelector(".gdd-btn").focus()}});
+
+// Filtros por columna: S.cf[clave] = Set de valores permitidos ("" = vacías). Sin clave = todo.
+S.cf={};let cfOpen=null;
+const CF_LAB={"p:Legajo":"Legajo",nombre:"Apellido y nombre",grupo:"Grupo","p:Unidad de Negocio":"UN","p:Sector":"Sector",dni:"DNI",turno:"Turno",estado:"Estado",code:"ID Tipo Permiso",ext:"Ext.",comp:"Compensación",com:"Comentario",hi:"Hora inicio",hf:"Hora fin",asg:"Asignación"};
+function cfVal(k,r){const n=S.nov[r.dni]||{},p=padOf(r);let v="";
+  if(k.startsWith("p:"))v=p?p[k.slice(2)]:"";
+  else switch(k){case"nombre":v=`${r.ape}, ${r.nom}`;break;case"grupo":v=r.grupo;break;case"dni":v=r.dni;break;case"turno":v=r.turno;break;
+    case"estado":v=(r.st==="fe"?"Feriado":r.st==="de"?"Descanso (turno)":r.st==="pe"?r.perm:r.st==="fi"?"Con fichada":"No informado")+(n.src==="art"?" · ART":"");break;
+    case"code":v=empty(n.code)?"":`${String(n.code).trim()} · ${catName(n.code)||"Código no está en la lista"}`;break;
+    case"ext":v=empty(n.code)?"":String(n.ext||1);break;
+    case"comp":{const c=codeOf(n);v=c!==DAC&&c!==DC?"":(n.cext?"Jorn. ext.":isoTxt(n.cdate));break}
+    case"com":v=n.com;break;case"hi":v=n.hi;break;case"hf":v=n.hf;break;case"asg":v=n.asg;break}
+  return String(v==null?"":v).trim()}
+const cfPass=(r,skip)=>Object.keys(S.cf).every(k=>k===skip||S.cf[k].has(cfVal(k,r)));
+const cfBtn=k=>`<span class="cfb${S.cf[k]?" on":""}" data-cf="${esc(k)}" role="button" tabindex="0" aria-label="Filtrar ${esc(CF_LAB[k]||k.slice(2))}" title="Filtrar">▾</span>`;
+function cfBase(skip){const q=$("q").value.trim().toLowerCase();
+  return (S.geo||[]).filter(r=>{if(!statusOk(r)||!ddPass(r)||!cfPass(r,skip))return false;
+    if(q){const p=padOf(r)||{};const hay=[r.dni,r.ape,r.nom,r.grupo,r.cargo,r.perm,...FIXED_PAD.map(c=>p[c]),...S.extraCols.map(c=>p[c])].join(" ").toLowerCase();if(!hay.includes(q))return false}
+    return true})}
+const CF_FLAT=new Set(["p:Legajo","nombre","dni","turno","code","ext","comp","com","hi","hf","p:Fecha de Ingreso","p:Fecha fin contrato"]);
+const cfExp=new Set();let cfTreeNow=[];
+function cfTree(vals,cnt){const t=new Map();
+  vals.forEach(v=>{const [m,s]=splitG(v);if(!t.has(m))t.set(m,[]);t.get(m).push({v,sub:s,n:cnt.get(v)||0})});
+  if(![...t.values()].some(a=>a.length>1&&a.some(x=>x.sub)))return null;   // nada para agrupar: lista común
+  return [...t.entries()].map(([main,subs])=>({main,subs:subs.sort((a,b)=>b.n-a.n||a.sub.localeCompare(b.sub,"es"))})).sort((a,b)=>a.main.localeCompare(b.main,"es",{numeric:true}))}
+function cfSet(k,s){if(!s.size)delete S.cf[k];else S.cf[k]=s;render();renderCfPop()}
+$("cfList").addEventListener("click",e=>{const k=cfOpen;if(!k)return;
+  if(e.target.closest("[data-cfall2]")){delete S.cf[k];render();renderCfPop();return}
+  const c=e.target.closest("[data-cfc]");if(c){const v=c.dataset.cfc,s=new Set(S.cf[k]||[]);s.has(v)?s.delete(v):s.add(v);cfSet(k,s);return}
+  const m=e.target.closest("[data-cfexp]");if(m){const x=k+"|"+m.dataset.cfexp;cfExp.has(x)?cfExp.delete(x):cfExp.add(x);renderCfPop()}});
+function renderCfPop(){const pop=$("cfPop");if(!cfOpen||!S.geo){pop.hidden=true;return}
+  const k=cfOpen,cnt=new Map();cfBase(k).forEach(r=>{const v=cfVal(k,r);cnt.set(v,(cnt.get(v)||0)+1)});
+  const sel=S.cf[k],on=v=>!sel||sel.has(v),q=$("cfQ").value.trim().toLowerCase();
+  const vals=[...cnt.keys()].filter(v=>v!=="").sort((a,b)=>a.localeCompare(b,"es",{numeric:true}));
+  if(sel)sel.forEach(v=>{if(v!==""&&!cnt.has(v))vals.push(v)});
+  const shown=vals.filter(v=>!q||v.toLowerCase().includes(q));
+  $("cfTitle").textContent="Filtrar: "+(CF_LAB[k]||k.slice(2));
+  // Columnas de texto con "Nombre - Detalle": se agrupan por lo que va antes del guion
+  const tree=CF_FLAT.has(k)?null:cfTree(vals,cnt);pop.classList.toggle("wide",!!tree);
+  $("cfQ").placeholder=tree?"Escribí número o nombre del grupo":"Buscar en la lista";
+  if(tree){const pr=v=>!!sel&&sel.has(v),LIM=4;
+    const head=`<button type="button" class="gdd-all" data-cfall2${sel?"":' aria-pressed="true"'}>Todos <small>${[...cnt.values()].reduce((a,b)=>a+b,0)}</small></button>`
+      +(cnt.get("")?`<div class="chips" style="padding-left:0"><button type="button" class="gc" data-cfc="" aria-pressed="${pr("")}"><em>(Vacías)</em> <span>${cnt.get("")}</span></button></div>`:"");
+    const body=tree.map((g,i)=>{const num=String(i+1),mainHit=!q||num===q||g.main.toLowerCase().includes(q);
+      const subs=mainHit?g.subs:g.subs.filter(s=>s.sub.toLowerCase().includes(q));if(!subs.length)return"";
+      const n=g.subs.reduce((a,s)=>a+s.n,0),ns=g.subs.filter(s=>pr(s.v)).length,st=ns===0?"none":ns===g.subs.length?"all":"some";
+      const flat=g.subs.length===1&&!g.subs[0].sub;
+      let chips="";if(!flat){const exp=cfExp.has(k+"|"+g.main)||!!q,shown=exp?subs:subs.slice(0,LIM);
+        chips=`<div class="chips">`+shown.map(s=>`<button type="button" class="gc" data-cfc="${esc(s.v)}" aria-pressed="${pr(s.v)}" title="${esc(s.v)}">${esc(s.sub||"(sin detalle)")} <span>${s.n}</span></button>`).join("")
+          +(subs.length>LIM&&!q?`<button type="button" class="gmore" data-cfexp="${esc(g.main)}">${exp?"Ver menos":`+${subs.length-LIM} más`}</button>`:"")+`</div>`}
+      return `<div class="gm"><label class="gmh"><input type="checkbox" data-cfg="${i}" data-state="${st}"${st==="all"?" checked":""}><span class="gnum">${num}</span> ${esc(g.main)}<span class="cnt">${n}</span></label>${chips}</div>`}).join("");
+    $("cfList").innerHTML=head+(body||'<span class="note">Nada coincide con la búsqueda.</span>');
+    $("cfList").querySelectorAll('input[data-state="some"]').forEach(i=>i.indeterminate=true);cfTreeNow=tree;return}
+  $("cfList").innerHTML=`<label class="sp"><input type="checkbox" data-cfall${!sel?" checked":""}><span>Todo</span><small>${[...cnt.values()].reduce((a,b)=>a+b,0)}</small></label>`
+    +`<label><input type="checkbox" data-cfv=""${on("")?" checked":""}><span><em>(Vacías)</em></span><small>${cnt.get("")||0}</small></label>`
+    +shown.map(v=>`<label title="${esc(v)}"><input type="checkbox" data-cfv="${esc(v)}"${on(v)?" checked":""}><span>${esc(v)}</span><small>${cnt.get(v)||0}</small></label>`).join("")
+    +(shown.length||!q?"":'<span class="note">Nada coincide con la búsqueda.</span>');
+  const all=$("cfList").querySelector("[data-cfall]");all.indeterminate=!!sel&&sel.size>0}
+function openCf(k,anchor){cfOpen=k;$("cfQ").value="";const pop=$("cfPop");pop.hidden=false;renderCfPop();
+  const rc=anchor.getBoundingClientRect(),w=pop.offsetWidth;pop.style.left=Math.max(16,Math.min(rc.left-8,innerWidth-w-16))+"px";
+  pop.style.top=Math.max(16,Math.min(rc.bottom+4,innerHeight-pop.offsetHeight-16))+"px";$("cfQ").focus()}
+function closeCf(){cfOpen=null;$("cfPop").hidden=true}
+$("cfQ").addEventListener("input",renderCfPop);
+$("cfList").addEventListener("change",e=>{const k=cfOpen;if(!k)return;const t=e.target;
+  if(t.hasAttribute("data-cfg")){const g=cfTreeNow[+t.dataset.cfg];if(!g)return;const s=new Set(S.cf[k]||[]);
+    const all=g.subs.every(x=>s.has(x.v));g.subs.forEach(x=>all?s.delete(x.v):s.add(x.v));cfSet(k,s);return}
+  const universe=new Set(cfBase(k).map(r=>cfVal(k,r)));universe.add("");
+  if(t.hasAttribute("data-cfall")){if(t.checked)delete S.cf[k];else S.cf[k]=new Set()}
+  else if(t.hasAttribute("data-cfv")){const v=t.dataset.cfv;const s=S.cf[k]?new Set(S.cf[k]):new Set(universe);t.checked?s.add(v):s.delete(v);
+    if([...universe].every(x=>s.has(x)))delete S.cf[k];else S.cf[k]=s}
+  render();renderCfPop()});
+$("cfClr").addEventListener("click",()=>{if(cfOpen){delete S.cf[cfOpen];render()}closeCf()});
+$("cfOk").addEventListener("click",closeCf);
+$("cfReset").addEventListener("click",()=>{S.cf={};closeCf();render()});
+document.addEventListener("click",e=>{if(!cfOpen)return;const path=e.composedPath();if(path.includes($("cfPop"))||path.some(x=>x.classList&&x.classList.contains("cfb")))return;closeCf()});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"&&cfOpen)closeCf()});
+
+function visibleRows(){
+  if(!S.geo)return[];
+  const q=$("q").value.trim().toLowerCase();
+  let rows=S.geo.filter(r=>{
+    if(!statusOk(r)||!ddPass(r)||!cfPass(r))return false;
+    if(q){const p=padOf(r)||{};const hay=[r.dni,r.ape,r.nom,r.grupo,r.cargo,r.perm,...FIXED_PAD.map(c=>p[c]),...S.extraCols.map(c=>p[c])].join(" ").toLowerCase();if(!hay.includes(q))return false}
+    return true});
+  const k=S.sortKey,d=S.sortDir;
+  const val=r=>k==="nombre"?(r.ape+" "+r.nom):k==="dni"?r.dni.padStart(10,"0"):k==="grupo"?r.grupo:k==="estado"?r.st:k.startsWith("p:")?String(padVal(r,k.slice(2))||""):"";
+  rows.sort((a,b)=>String(val(a)).localeCompare(String(val(b)),"es",{numeric:true})*d);
+  return rows;
+}
+
+// Permisos que usan Hora inicio / Hora fin (se marcan en Tipos de permiso; de entrada, el 19 JRP)
+const usesH=code=>!empty(code)&&!!(S.cat.find(c=>String(c.code)===String(code).trim())||{}).h;
+const needH=n=>!!n&&(usesH(n.code)||!empty(n.hi)||!empty(n.hf));
+const hrsCells=n=>needH(n)?`<td class="nov hic"><input type="time" data-f="hi" value="${esc(n.hi||"")}" aria-label="Hora inicio"></td><td class="nov hic"><input type="time" data-f="hf" value="${esc(n.hf||"")}" aria-label="Hora fin"></td>`
+  :'<td class="nov hic"><span class="miss">—</span></td><td class="nov hic"><span class="miss">—</span></td>';
+const ST_LABEL={ni:"No informado",fi:"Con fichada",pe:"Con permiso"};
+function render(){
+  const has=!!S.geo;$("tbl").hidden=!has;$("empty").hidden=has;
+  updateStats();
+  if(!has)return;
+  const arrow=k=>S.sortKey===k?(S.sortDir>0?" ▲":" ▼"):"";
+  // Tope de filas dibujadas para que la página no se trabe; el resto se alcanza con filtros o búsqueda
+  const allRows=visibleRows(),MAXR=1200,rows=allRows.slice(0,MAXR);
+  // La selección queda solo en lo que se ve: si un filtro oculta filas, dejan de estar seleccionadas
+  if(S.sel.size){const vis=new Set(rows.map(r=>r.dni));[...S.sel].forEach(d=>{if(!vis.has(d))S.sel.delete(d)})}
+  // Hora inicio/fin: solo se muestran si alguna fila tiene un permiso que usa horas (o ya tiene horas cargadas)
+  const showH=S.showH=rows.some(r=>needH(S.nov[r.dni]));
+  $("thead").innerHTML=`<tr><th class="nos sk s0"><input type="checkbox" id="selAll" aria-label="Seleccionar todos"></th>
+    <th data-k="p:Legajo" class="sk s1">Legajo${arrow("p:Legajo")}${cfBtn("p:Legajo")}</th><th data-k="nombre" class="sk s2">Apellido y nombre${arrow("nombre")}${cfBtn("nombre")}</th><th data-k="grupo" class="sk s3 last">Grupo${arrow("grupo")}${cfBtn("grupo")}</th>
+    <th data-k="p:Unidad de Negocio">UN${arrow("p:Unidad de Negocio")}${cfBtn("p:Unidad de Negocio")}</th><th data-k="p:Sector">Sector${arrow("p:Sector")}${cfBtn("p:Sector")}</th>
+    <th data-k="dni">DNI${arrow("dni")}${cfBtn("dni")}</th><th class="nos">Turno${cfBtn("turno")}</th><th data-k="estado">Estado${arrow("estado")}${cfBtn("estado")}</th>
+    ${S.extraCols.map(c=>`<th data-k="p:${esc(c)}">${esc(c)}${arrow("p:"+c)}${cfBtn("p:"+c)}</th>`).join("")}
+    <th class="nos nov">ID Tipo Permiso${cfBtn("code")}</th><th class="nos nov">Ext.${cfBtn("ext")}</th><th class="nos nov" title="Para Día a Compensar (48) o Día Compensado (49)">Compensación${cfBtn("comp")}</th><th class="nos nov">Comentario${cfBtn("com")}</th>${showH?`<th class="nos nov" title="Solo para permisos marcados con Horas en Tipos de permiso">Hora inicio${cfBtn("hi")}</th><th class="nos nov">Hora fin${cfBtn("hf")}</th>`:""}<th class="nos nov">Asignación${cfBtn("asg")}</th></tr>`;
+  const html=rows.map(r=>{const n=S.nov[r.dni]||{};const p=padOf(r);
+    const estado=(r.st==="fe"?`<span class="pill fe">Feriado</span>`:r.st==="de"?`<span class="pill de" title="Tiene turno Descanso en ${esc(diaTxt())}: no se cuenta como No informado. Revisá si el turno está bien asignado.">Descanso ⚠</span>`:r.st==="pe"?`<span class="pill pe">${esc(r.perm)}</span>`:r.st==="fi"?`<span class="pill fi" title="${esc(r.marks.join(" · "))}">Fichó ${esc(r.marks[0])}</span>`:`<span class="pill ni">No informado</span>`)+(n.src==="art"?`<span class="pill art" title="Cargado desde el menú ART">ART</span>`:"");
+    const pv=c=>p?esc(p[c]):'<span class="miss">sin padrón</span>';
+    const extra=S.extraCols.map(c=>`<td>${pv(c)}</td>`).join("");
+    return `<tr data-dni="${r.dni}"><td class="sk s0"><input type="checkbox" class="sel"${S.sel.has(r.dni)?" checked":""} aria-label="Seleccionar ${esc(r.ape)}"></td>
+      <td class="sk s1 mono">${pv("Legajo")}</td><td class="sk s2 name">${esc(r.ape)}, ${esc(r.nom)}</td><td class="sk s3 last">${esc(r.grupo)}</td>
+      <td class="wrapc">${pv("Unidad de Negocio")}</td><td class="wrapc">${pv("Sector")}</td>
+      <td class="mono">${r.dni}</td><td class="mono">${esc(r.turno)}</td><td>${estado}</td>${extra}
+      <td class="nov"><input type="text" inputmode="numeric" class="in-code" data-f="code" data-ac="codes" autocomplete="off" value="${esc(n.code||"")}" aria-label="ID Tipo Permiso"> <span class="cname">${esc(n.code?catName(n.code):"")}</span></td>
+      <td class="nov"><input type="number" class="in-ext" data-f="ext" min="1" value="${esc(n.ext||1)}" aria-label="Extensión"></td>
+      <td class="nov compc">${compCell(n)}</td>
+      <td class="nov"><input type="text" class="in-com" data-f="com" value="${esc(n.com||"")}" aria-label="Comentario"></td>
+      ${showH?hrsCells(n):""}
+      <td class="nov"><input type="text" class="in-asg" data-f="asg" value="${esc(n.asg||"")}" aria-label="Asignación"></td></tr>`}).join("");
+  $("tbody").innerHTML=html||`<tr><td colspan="${(showH?16:14)+S.extraCols.length}" class="note" style="padding:24px;text-align:center">Ningún empleado coincide con los filtros.</td></tr>`;
+  const ncf=Object.keys(S.cf).length;$("cfReset").hidden=!ncf;$("cfReset").textContent=`Quitar filtros de columnas (${ncf})`;
+  $("foot").textContent=(allRows.length>MAXR?`Muestro ${MAXR} de ${allRows.length} filas: usá los filtros o la búsqueda para ver el resto`:`${rows.length} filas visibles`)+(ncf?` · ${ncf} filtro${ncf>1?"s":""} de columna activo${ncf>1?"s":""}`:"")+(S.pad?"":" · cargá el padrón para ver legajo, ingreso, sector y UN")+(S.expNote?" · "+S.expNote:"");
+  $("selAll").checked=rows.length>0&&rows.every(r=>S.sel.has(r.dni));
+  const ths=$("thead").querySelectorAll("th.sk");let x=0;ths.forEach((th,i)=>{if(i)$("tbl").style.setProperty("--l"+i,x+"px");x+=th.getBoundingClientRect().width});
+  updateBulk();renderDDs();
+}
+function updateStats(){
+  const g=S.geo||[];const c={all:g.length,ni:0,fi:0,pe:0,fe:0,de:0,nov:0,pend:0};
+  g.forEach(r=>{c[r.st]++;if(hasNov(r))c.nov++;if(r.st==="ni"&&!hasNov(r))c.pend++});
+  Object.keys(c).forEach(k=>{const b=$("st-"+k);b.querySelector("strong").textContent=S.geo?c[k]:"–";b.setAttribute("aria-pressed",S.filter===k)});
+  const nAll=clearTargets().length;const cl=$("btnClearNov");cl.disabled=!nAll;cl.textContent=`Limpiar novedades del día…`;
+  cl.title=ddScope()?"Borra solo las novedades de: "+ddScope():"Borra todas las novedades del día";
+  const wN=g.filter(r=>hasNov(r)&&ddPass(r)),nFF=wN.filter(r=>isFF(S.nov[r.dni].code)).length,nEx=wN.length-nFF,nNoNI=wN.filter(r=>r.st!=="ni").length;
+  const ex=$("btnExport");ex.disabled=!nEx;ex.textContent=nEx?`Exportar Excel (${nEx}${ddScope()?" filtradas":""})`:"Exportar Excel";
+  ex.title=(ddScope()?"Exporta las novedades de: "+ddScope()+". Para exportar todo, elegí Todas las UN, sectores y grupos.":"Exporta todas las novedades del día")
+    +(nFF?`\n${nFF} Falta fichada (00) no se exportan: son reclamos internos, Geo no tiene ese código.`:"");
+  $("st-nov").title=c.nov?`${c.nov} empleados con novedad cargada: ${c.nov-g.filter(r=>hasNov(r)&&r.st!=="ni").length} son No informados y ${g.filter(r=>hasNov(r)&&r.st!=="ni").length} tienen además fichada, permiso, feriado o descanso en Geo.`:"";
+  S.expNote=wN.length?`${wN.length} novedades${ddScope()?" filtradas":""}: ${nEx} se exportan a Geo`+(nFF?` · ${nFF} Falta fichada (00) no se exportan`:"")+(nNoNI?` · ${nNoNI} son de empleados que en Geo no figuran como No informados`:""):"";
+}
+function updateBulk(){$("bulk").hidden=S.sel.size===0;$("selCount").textContent=S.sel.size}
+
+$("stats").addEventListener("click",e=>{const b=e.target.closest(".stat");if(!b)return;S.filter=b.dataset.f;render()});
+$("q").addEventListener("input",()=>render());
+$("thead").addEventListener("keydown",e=>{const b=e.target.closest(".cfb");if(b&&(e.key==="Enter"||e.key===" ")){e.preventDefault();b.click()}});
+$("thead").addEventListener("click",e=>{const cb=e.target.closest(".cfb");if(cb){e.stopPropagation();const k=cb.dataset.cf;cfOpen===k?closeCf():openCf(k,cb);return}
+  if(e.target.id==="selAll"){const rows=visibleRows();rows.forEach(r=>e.target.checked?S.sel.add(r.dni):S.sel.delete(r.dni));render();return}
+  const th=e.target.closest("th[data-k]");if(!th)return;const k=th.dataset.k;if(S.sortKey===k)S.sortDir*=-1;else{S.sortKey=k;S.sortDir=1}render()});
+$("tbody").addEventListener("change",e=>{const tr=e.target.closest("tr[data-dni]");if(!tr)return;const dni=tr.dataset.dni;
+  if(e.target.classList.contains("sel")){e.target.checked?S.sel.add(dni):S.sel.delete(dni);updateBulk();return}});
+$("tbody").addEventListener("input",e=>{const f=e.target.dataset.f;if(!f)return;const dni=e.target.closest("tr").dataset.dni;
+  const tr=e.target.closest("tr");
+  const n=S.nov[dni]||(S.nov[dni]={ext:1});n[f]=e.target.type==="checkbox"?e.target.checked:e.target.value;delete n.src;
+  if(f==="code"||f==="cdate"||f==="cext"){autoCom(n);const ci=tr.querySelector('[data-f="com"]');if(ci)ci.value=n.com||"";
+    if(f!=="cdate")tr.querySelector(".compc").innerHTML=compCell(n)}
+  if(f==="code"){const ok=empty(n.code)||/^-?\d+$/.test(n.code.trim())&&!!catName(n.code);e.target.classList.toggle("bad",!ok);
+    const sp=e.target.parentElement.querySelector(".cname");if(sp)sp.textContent=empty(n.code)?"":(catName(n.code)||"Código no está en la lista")}
+  if(Object.values(n).every(v=>empty(v)||v==1)&&empty(n.code)&&empty(n.com)&&empty(n.hi)&&empty(n.hf)&&empty(n.asg))delete S.nov[dni];
+  saveNov();updateStats();
+  if(f==="code"){const hc=tr.querySelectorAll(".hic"),want=needH(S.nov[dni]),has=!!tr.querySelector('.hic input');
+    if(want&&!S.showH){const open=!$("acPop").hidden;render();const i=document.querySelector(`#tbody tr[data-dni="${dni}"] [data-f="code"]`);if(i){acMute=!open;i.focus();acMute=false;const L=i.value.length;try{i.setSelectionRange(L,L)}catch(_){}}}
+    else if(S.showH&&hc.length===2&&want!==has){const t=document.createElement("tbody");t.innerHTML=`<tr>${hrsCells(S.nov[dni])}</tr>`;const nw=t.querySelectorAll("td");hc[0].replaceWith(nw[0]);hc[1].replaceWith(nw[1])}}});
+$("bApply").addEventListener("click",()=>{const code=$("bCode").value.trim();if(!/^-?\d+$/.test(code)){toast("Escribí un ID Tipo Permiso numérico para aplicar.");return}
+  const ext=Math.max(1,parseInt($("bExt").value,10)||1),com=$("bCom").value;
+  S.sel.forEach(dni=>{const n=S.nov[dni]||(S.nov[dni]={});n.code=code;n.ext=ext;delete n.src;
+    if(code===DAC&&!n.cdate)n.cext=true;autoCom(n);if(com)n.com=com});
+  saveNov();toast(`Novedad ${code} aplicada a ${S.sel.size} empleados.`);S.sel.clear();render()});
+// Limpiar respeta los filtros de UN, sector y grupo (sin filtros: todas las del día)
+function clearTargets(){const g=S.geo?new Map(S.geo.map(r=>[r.dni,r])):new Map();
+  return Object.keys(S.nov).filter(d=>{const n=S.nov[d],r=g.get(d);return n&&(!empty(n.code)||!empty(n.com))&&(!r||ddPass(r))&&(r||!ddScope())})}
+// Limpiar: botón discreto + ventana que detalla qué se va a borrar
+$("btnClearNov").addEventListener("click",()=>{const t=clearTargets();if(!t.length)return;const sc=ddScope();
+  const by=new Map();t.forEach(d=>{const n=S.nov[d],k=empty(n.code)?"Solo comentario":`${codeOf(n)} · ${catName(n.code)||"código"}`;by.set(k,(by.get(k)||0)+1)});
+  const nArt=t.filter(d=>S.nov[d].src==="art").length;
+  $("clrT").textContent=`¿Borrar ${t.length} novedades del ${baseTxt()}?`;
+  $("clrBody").innerHTML=`<p>Se van a borrar <b>${t.length}</b> novedades cargadas${sc?` de <b>${esc(sc)}</b>`:" de <b>todas las UN</b>"}${CL.on?", para todos los usuarios que trabajan este día":""}:</p>
+    <ul>${[...by.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<li><b>${v}</b> × ${esc(k)}</li>`).join("")}</ul>
+    ${nArt?`<p class="note">${nArt} vienen de ART y se vuelven a cargar al recargar la base o actualizar la lista de ART.</p>`:""}
+    <p class="note">No se puede deshacer. Si ya exportaste el Excel, el archivo no cambia.</p>`;
+  $("clrYes").textContent=`Borrar ${t.length}`;$("clrDlg").showModal();$("clrNo").focus()});
+$("clrNo").addEventListener("click",()=>$("clrDlg").close());
+$("clrYes").addEventListener("click",()=>{$("clrDlg").close();
+  const t=clearTargets(),sc=ddScope();t.forEach(d=>delete S.nov[d]);saveNov();S.sel.clear();closeCf();render();renderPres();
+  toast(`Borré ${t.length} novedades del ${baseTxt()}${sc?" ("+sc+")":""}. Las de ART se vuelven a cargar cuando recargues la base o actualices la lista de ART.`)});
+// Seleccionados: solo los visibles, en el orden de la tabla
+function selRows(){return visibleRows().filter(r=>S.sel.has(r.dni))}
+function selInfo(r){const n=S.nov[r.dni]||{},p=padOf(r)||{};
+  const est=!empty(n.code)?`${String(n.code).trim()} · ${catName(n.code)||"código"}`:r.st==="fe"?"Feriado":r.st==="de"?"Descanso (revisar turno)":r.st==="pe"?r.perm:r.st==="fi"?"Fichó "+(r.marks[0]||""):"Sin novedad";
+  return {leg:String(p.Legajo||""),nom:`${r.ape}, ${r.nom}`,dni:r.dni,un:String(p["Unidad de Negocio"]||""),sec:String(p.Sector||""),grupo:String(r.grupo||""),turno:String(r.turno||"").replace(/\s+/g," "),est,code:empty(n.code)?"":String(n.code).trim(),desc:empty(n.code)?"":catName(n.code),com:String(n.com||"")}}
+const diaTxt=()=>S.date?new Date(S.date.y,S.date.m-1,S.date.d).toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"numeric"}):"este día";
+const fechaTxt=()=>S.date?`${p2(S.date.d)}/${p2(S.date.m)}/${S.date.y}`:"";
+// Imagen para WhatsApp: tabla simple, fondo blanco, nítida (escala 2)
+function selImage(rows){const W=[["Legajo","leg"],["Apellido y nombre","nom"],["Sector","sec"],["DNI","dni"],["Turno","turno"],["Novedad","est"]];
+  const info=rows.map(selInfo),K=2,pad=10,rh=26,font='13px Calibri, "Segoe UI", Arial, sans-serif',bold='bold '+font;
+  const c=document.createElement("canvas"),x=c.getContext("2d");x.font=font;
+  const cut=(s,max)=>{s=String(s);if(x.measureText(s).width<=max)return s;while(s.length>1&&x.measureText(s+"…").width>max)s=s.slice(0,-1);return s+"…"};
+  const lim={nom:260,sec:230,turno:170,est:220};
+  const ws=W.map(([h,k])=>{x.font=bold;let w=x.measureText(h).width;x.font=font;info.forEach(i=>w=Math.max(w,Math.min(lim[k]||999,x.measureText(i[k]).width)));return Math.ceil(w)+pad*2});
+  const tw=ws.reduce((a,b)=>a+b,0),title=`Novedades pendientes · ${fechaTxt()}`,sub=`${rows.length} empleado${rows.length>1?"s":""}${ddScope()?" · "+ddScope():""} · por favor informar la novedad`;
+  const top=62,Wd=Math.max(tw,420)+32,Hd=top+rh*(info.length+1)+16;
+  c.width=Wd*K;c.height=Hd*K;x.scale(K,K);x.fillStyle="#fff";x.fillRect(0,0,Wd,Hd);x.textBaseline="middle";
+  x.fillStyle="#1f2933";x.font='bold 17px Calibri, "Segoe UI", Arial, sans-serif';x.fillText(title,16,22);
+  x.fillStyle="#52606d";x.font=font;x.fillText(sub,16,44);
+  let y=top;x.fillStyle="#1f4e79";x.fillRect(16,y,tw,rh);x.fillStyle="#fff";x.font=bold;
+  let cx=16;W.forEach(([h],j)=>{x.fillText(h,cx+pad,y+rh/2);cx+=ws[j]});
+  x.font=font;info.forEach((i,n)=>{y+=rh;x.fillStyle=n%2?"#f1f5f9":"#fff";x.fillRect(16,y,tw,rh);cx=16;
+    W.forEach(([,k],j)=>{x.fillStyle=k==="est"&&i.est==="Sin novedad"?"#b42318":"#1f2933";x.fillText(cut(i[k],ws[j]-pad*2),cx+pad,y+rh/2);cx+=ws[j]})});
+  x.strokeStyle="#cbd2d9";x.lineWidth=1;x.strokeRect(16.5,top+.5,tw-1,rh*(info.length+1)-1);
+  return new Promise(res=>c.toBlob(res,"image/png"))}
+$("bImg").addEventListener("click",async()=>{const rows=selRows();if(!rows.length)return;
+  const blob=selImage(rows);
+  try{if(!navigator.clipboard||!window.ClipboardItem)throw 0;await navigator.clipboard.write([new ClipboardItem({"image/png":blob})]);
+    toast(`Imagen copiada (${rows.length} empleados). Pegala en WhatsApp con Ctrl+V.`)}
+  catch(e){let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(_){}
+    if(!dl){toast("Este navegador no dejó copiar la imagen.");return}
+    try{await dl.save({filename:`Pendientes ${fechaTxt().replace(/\//g,"-")}.png`,data:await blob});toast("No me dejaron copiar al portapapeles, así que bajé la imagen: adjuntala en WhatsApp.")}
+    catch(e2){toast(e2&&e2.code==="declined"?"Descarga cancelada.":"No pude copiar ni bajar la imagen.")}}});
+$("bXls").addEventListener("click",async()=>{const rows=selRows();if(!rows.length)return;
+  const H=["Legajo","Apellido y nombre","DNI","UN","Sector","Grupo","Turno","Estado / Novedad","ID Tipo Permiso","Descripción","Comentario"],K=["leg","nom","dni","un","sec","grupo","turno","est","code","desc","com"];
+  const data=rows.map(selInfo),ws={},enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const bd={top:{style:"thin",color:{rgb:"BFBFBF"}},bottom:{style:"thin",color:{rgb:"BFBFBF"}},left:{style:"thin",color:{rgb:"BFBFBF"}},right:{style:"thin",color:{rgb:"BFBFBF"}}};
+  const hs={font:{name:"Calibri",sz:11,bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"1F4E79"}},border:bd,alignment:{vertical:"center"}},cs={font:{name:"Calibri",sz:11},border:bd};
+  H.forEach((h,c)=>ws[enc(0,c)]={t:"s",v:h,s:hs});
+  data.forEach((d,i)=>K.forEach((k,c)=>{const v=d[k];ws[enc(i+1,c)]=(k==="leg"||k==="dni"||k==="code")&&/^\d+$/.test(v)?{t:"n",v:+v,s:cs}:{t:"s",v:v,s:cs}}));
+  ws["!ref"]=XLSX.utils.encode_range({s:{r:0,c:0},e:{r:data.length,c:H.length-1}});
+  ws["!cols"]=[10,32,12,24,30,34,24,30,10,30,30].map(w=>({wch:w}));ws["!autofilter"]={ref:ws["!ref"]};
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Seleccionados");
+  const buf=XLSX.write(wb,{bookType:"xlsx",type:"array"});const fname=`Seleccionados ${fechaTxt().replace(/\//g,"-")}.xlsx`;
+  let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(e){}
+  if(!dl){toast("La descarga no está disponible en esta vista. Abrí el artifact en claude.ai.");return}
+  try{await dl.save({filename:fname,data:new Blob([buf])});toast(`Bajé ${fname} con ${rows.length} empleados.`)}
+  catch(e){toast(e&&e.code==="declined"?"Descarga cancelada.":"No se pudo guardar el archivo ("+(e&&e.code||"error")+").")}});
+$("bClear").addEventListener("click",()=>{const k=S.sel.size;S.sel.forEach(d=>delete S.nov[d]);saveNov();S.sel.clear();toast(`Quité la novedad de ${k} empleados.`);render()});
+
+// Columnas del padrón
+$("btnCols").addEventListener("click",()=>{$("panelCols").hidden=!$("panelCols").hidden});
+function renderCols(){if(!S.padHeaders.length)return;
+  $("colsList").innerHTML=S.padHeaders.filter(c=>c!=="Documento"&&!FIXED_PAD.includes(c)).map((c,i)=>`<label><input type="checkbox" id="col-${i}" value="${esc(c)}"${S.extraCols.includes(c)?" checked":""}> ${esc(c)}</label>`).join("")}
+$("colsList").addEventListener("change",e=>{if(e.target.type!=="checkbox")return;const c=e.target.value;
+  S.extraCols=e.target.checked?[...S.extraCols,c]:S.extraCols.filter(x=>x!==c);store.set("cn.cols2",S.extraCols);buildFilters();render()});
+
+// Catálogo de permisos
+$("btnCat").addEventListener("click",()=>{$("panelCat").hidden=!$("panelCat").hidden});
+function renderCat(){S.cat.sort((a,b)=>a.code-b.code);
+  $("catList").innerHTML=S.cat.length?S.cat.map((c,i)=>`<span class="chip"><code>${esc(c.code)}</code>${esc(c.name)}<button type="button" class="hb" data-h="${i}" aria-pressed="${!!c.h}" title="${c.h?"Usa Hora inicio y Hora fin. Tocá para quitar":"No usa horas. Tocá para habilitar Hora inicio y Hora fin"}">🕒 Horas</button><button data-i="${i}" aria-label="Quitar ${esc(c.name)}">×</button></span>`).join(""):'<span class="note">Sin tipos guardados todavía.</span>';
+  $("dlCodes").innerHTML=S.cat.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join("")}
+// Autocompletar de códigos (reemplaza al datalist del navegador, que muestra el código dos veces en dos líneas)
+let acIn=null,acIdx=-1,acList=[],acMute=false;
+function acMatches(q){q=q.trim().toLowerCase();if(!q)return S.cat.slice();
+  const num=/^\d+$/.test(q),a=[],b=[];
+  S.cat.forEach(c=>{const code=String(c.code),name=String(c.name||"").toLowerCase();
+    if(code.startsWith(q))a.push(c);else if(!num&&(name.includes(q)||`${code} · ${name}`.includes(q)))b.push(c)});
+  return a.concat(b)}
+function acShow(inp){acIn=inp;acList=acMatches(inp.value);const cur=String(inp.value).trim();acIdx=acList.findIndex(c=>String(c.code)===cur);
+  const pop=$("acPop");
+  pop.innerHTML=acList.map((c,i)=>`<div role="option" data-i="${i}" aria-selected="${i===acIdx}"><b>${esc(c.code)}</b>${esc(c.name)}</div>`).join("")||'<div class="none">Ningún código coincide</div>';
+  pop.hidden=false;const rc=inp.getBoundingClientRect(),h=pop.offsetHeight,w=pop.offsetWidth;
+  pop.style.left=Math.max(16,Math.min(rc.left,innerWidth-w-16))+"px";
+  pop.style.top=(rc.bottom+4+h>innerHeight-8&&rc.top-4-h>8?rc.top-4-h:rc.bottom+4)+"px";
+  acScroll()}
+function acHide(){$("acPop").hidden=true;acIn=null;acIdx=-1}
+function acScroll(){const el=$("acPop").querySelector(`[data-i="${acIdx}"]`);if(el)el.scrollIntoView({block:"nearest"})}
+function acPick(i){const c=acList[i],inp=acIn;if(!c||!inp)return;inp.value=String(c.code);acHide();
+  inp.dispatchEvent(new Event("input",{bubbles:true}));inp.dispatchEvent(new Event("change",{bubbles:true}))}
+document.addEventListener("focusin",e=>{const t=e.target;if(acMute)return;if(t.matches&&t.matches('input[data-ac="codes"]'))acShow(t);else if(acIn&&!$("acPop").contains(t))acHide()});
+document.addEventListener("input",e=>{if(e.isTrusted&&e.target===acIn)acShow(acIn)},true);
+document.addEventListener("keydown",e=>{if(!acIn||e.target!==acIn)return;const pop=$("acPop");
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){e.preventDefault();if(pop.hidden){acShow(acIn);return}
+    acIdx=Math.max(0,Math.min(acList.length-1,acIdx+(e.key==="ArrowDown"?1:-1)));
+    pop.querySelectorAll("[data-i]").forEach(d=>d.setAttribute("aria-selected",+d.dataset.i===acIdx));acScroll()}
+  else if(e.key==="Enter"&&!pop.hidden&&acIdx>=0){e.preventDefault();acPick(acIdx)}
+  else if(e.key==="Escape"&&!pop.hidden){e.preventDefault();e.stopPropagation();pop.hidden=true}
+  else if(e.key==="Tab")acHide()},true);
+$("acPop").addEventListener("mousedown",e=>{e.preventDefault();const d=e.target.closest("[data-i]");if(d)acPick(+d.dataset.i)});
+document.addEventListener("mousedown",e=>{if(acIn&&e.target!==acIn&&!$("acPop").contains(e.target))acHide()});
+window.addEventListener("scroll",e=>{if(e.target!==$("acPop")&&acIn&&!$("acPop").hidden)acShow(acIn)},true);
+$("catAdd").addEventListener("click",()=>{const code=$("catCode").value.trim(),name=$("catName").value.trim();
+  if(!/^-?\d+$/.test(code)||!name){toast("Completá un ID numérico y una descripción.");return}
+  const prevC=S.cat.find(c=>String(c.code)===code);S.cat=S.cat.filter(c=>String(c.code)!==code);const cv=isFF(code)?FF:+code;S.cat.push(prevC&&prevC.h?{code:cv,name,h:true}:{code:cv,name});store.set("cn.cat3",S.cat);$("catCode").value="";$("catName").value="";renderCat()});
+$("catList").addEventListener("click",e=>{const hb=e.target.closest("button[data-h]");
+  if(hb){const c=S.cat[+hb.dataset.h];if(!c)return;c.h=!c.h;if(!c.h)delete c.h;store.set("cn.cat3",S.cat);renderCat();render();
+    toast(c.h?`${c.code} · ${c.name}: ahora habilita Hora inicio y Hora fin.`:`${c.code} · ${c.name}: ya no usa horas.`);return}
+  const b=e.target.closest("button[data-i]");if(!b)return;S.cat.splice(+b.dataset.i,1);store.set("cn.cat3",S.cat);renderCat()});
+$("catReset").addEventListener("click",()=>{S.cat=DEFAULT_CAT.map(c=>({...c}));markHrsDefault();store.set("cn.cat3",S.cat);renderCat();toast("Restauré la lista original de permisos.")});
+renderCat();
+
+// Pestañas
+document.querySelector(".tabs").addEventListener("click",e=>{const b=e.target.closest(".tab");if(!b)return;const v=b.dataset.view;
+  document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-pressed",t===b));
+  ["nov","art","pres","hist","users"].forEach(x=>$("view"+x[0].toUpperCase()+x.slice(1)).hidden=v!==x);
+  if(v==="art")renderArt();else if(v==="pres")renderPres();else if(v==="hist")renderHist();else if(v==="users")renderUsers();else render()});
+
+// ART · Accidentes de trabajo
+S.art=store.get("cn.art",[]);
+const saveArt=()=>{if(CL.on)cloudSaveArt();else store.set("cn.art",S.art)};
+const artCode=()=>"54";
+if(!store.get("cn.art54",false)){S.art.forEach(a=>{if(String(a.code)==="15")a.code="54"});store.set("cn.art",S.art);store.set("cn.art54",true)}
+const dmy=s=>{const m=String(s||"").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?+m[3]*10000+ +m[2]*100+ +m[1]:0};
+const baseNum=()=>S.date?S.date.y*10000+S.date.m*100+S.date.d:0;
+const artActive=a=>{const al=dmy(a.alta);return !(al&&baseNum()&&al<=baseNum())};
+const artObs=a=>"Stro "+a.nro;
+// En la base compartida, un rol RRHH ve los siniestros de sus UN (y los que no se pueden ubicar en la base)
+const artVis=a=>{if(!CL||!CL.on||!CL.access||CL.access.admin)return true;const r=CL.rowMap&&CL.rowMap.get(a.dni);return !r||inScopeUN(rowUN(r))};
+const cuilToDni=c=>{const d=String(c||"").replace(/\D/g,"");return d.length===11?normDni(d.slice(2,10)):normDni(d)};
+function parseArt(text){
+  const t=String(text||"").replace(/\s+/g," ");
+  const D="(\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}|-{1,2}\\/-{1,2}\\/-{1,4})";
+  const re=new RegExp(`(\\d{1,3}-\\d{4,9})\\s+(.+?)\\s+(\\d{2}-?\\d{8}-?\\d)\\s+${D}\\s+${D}\\s+${D}\\s+${D}\\s+(\\d+)\\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ ]*[A-ZÁÉÍÓÚÑ])`,"g");
+  const out=[];let m;
+  while((m=re.exec(t))){const cuil=m[3].replace(/\D/g,"");
+    out.push({nro:m[1],nombre:m[2].trim(),cuil,dni:cuilToDni(cuil),fsin:m[4],fden:m[5],falta:m[6].includes("-")?"":m[6],alta:m[7].includes("-")?"":m[7],ilt:m[8],tipo:m[9].trim(),code:artCode(m[9])})}
+  return out}
+function geoByDni(dni){return (S.geo||[]).find(r=>r.dni===dni)}
+function applyArt(){if(!S.geo)return;
+  const by=new Map(S.art.filter(artActive).map(a=>[a.dni,a]));
+  S.geo.forEach(r=>{const a=by.get(r.dni),n=S.nov[r.dni];
+    if(a&&(r.st==="ni"||r.st==="de")){if(!n||n.src==="art"||!hasNov(r))S.nov[r.dni]={code:String(a.code),ext:1,com:artObs(a),src:"art"}}
+    else if(n&&n.src==="art")delete S.nov[r.dni]});
+  saveNov()}
+function artName(a){const g=geoByDni(a.dni);if(g)return `${g.ape}, ${g.nom}`;const p=S.pad&&S.pad.get(a.dni);return p&&p.Nombre?p.Nombre:a.nombre||""}
+function artToday(a){
+  if(!S.geo)return '<span class="pill mut">Cargá la base del día</span>';
+  if(!artActive(a))return '<span class="pill mut">Con alta médica</span>';
+  const g=geoByDni(a.dni);if(!g)return '<span class="pill mut">No está en la base</span>';
+  if(g.st==="pe")return `<span class="pill pe">Ya tiene: ${esc(g.perm)}</span>`;
+  if(g.st==="fi")return `<span class="pill fi">Fichó ${esc(g.marks[0])}</span>`;
+  if(g.st==="fe")return '<span class="pill fe">Feriado</span>';
+  if(g.st==="de"&&!(S.nov[a.dni]&&S.nov[a.dni].src==="art"))return '<span class="pill de">Descanso (turno)</span>';
+  const n=S.nov[a.dni];return n&&n.src==="art"?'<span class="pill ok">Novedad ART cargada</span>':`<span class="pill pe">Tiene otra novedad (${esc(codeOf(n))})</span>`}
+function renderArt(){
+  const vis=S.art.filter(artVis);
+  $("artCount").textContent=vis.filter(artActive).length;
+  if($("viewArt").hidden)return;
+  $("artTbl").hidden=!vis.length;$("artEmpty").hidden=!!vis.length;
+  const list=[...vis].sort((a,b)=>artName(a).localeCompare(artName(b),"es"));
+  $("artBody").innerHTML=list.map(a=>{const p=S.pad&&S.pad.get(a.dni);return `<tr data-nro="${esc(a.nro)}">
+    <td class="mono">${esc(a.nro)}</td><td class="name">${esc(artName(a))}</td><td class="mono">${esc(a.dni)}</td><td class="mono">${p?esc(p.Legajo):'<span class="miss">sin padrón</span>'}</td><td class="wrapc">${p?esc(p["Unidad de Negocio"]):""}</td>
+    <td class="mono">${esc(a.fsin)}</td><td class="mono">${esc(a.falta)}</td><td class="mono">${esc(a.alta||"—")}</td><td class="mono">${esc(a.ilt)}</td><td>${esc(a.tipo)}</td>
+    <td class="nov"><input type="text" class="in-code" data-ac="codes" autocomplete="off" data-art="code" value="${esc(a.code)}" aria-label="ID permiso"> <span class="cname">${esc(catName(a.code))}</span></td>
+    <td class="nov mono">${esc(artObs(a))}</td><td>${artToday(a)}</td>
+    <td><button type="button" class="btn link" data-del="${esc(a.nro)}">Quitar</button></td></tr>`}).join("")}
+function artChanged(){saveArt();applyArt();renderArt();updateStats()}
+let artParsed=[];
+$("artPaste").addEventListener("input",()=>{artParsed=parseArt($("artPaste").value);
+  const have=new Set(S.art.map(a=>a.nro)),got=new Set(artParsed.map(a=>a.nro));
+  const nuevos=artParsed.filter(a=>!have.has(a.nro)).length,siguen=artParsed.length-nuevos,salen=S.art.filter(a=>artVis(a)&&!got.has(a.nro)).length;
+  $("artPreview").textContent=artParsed.length?`Detecté ${artParsed.length} siniestros: ${nuevos} nuevos, ${siguen} ya estaban${salen?`, ${salen} de la lista ya no figuran y se quitarían al actualizar`:""}.`:($("artPaste").value.trim()?"No reconocí ningún siniestro. Copiá la tabla completa, con el CUIL y las fechas.":"");
+  $("artSync").disabled=$("artAddOnly").disabled=!artParsed.length});
+function mergeArt(replace){const old=new Map(S.art.map(a=>[a.nro,a]));
+  const upd=artParsed.map(a=>{const o=old.get(a.nro);return o?{...a,code:o.code}:a});
+  // Un rol RRHH solo actualiza los siniestros de sus UN; los de otras UN quedan como están
+  if(replace){const hid=S.art.filter(a=>!artVis(a)),hn=new Set(hid.map(a=>a.nro));S.art=[...hid,...upd.filter(a=>!hn.has(a.nro))]}else{const got=new Set(S.art.map(a=>a.nro));S.art=[...S.art,...upd.filter(a=>!got.has(a.nro))]}
+  $("artPaste").value="";$("artPreview").textContent="";artParsed=[];$("artSync").disabled=$("artAddOnly").disabled=true;artChanged();
+  toast(replace?`Lista de ART actualizada: ${S.art.length} siniestros.`:`Lista de ART: ${S.art.length} siniestros.`)}
+$("artSync").addEventListener("click",()=>mergeArt(true));
+$("artAddOnly").addEventListener("click",()=>mergeArt(false));
+$("artAdd").addEventListener("click",()=>{const nro=$("artNro").value.trim(),dni=cuilToDni($("artDoc").value);
+  if(!/^\d{1,3}-\d{3,9}$/.test(nro)){toast("Escribí el N° de siniestro como figura en la ART, por ejemplo 0-653200.");return}
+  if(!dni||dni.length<6){toast("Escribí un DNI o CUIL válido.");return}
+  if(S.art.some(a=>a.nro===nro)){toast("Ese siniestro ya está en la lista.");return}
+  const tipo=$("artTipo").value,falta=$("artFalta").value.trim();
+  S.art.push({nro,nombre:"",cuil:"",dni,fsin:"",fden:"",falta,alta:"",ilt:"",tipo,code:artCode(tipo)});
+  ["artNro","artDoc","artFalta"].forEach(id=>$(id).value="");artChanged();toast(`Agregué el siniestro ${nro}.`)});
+$("artBody").addEventListener("click",e=>{const b=e.target.closest("[data-del]");if(!b)return;const nro=b.dataset.del;
+  S.art=S.art.filter(a=>a.nro!==nro);artChanged();toast(`Quité el siniestro ${nro} de la lista de ART.`)});
+$("artBody").addEventListener("change",e=>{const i=e.target.closest('[data-art="code"]');if(!i)return;const nro=i.closest("tr").dataset.nro;
+  const a=S.art.find(x=>x.nro===nro);if(!a)return;const v=i.value.trim();if(!/^-?\d+$/.test(v)){toast("El ID de permiso tiene que ser un número.");i.value=a.code;return}
+  a.code=v;artChanged()});
+
+// Cuadro de Presentismo Diario
+const nrm=s=>String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/\s+/g," ").trim().toLowerCase();
+const PROWS=[{lab:"Distribucion y Logistica",un:["distribucion y logistica"]},{lab:"AySA Medidores",un:["operaciones comerciales","aysa medidores"]},{lab:"Servicios Electricos",un:["servicios electricos"]},
+  {lab:"Lectura",un:["lectura"]},{lab:"Interior",un:["interior"]},{lab:"A Repartir",un:["indirectos","a repartir"]}];
+const PCOLS=[{k:"pp",lab:"Presentes Propios"},{k:"pc",lab:"Presentes Contratados"},{k:"ap",lab:"Ausentes (Pagos)"},{k:"anp",lab:"Ausentes (No Pagos)"},{k:"ce",lab:"Sin Tareas (No Pagos)"},{k:"v",lab:"Vacaciones"},{k:"ta",lab:"Total Activos"},{k:"sub",lab:"SUB-CONT"}];
+const ACT=["pp","pc","ap","anp","ce","v"];
+const PCODE={P:"P · Presente",AP:"AP · Ausente pago",ANP:"ANP · Ausente no pago",V:"V · Vacaciones",CE:"CE · Sin tareas",X:"No contar","?":"Sin clasificar"};
+const PDEF={};
+[["P","Falta fichada;Presente Gerente/Coordinador;Pres Home Office;Presente Home Office;Trabajo en Comisión;P. Sindical;Dia a Compensar;Vacaciones Pendientes;Presente Contratista;Presente Eventual B;Capacitación;Reunión;Horas Salida Entre jornada C/Goce;Horas Salida Entre jornada S/Goce"],
+ ["AP","Accidente de trabajo;Accidentes;Enfermedad;Enfermedad trabajo (ET);Enfermedad Familiar Sgbatos Art 21;Licencia Médica Estándar;Lic Sanitaria Preventiva;Licencia por Vacuna contra Covid;Amamantamiento (Fuero);Maternidad;Matrimonio;Nacimiento;Mudanza (Sgbatos);Fallecimiento abuelos;Fallecimiento Esposo/a;Fallecimiento Hermano/s;Fallecimiento Hijo;Fallecimiento nieto/s;Fallecimiento Padres;Fallecimiento suegros;P. Fallecimiento;P. Administrativo;Permiso con Goce;Permiso Sgbatos Art 20.1 (JRP);Citacion Judicial;Donación de sangre;Examen;Dia Compensado;Compensación;Jornada de Lluvia"],
+ ["ANP","Ausente S/ Aviso;Ausente C/ Aviso;Ausente C/ Aviso Enfermedad;Suspension;Suspension Preventiva Art 224 LCT;Reserva de puesto;Licencia Sin Goce de Haberes;Permiso sin Goce;Paro / huelga;Excedencia"],
+ ["CE","Cesante;Suspension falta de trabajo"],["V","Vacaciones"],["X","Proceso Desvinculacion;Feriado Diferenciado;Feriado"]]
+ .forEach(([c,l])=>l.split(";").forEach(n=>PDEF[nrm(n)]=c));
+S.pmap=store.get("cn.pmap",{});S.pemp=store.get("cn.pemp",{});let pmapAll=false,presCells=null,presDetKey=null;
+const pmapOf=name=>{const k=nrm(name);return S.pmap[k]||PDEF[k]||"?"};
+const contratOf=p=>{const t=nrm(p["Tipo de Contratación"]),e=nrm(p.Empresa);
+  if(/eventual|agencia/.test(t)||e==="eventual")return "Eventual";if(/pzo|plazo/.test(t)||/pzo|plazo/.test(e))return "Cto. Pzo. Fijo";return "Propios"};
+const empOf=p=>String(p.Empresa||"").trim();
+const isSubEmp=e=>{const k=nrm(e);return !!k&&!["propios","eventual","cto. pzo. fijo","cto pzo fijo"].includes(k)};
+const rowOfUN=un=>{const k=nrm(un).replace(/\s*\(o\)\s*$/,"");return PROWS.findIndex(r=>r.un.includes(k))};
+function presClass(r){const n=S.nov[r.dni],hasN=n&&!empty(n.code),nm=hasN?(catName(n.code)||("ID "+codeOf(n))):"";
+  // Lo que informa Geo (permiso o fichada) manda; la novedad cargada acá solo completa a quien no tiene nada en Geo
+  if(r.st==="pe")return {c:pmapOf(r.perm),why:r.perm+(hasN?` (se ignora la novedad cargada: ${nm})`:""),name:r.perm,ign:hasN};
+  if(r.st==="fi")return {c:"P",why:"Fichó"+(hasN?` (se ignora la novedad cargada: ${nm})`:""),ign:hasN};
+  if(hasN)return {c:pmapOf(nm),why:"Novedad: "+nm,name:nm};
+  if(r.st==="fe")return {c:"X",why:"Feriado sin fichada"};
+  if(r.st==="de")return {c:"X",why:"Descanso según el turno (revisar si está bien asignado)",de:true};
+  return {c:"?",why:"No informado sin novedad",ni:true}}
+function presCompute(){
+  const cells=PROWS.map(()=>Object.fromEntries(PCOLS.map(c=>[c.k,[]])));const tot=Object.fromEntries(PCOLS.map(c=>[c.k,[]]));
+  const W={sinPad:[],otraUN:[],sinClas:[],ni:[],subOtros:[],ign:[],de:[]},ev=[],perms=new Map(),emps=new Map(),det=new Map();
+  (S.geo||[]).forEach(r=>{const p=padOf(r),k=presClass(r);if(k.ign)W.ign.push({r,p,k});
+    if(k.name){const e=perms.get(k.name)||0;perms.set(k.name,e+1)}
+    const rec={r,p,k};det.set(r.dni,rec);if(k.de)W.de.push(rec);
+    if(!p){W.sinPad.push(rec);return}
+    const emp=empOf(p);
+    if(isSubEmp(emp)){emps.set(emp,(emps.get(emp)||0)+1);rec.sub=emp;
+      const dest=S.pemp[nrm(emp)];if(dest==="no"){rec.sub=null}else{
+      if(k.c!=="P")return;
+      const ix=dest!=null&&dest!==""?+dest:rowOfUN(p["Unidad de Negocio"]);
+      if(ix<0){W.otraUN.push(rec);return}
+      cells[ix].sub.push(rec);rec.cell=[ix,"sub"];return}}
+    const ix=rowOfUN(p["Unidad de Negocio"]);
+    if(k.c==="X")return;
+    if(k.c==="?"){(k.ni?W.ni:W.sinClas).push(rec);return}
+    if(ix<0){W.otraUN.push(rec);return}
+    const ct=contratOf(p);rec.ct=ct;
+    const col=k.c==="P"?(ct==="Eventual"?"pc":"pp"):k.c.toLowerCase();
+    cells[ix][col].push(rec);cells[ix].ta.push(rec);rec.cell=[ix,col];
+    if(ct==="Eventual"&&["P","AP","ANP","V"].includes(k.c))ev.push(rec)});
+  cells.forEach(row=>PCOLS.forEach(c=>tot[c.k].push(...row[c.k])));
+  return {cells,tot,W,ev,perms,emps,det}}
+const fechaLarga=()=>S.date?new Date(S.date.y,S.date.m-1,S.date.d).toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long",year:"numeric"}):"";
+function renderPres(){
+  if($("viewPres").hidden)return;
+  const ok=!!(S.geo&&S.pad);$("presTbl").hidden=!ok;$("presEmpty").hidden=ok;$("presExport").disabled=!ok;$("presMail").disabled=!ok;
+  if(!ok){$("presWarn").innerHTML="";$("presCheck").hidden=true;$("presDet").hidden=true;presCells=null;renderPMap();renderPEmp();return}
+  const R=presCells=presCompute();
+  const td=(list,ri,k)=>`<td class="n${list.length?"":" zero"}"${list.length?` data-r="${ri}" data-c="${k}"`:""}>${list.length}</td>`;
+  const totPlant=R.ev.length,totAct=R.tot.ta.length;
+  $("presTbl").innerHTML=`<thead><tr><th class="lab"></th>${PCOLS.map(c=>`<th>${c.lab}</th>`).join("")}</tr></thead><tbody>`
+    +PROWS.map((row,i)=>`<tr><td class="lab">${row.lab}</td>${PCOLS.map(c=>td(R.cells[i][c.k],i,c.k)).join("")}</tr>`).join("")
+    +`<tr class="tot"><td class="lab">Total</td>${PCOLS.map(c=>td(R.tot[c.k],"t",c.k)).join("")}</tr></tbody>`;
+  const sumCols=ACT.reduce((a,k)=>a+R.tot[k].length,0);
+  const rowsBad=PROWS.filter((_,i)=>ACT.reduce((a,k)=>a+R.cells[i][k].length,0)!==R.cells[i].ta.length);
+  $("presCheck").hidden=false;
+  $("presCheck").innerHTML=`<div class="pfoot"><div class="big">Total General al ${esc(fechaLarga())}</div><table>
+      <tr><td>Total Plantel Propios</td><td>${totAct-totPlant}</td></tr><tr><td>Total Plantel Contratados</td><td>${totPlant}</td></tr></table></div>
+    <h2>Verificación</h2><div class="chk">${sumCols===totAct&&!rowsBad.length?`<span class="okv">✓ Total Activos (${totAct}) es igual a la suma de las 6 columnas (${ACT.map(k=>R.tot[k].length).join(" + ")}).</span>`:`<span class="badv">✗ Total Activos ${totAct} no coincide con la suma ${sumCols}.</span>`}</div>
+    <div class="chk">${PROWS.map((row,i)=>`<span><b>${row.lab}</b>: ${R.cells[i].ta.length} activos${R.cells[i].sub.length?` + ${R.cells[i].sub.length} sub-cont`:""}</span>`).join("")}<span><b>Total</b>: ${totAct} activos + ${R.tot.sub.length} sub-cont</span></div>`;
+  const w=[];const unk=[...R.perms.keys()].filter(n=>pmapOf(n)==="?");
+  if(R.W.ni.length)w.push(`<div class="wline">${R.W.ni.length} No informados sin novedad no se cuentan en el cuadro. <button data-w="ni">Ver quiénes</button></div>`);
+  if(R.W.de.length)w.push(`<div class="wline">${R.W.de.length} empleados tienen turno Descanso sin fichada ni permiso: no se cuentan. Revisá si el turno está bien asignado. <button data-w="de">Ver quiénes</button></div>`);
+  if(unk.length)w.push(`<div class="wline">${R.W.sinClas.length} empleados tienen permisos sin clasificar (${esc(unk.join(", "))}). <button data-w="sinClas">Ver quiénes</button><button data-open="pmap">Clasificarlos</button></div>`);
+  if(R.W.otraUN.length)w.push(`<div class="wline">${R.W.otraUN.length} empleados son de una UN que no está en el cuadro y no se cuentan. <button data-w="otraUN">Ver quiénes</button></div>`);
+  if(R.W.ign.length)w.push(`<div class="wline">${R.W.ign.length} empleados tienen una novedad cargada acá pero en Geo ya tienen permiso o fichada. El cuadro usa lo que dice Geo. <button data-w="ign">Ver quiénes</button></div>`);
+  if(R.W.sinPad.length)w.push(`<div class="wline">${R.W.sinPad.length} empleados no están en el padrón y no se cuentan. <button data-w="sinPad">Ver quiénes</button></div>`);
+  $("presWarn").innerHTML=w.join("");renderPMap();renderPEmp();
+  if(presDetKey)showDet(presDetKey,true)}
+function showDet(key,keep){if(!presCells)return;const R=presCells;let list,title;
+  if(key.w){list=R.W[key.w];title={ni:"No informados sin novedad",sinClas:"Permisos sin clasificar",otraUN:"UN fuera del cuadro",sinPad:"Sin padrón",de:"Turno Descanso (revisar asignación)",ign:"Novedad cargada que no se usa porque Geo ya informa"}[key.w]}
+  else{const col=PCOLS.find(c=>c.k===key.c);list=key.r==="t"?R.tot[key.c]:R.cells[+key.r][key.c];title=`${key.r==="t"?"Total":PROWS[+key.r].lab} · ${col.lab}`}
+  presDetKey=key;$("presDet").hidden=false;$("presDetT").textContent=`${title} (${list.length})`;
+  $("presDetB").innerHTML=[...list].sort((a,b)=>(a.r.ape+a.r.nom).localeCompare(b.r.ape+b.r.nom,"es")).map(x=>{const p=x.p||{};return `<tr><td class="mono">${esc(p.Legajo||"")}</td><td class="name">${esc(x.r.ape)}, ${esc(x.r.nom)}</td><td>${esc(p["Unidad de Negocio"]||"")}</td><td>${esc(p.Sector||"")}</td><td>${esc(p.Empresa||"")}</td><td>${esc(x.p?contratOf(x.p):"")}</td><td>${esc(x.k.why)}</td><td>${esc(PCODE[x.k.c])}</td></tr>`}).join("")||'<tr><td colspan="8" class="note">Nadie.</td></tr>';
+  if(!keep)$("presDet").scrollIntoView({behavior:"smooth",block:"nearest"})}
+$("presTbl").addEventListener("click",e=>{const t=e.target.closest("td[data-c]");if(t)showDet({r:t.dataset.r,c:t.dataset.c})});
+$("presWarn").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;if(b.dataset.w)showDet({w:b.dataset.w});if(b.dataset.open==="pmap"){$("panelPMap").hidden=false;renderPMap();$("panelPMap").scrollIntoView({behavior:"smooth",block:"nearest"})}});
+$("presDetX").addEventListener("click",()=>{presDetKey=null;$("presDet").hidden=true});
+const optsP=v=>Object.keys(PCODE).filter(k=>k!=="?").map(k=>`<option value="${k}"${v===k?" selected":""}>${PCODE[k]}</option>`).join("")+(v==="?"?`<option value="?" selected>Elegir…</option>`:"");
+function renderPMap(){if($("panelPMap").hidden)return;
+  const used=presCells?presCells.perms:new Map();
+  const names=new Map();used.forEach((n,k)=>names.set(nrm(k),{name:k,n}));
+  if(pmapAll)S.cat.forEach(c=>{const k=nrm(c.name);if(!names.has(k))names.set(k,{name:c.name,n:0})});
+  const list=[...names.values()].sort((a,b)=>(pmapOf(a.name)==="?"?-1:0)-(pmapOf(b.name)==="?"?-1:0)||b.n-a.n||a.name.localeCompare(b.name,"es"));
+  $("pmapList").innerHTML=list.map(x=>{const v=pmapOf(x.name);return `<label class="${v==="?"?"unk":""}"><span>${esc(x.name)}${x.n?`<small>${x.n}</small>`:""}</span><select data-pm="${esc(nrm(x.name))}">${optsP(v)}</select></label>`}).join("")||'<span class="note">Cargá la base del día para ver los permisos usados.</span>';
+  $("pmapAll").textContent=pmapAll?"Ver solo los de hoy":"Ver todos los permisos"}
+function renderPEmp(){if($("panelPEmp").hidden)return;const emps=presCells?[...presCells.emps.entries()]:[];
+  $("pempList").innerHTML=emps.sort((a,b)=>b[1]-a[1]).map(([e,n])=>{const v=S.pemp[nrm(e)]??"";
+    return `<label><span>${esc(e)}<small>${n}</small></span><select data-pe="${esc(nrm(e))}"><option value=""${v===""?" selected":""}>Según la UN</option>${PROWS.map((r,i)=>`<option value="${i}"${String(v)===String(i)?" selected":""}>${r.lab}</option>`).join("")}<option value="no"${v==="no"?" selected":""}>No es subcontratista</option></select></label>`}).join("")||'<span class="note">No hay empleados de empresas subcontratistas en la base del día.</span>'}
+$("pmapList").addEventListener("change",e=>{const s=e.target.closest("[data-pm]");if(!s)return;S.pmap[s.dataset.pm]=s.value;store.set("cn.pmap",S.pmap);renderPres()});
+$("pempList").addEventListener("change",e=>{const s=e.target.closest("[data-pe]");if(!s)return;S.pemp[s.dataset.pe]=s.value;store.set("cn.pemp",S.pemp);renderPres()});
+$("pmapAll").addEventListener("click",()=>{pmapAll=!pmapAll;renderPMap()});
+$("pmapReset").addEventListener("click",()=>{S.pmap={};store.set("cn.pmap",S.pmap);renderPres();toast("Restauré la clasificación original de permisos.")});
+$("btnPMap").addEventListener("click",()=>{$("panelPMap").hidden=!$("panelPMap").hidden;renderPMap()});
+$("btnPEmp").addEventListener("click",()=>{$("panelPEmp").hidden=!$("panelPEmp").hidden;renderPEmp()});
+$("presExport").addEventListener("click",async()=>{if(!S.geo||!S.pad)return;const R=presCompute();
+  const BL=st=>{const b={style:st,color:{rgb:"000000"}};return {top:b,bottom:b,left:b,right:b}};
+  const F=(o={})=>({name:"Calibri",sz:11,...o});
+  const sH={font:F({bold:true}),fill:{patternType:"solid",fgColor:{rgb:"FABF8F"}},border:BL("medium"),alignment:{horizontal:"center",vertical:"center",wrapText:true}};
+  const sL={font:F(),border:BL("thin"),alignment:{horizontal:"left",vertical:"center"}};
+  const sN={font:F(),border:BL("thin"),alignment:{horizontal:"center",vertical:"center"}};
+  const sTL={font:F({bold:true}),fill:{patternType:"solid",fgColor:{rgb:"FFFF00"}},border:BL("medium"),alignment:{horizontal:"center",vertical:"center"}};
+  const sPL={...sH,font:F({bold:true,italic:true})};
+  const ws={},enc=(r,c)=>XLSX.utils.encode_cell({r,c}),put=(r,c,v,s)=>{ws[enc(r,c)]={t:typeof v==="number"?"n":"s",v,s}};
+  const merges=[];
+  PCOLS.forEach((c,i)=>{put(0,i+1,c.lab,sH);put(1,i+1,"",sH);merges.push({s:{r:0,c:i+1},e:{r:1,c:i+1}})});
+  PROWS.forEach((row,i)=>{put(i+2,0,row.lab,sL);PCOLS.forEach((c,j)=>put(i+2,j+1,R.cells[i][c.k].length,sN))});
+  const tr=PROWS.length+2;put(tr,0,"Total",sTL);PCOLS.forEach((c,j)=>put(tr,j+1,R.tot[c.k].length,sH));
+  const f=tr+2,ev=R.ev.length,ta=R.tot.ta.length;
+  put(f,0,"Total General al "+fechaLarga(),{font:F({bold:true,sz:12}),alignment:{horizontal:"center",vertical:"center",wrapText:true}});
+  for(let r=f;r<=f+1;r++)for(let c=0;c<=3;c++)if(!ws[enc(r,c)])put(r,c,"",{});
+  merges.push({s:{r:f,c:0},e:{r:f+1,c:3}});
+  [["Total Plantel Propios",ta-ev],["Total Plantel Contratados",ev]].forEach(([l,v],k)=>{const r=f+k;put(r,4,l,sPL);for(let c=5;c<=7;c++)put(r,c,"",sPL);merges.push({s:{r,c:4},e:{r,c:7}});put(r,8,v,sH)});
+  ws["!ref"]=XLSX.utils.encode_range({s:{r:0,c:0},e:{r:f+1,c:8}});ws["!merges"]=merges;
+  ws["!cols"]=[{wch:26},...PCOLS.map(()=>({wch:13}))];ws["!rows"]=[{hpt:22},{hpt:22}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Presentismo");
+  const buf=XLSX.write(wb,{bookType:"xlsx",type:"array"});
+  const fname=`Presentismo ${S.date?`${S.date.y}-${p2(S.date.m)}-${p2(S.date.d)}`:"sin fecha"}.xlsx`;
+  let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(e){}
+  if(!dl){toast("La descarga no está disponible en esta vista. Abrí el artifact en claude.ai.");return}
+  try{await dl.save({filename:fname,data:new Blob([buf])});toast(`Exporté el cuadro en ${fname}.`)}
+  catch(e){if(e&&e.code==="declined")toast("Descarga cancelada.");else toast("No se pudo guardar el archivo ("+(e&&e.code||"error")+").")}
+});
+
+// Mail del cuadro: un .eml listo para enviar (Outlook lo abre como mensaje nuevo). Va dentro de un .zip porque el visor no permite descargar .eml directo.
+let MAILCFG=store.get("cn.mail",{to:"",cc:"",subject:"Presentismo {fecha}",intro:""});
+const canEditMail=()=>!CL.on||(CL.access&&CL.access.admin);
+function fillMail(){$("mTo").value=MAILCFG.to||"";$("mCc").value=MAILCFG.cc||"";$("mSubj").value=MAILCFG.subject||"Presentismo {fecha}";$("mIntro").value=MAILCFG.intro||"";
+  const ed=canEditMail();["mTo","mCc","mSubj","mIntro"].forEach(id=>$(id).readOnly=!ed);$("mSave").hidden=!ed;
+  $("pmailWho").textContent=ed?(CL.on?"La lista es la misma para todos los usuarios.":"Se guarda en este navegador."):"Solo el Administrador puede cambiarla."}
+$("btnPMail").addEventListener("click",()=>{$("panelPMail").hidden=!$("panelPMail").hidden;fillMail()});
+const parseAddrs=t=>String(t||"").split(/[;\n]+/).map(s=>s.trim()).filter(Boolean).map(s=>{const m=s.match(/^(.*?)<\s*([^>\s]+@[^>\s]+)\s*>$/);
+  return m?{name:m[1].replace(/^['"\s]+|['"\s]+$/g,""),mail:m[2]}:{name:"",mail:s.replace(/[<>]/g,"")}}).filter(a=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.mail));
+$("mSave").addEventListener("click",async()=>{const next={to:$("mTo").value.trim(),cc:$("mCc").value.trim(),subject:$("mSubj").value.trim()||"Presentismo {fecha}",intro:$("mIntro").value.trim()};
+  const bad=[...String(next.to).split(/[;\n]+/),...String(next.cc).split(/[;\n]+/)].map(s=>s.trim()).filter(s=>s&&!parseAddrs(s).length);
+  if(bad.length){$("mMsg").textContent="No reconocí: "+bad.join(", ");return}
+  if(CL.on){try{await CL.db.doc("shared/mail").set(next);MAILCFG=next}catch(e){writeErr(e);return}}else{MAILCFG=next;store.set("cn.mail",next)}
+  $("mMsg").textContent=`Guardado: ${parseAddrs(next.to).length} en Para y ${parseAddrs(next.cc).length} en CC.`});
+function presMailHtml(R){const ev=R.ev.length,ta=R.tot.ta.length;
+  const B="border:1px solid #000;padding:3px 8px;text-align:center;font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#000;background:#fff;";
+  const H=B+"background:#FABF8F;font-weight:bold;border:2px solid #000;";
+  let h=`<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;"><tr><td style="${B}border-width:0 0 2px 0;"></td>${PCOLS.map(c=>`<td style="${H}width:95px;">${esc(c.lab)}</td>`).join("")}</tr>`;
+  PROWS.forEach((row,i)=>{h+=`<tr><td style="${B}text-align:left;white-space:nowrap;">${esc(row.lab)}</td>${PCOLS.map(c=>`<td style="${B}">${R.cells[i][c.k].length}</td>`).join("")}</tr>`});
+  h+=`<tr><td style="${B}background:#FFFF00;font-weight:bold;border:2px solid #000;">Total</td>${PCOLS.map(c=>`<td style="${H}">${R.tot[c.k].length}</td>`).join("")}</tr></table><br>`;
+  h+=`<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;"><tr><td rowspan="2" style="font-family:Calibri,Arial,sans-serif;font-size:12pt;font-weight:bold;padding:4px 24px 4px 4px;">Total General al ${esc(fechaLarga())}</td>
+    <td style="${H}font-style:italic;width:260px;">Total Plantel Propios</td><td style="${H}width:80px;">${ta-ev}</td></tr>
+    <tr><td style="${H}font-style:italic;">Total Plantel Contratados</td><td style="${H}">${ev}</td></tr></table>`;
+  return h}
+const b64u=s=>{const b=new TextEncoder().encode(s);let bin="";b.forEach(x=>bin+=String.fromCharCode(x));return btoa(bin)};
+const hdrWord=s=>/^[\x20-\x7e]*$/.test(s)?s:`=?UTF-8?B?${b64u(s)}?=`;
+// Nombre con acentos: palabra codificada SIN comillas (RFC 2047); sin acentos: entre comillas
+const addrHdr=list=>list.map(a=>{const n=a.name.replace(/"/g,"");return n?(/^[\x20-\x7e]*$/.test(n)?`"${n}"`:hdrWord(n))+` <${a.mail}>`:a.mail}).join(",\r\n ");
+function buildEml(subject,html){const body=`<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:Calibri,Arial,sans-serif;font-size:11pt;">${MAILCFG.intro?`<p>${esc(MAILCFG.intro)}</p>`:""}${html}</body></html>`;
+  const to=parseAddrs(MAILCFG.to),cc=parseAddrs(MAILCFG.cc);
+  return ["X-Unsent: 1",to.length?"To: "+addrHdr(to):"",cc.length?"Cc: "+addrHdr(cc):"","Subject: "+hdrWord(subject),"MIME-Version: 1.0",
+    'Content-Type: text/html; charset="utf-8"',"Content-Transfer-Encoding: base64","",b64u(body).replace(/.{76}/g,"$&\r\n"),""].filter((l,i,a)=>l!==""||i>=a.length-3).join("\r\n")}
+// .zip mínimo (sin compresión) con un solo archivo
+const CRC=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+function zipOne(name,data){const nm=new TextEncoder().encode(name);let crc=0xFFFFFFFF;data.forEach(b=>crc=CRC[(crc^b)&255]^(crc>>>8));crc=(crc^0xFFFFFFFF)>>>0;
+  const d=new Date(),dt=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate(),tm=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+  const lh=new DataView(new ArrayBuffer(30)),ch=new DataView(new ArrayBuffer(46)),eo=new DataView(new ArrayBuffer(22));
+  [[0,0x04034b50,4],[4,20,2],[6,0x0800,2],[8,0,2],[10,tm,2],[12,dt,2],[14,crc,4],[18,data.length,4],[22,data.length,4],[26,nm.length,2],[28,0,2]].forEach(([o,v,s])=>s===4?lh.setUint32(o,v,true):lh.setUint16(o,v,true));
+  [[0,0x02014b50,4],[4,20,2],[6,20,2],[8,0x0800,2],[10,0,2],[12,tm,2],[14,dt,2],[16,crc,4],[20,data.length,4],[24,data.length,4],[28,nm.length,2],[30,0,2],[32,0,2],[34,0,2],[36,0,2],[38,0,4],[42,0,4]].forEach(([o,v,s])=>s===4?ch.setUint32(o,v,true):ch.setUint16(o,v,true));
+  const cdOff=30+nm.length+data.length,cdLen=46+nm.length;
+  [[0,0x06054b50,4],[4,0,2],[6,0,2],[8,1,2],[10,1,2],[12,cdLen,4],[16,cdOff,4],[20,0,2]].forEach(([o,v,s])=>s===4?eo.setUint32(o,v,true):eo.setUint16(o,v,true));
+  return new Blob([lh.buffer,nm,data,ch.buffer,nm,eo.buffer],{type:"application/zip"})}
+$("presMail").addEventListener("click",async()=>{if(!S.geo||!S.pad||!S.date)return;
+  if(!parseAddrs(MAILCFG.to).length){$("panelPMail").hidden=false;fillMail();toast("Primero cargá los destinatarios del mail (Para).");return}
+  const R=presCompute(),fecha=`${p2(S.date.d)}/${p2(S.date.m)}/${S.date.y}`;
+  const subject=(MAILCFG.subject||"Presentismo {fecha}").replace(/\{fecha\}/g,fecha);
+  const base=`Presentismo ${p2(S.date.d)}-${p2(S.date.m)}-${S.date.y}`;
+  const emlBytes=new TextEncoder().encode(buildEml(subject,presMailHtml(R)));
+  let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(e){}
+  if(!dl){toast("La descarga no está disponible en esta vista. Abrí el artifact en claude.ai.");return}
+  const fail=e=>{if(e&&e.code==="declined")toast("Descarga cancelada.");else toast("No se pudo guardar el archivo ("+(e&&e.code||"error")+").")};
+  // Primero el .eml directo; si claude.ai no admite esa extensión, el mismo .eml dentro de un .zip
+  try{await dl.save({filename:base+".eml",data:new Blob([emlBytes])});toast("Listo: abrí el .eml con doble clic. Outlook lo abre como mensaje nuevo para enviar.")}
+  catch(e){if(!e||(e.code!=="rejected_extension"&&e.code!=="extension_not_enabled")){fail(e);return}
+    try{await dl.save({filename:base+".zip",data:zipOne(base+".eml",emlBytes)});toast("claude.ai no permite bajar .eml directo, así que va dentro de un .zip: abrilo y hacé doble clic en el .eml.")}
+    catch(e2){fail(e2)}}});
+
+// Exportar
+$("btnExport").addEventListener("click",async()=>{
+  if(!S.date){toast("No pude detectar la fecha de la base. Revisá la columna Fecha.");return}
+  const all=S.geo.filter(r=>hasNov(r)&&ddPass(r)),rows=all.filter(r=>!isFF(S.nov[r.dni].code)),nFF=all.length-rows.length;
+  if(!rows.length){toast(nFF?`Solo hay ${nFF} Falta fichada (00): son reclamos internos y no se exportan a Geo.`:"No hay novedades con los filtros de UN, sector y grupo elegidos.");return}const bad=rows.filter(r=>!/^-?\d+$/.test(String(S.nov[r.dni].code).trim()));
+  if(bad.length){toast(`Hay ${bad.length} ID Tipo Permiso que no son números. Corregilos antes de exportar.`);return}
+  const dacSin=rows.filter(r=>{const n=S.nov[r.dni];return codeOf(n)===DAC&&!n.cext&&!n.cdate});
+  if(dacSin.length){toast(`Hay ${dacSin.length} Día a Compensar sin fecha de DC. Elegí la fecha o tildá "Jorn. ext." antes de exportar.`);S.filter="nov";render();return}
+  const recs=[];
+  rows.forEach(r=>{const n=S.nov[r.dni],c=codeOf(n);
+    recs.push({dni:r.dni,code:parseInt(c,10),d:S.date.d,m:S.date.m,y:S.date.y,ext:Math.max(1,parseInt(n.ext,10)||1),com:n.com,hi:n.hi,hf:n.hf,asg:n.asg});
+    if(((c===DAC&&!n.cext)||c===DC)&&/^\d{4}-\d{2}-\d{2}$/.test(n.cdate||"")){const[y,m,d]=n.cdate.split("-").map(Number);
+      recs.push({dni:r.dni,code:c===DAC?+DC:+DAC,d,m,y,ext:1,com:"Comp "+baseTxt()})}});
+  const fname=`Novedades ${S.date.y}-${p2(S.date.m)}-${p2(S.date.d)}${ddScope()?" "+ddScope().replace(/[\\/:*?"<>|]/g,"").slice(0,60):""}.xlsx`;
+  if(CL.on)cloudLogExport(recs,rows.length);
+  await saveNovXlsx(recs,fname,`Exporté ${recs.length} filas (${rows.length} novedades del día) en ${fname}.${nFF?` No incluí ${nFF} Falta fichada (00).`:""}`);
+});
+async function saveNovXlsx(recs,fname,okMsg){
+  const H=["DNI","ID Tipo Permiso","Día","Mes","Año","Extensión","Comentario","Hora Inicio","Hora Fin","Asignación"];
+  const ws={};const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  H.forEach((h,c)=>ws[enc(0,c)]={t:"s",v:h});
+  recs.forEach((x,i)=>{const R=i+1;
+    const cells=[{t:"s",v:x.dni},{t:"n",v:x.code},{t:"n",v:x.d},{t:"n",v:x.m},{t:"n",v:x.y},{t:"n",v:x.ext},
+      x.com?{t:"s",v:x.com}:null,x.hi?{t:"s",v:x.hi}:null,x.hf?{t:"s",v:x.hf}:null,x.asg?{t:"s",v:x.asg}:null];
+    cells.forEach((v,c)=>{if(v)ws[enc(R,c)]=v})});
+  ws["!ref"]=XLSX.utils.encode_range({s:{r:0,c:0},e:{r:recs.length,c:H.length-1}});
+  ws["!cols"]=[{wch:12},{wch:15},{wch:6},{wch:6},{wch:7},{wch:10},{wch:34},{wch:11},{wch:10},{wch:12}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Hoja1");
+  const buf=XLSX.write(wb,{bookType:"xlsx",type:"array"});
+  let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(e){}
+  if(!dl){toast("La descarga no está disponible en esta vista. Abrí el artifact en claude.ai.");return}
+  try{await dl.save({filename:fname,data:new Blob([buf])});toast(okMsg)}
+  catch(e){if(e&&e.code==="declined")toast("Descarga cancelada.");else toast("No se pudo guardar el archivo ("+(e&&e.code||"error")+").")}
+}
+
+/* ============ Base compartida: usuarios, roles y datos por fecha ============
+   cfg/main                    roles y asignación de usuarios (solo el Administrador escribe)
+   days/<fecha>                datos de la fecha (quién cargó, cuándo, cantidad)
+   days/<fecha>/emps/<UN~n>    empleados de la base con sus datos del padrón, por UN
+   days/<fecha>/nov/<UN>       novedades cargadas, por UN ({dni: novedad})
+   days/<fecha>/exports/<id>   cada Excel exportado (filas), para volver a descargarlo
+   shared/art                  lista de ART                                              */
+const PAD_KEEP=["Legajo","Unidad de Negocio","Sector","Empresa","Tipo de Contratación","Fecha de Ingreso","Puesto","Gerencia","Departamento","Centro de Costos","Categoría","Fecha fin contrato","Nombre"];
+const UNS_KNOWN=["Distribucion y Logistica","Operaciones Comerciales","Servicios Electricos","Lectura","Interior","Indirectos","A Repartir","Edesur","Servicios de Gas"];
+const DEFAULT_ROLES={ssee:{name:"RRHH SSEE",mode:"only",uns:["Servicios Electricos"]},cba:{name:"RRHH CBA",mode:"only",uns:["Interior"]},gral:{name:"RRHH GRAL",mode:"except",uns:["Servicios Electricos","Interior"]}};
+const MODE_LAB={only:"Solo estas UN",except:"Todas menos estas",all:"Todas las UN"};
+const unNorm=u=>nrm(u).replace(/\s*\(o\)\s*$/,"");
+const unSlug=u=>unNorm(u).replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"sin-un";
+const padKeep=p=>{if(!p)return null;const o={};PAD_KEEP.forEach(k=>{if(!empty(p[k]))o[k]=String(p[k])});return o};
+const dayIdOf=d=>`${d.y}-${p2(d.m)}-${p2(d.d)}`;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+var CL={on:false,db:null,user:null,uid:null,owner:false,cfg:null,access:null,day:null,days:[],rowsAll:null,empDocs:null,novDocs:null,synced:{},dirty:new Set(),subs:{},exps:[],names:{},padCache:new Map()};
+
+function roleDefs(){return (CL.cfg&&CL.cfg.roles)||DEFAULT_ROLES}
+function computeAccess(){if(CL.owner)return {admin:true,name:"Administrador",mode:"all",uns:[]};
+  const rid=CL.cfg&&CL.cfg.users&&CL.cfg.users[CL.uid];const r=rid&&roleDefs()[rid];return r?{admin:false,id:rid,...r}:null}
+// El rol ya no limita: todos ven y gestionan todas las UN. Su alcance es la vista con la que arranca el filtro de UN.
+function inScopeUN(){return !!CL.access}
+function defScopeUN(un){const a=CL.access;if(!a)return false;if(a.mode==="all")return true;
+  const hit=(a.uns||[]).some(u=>unNorm(u)===unNorm(un||""));return a.mode==="only"?hit:!hit}
+const rowUN=r=>r&&r.pad?r.pad["Unidad de Negocio"]||"":"";
+const unKeyOfDni=d=>{const r=CL.rowMap&&CL.rowMap.get(d);return unSlug(rowUN(r))};
+
+async function cloudInit(){
+  let db=null,user=null;
+  try{[db,user]=await Promise.all([window.claude?.use?.("db"),window.claude?.use?.("user")])}catch(e){}
+  if(!db||!user){$("locked").hidden=true;return}   // sin base compartida: modo local en este navegador
+  CL.on=true;CL.db=db;CL.user=user;
+  $("app").hidden=true;$("locked").hidden=false;
+  try{CL.uid=await user.id();CL.owner=await user.isOwner()}catch(e){}
+  if(!CL.uid&&!CL.owner){lock("Iniciá sesión en claude.ai","Para usar esta herramienta necesitás entrar con tu cuenta de claude.ai.");return}
+  const t=setTimeout(()=>{if(!CL.cfgLoaded)lock("No pude conectar con la base compartida","Revisá tu conexión. La página se actualiza sola cuando vuelve.")},10000);
+  CL.subs.cfg=db.doc("cfg/main").onSnapshot(s=>{CL.cfgLoaded=true;clearTimeout(t);CL.cfg=s.exists?JSON.parse(JSON.stringify(s.data())):null;onAccess()},
+    e=>{clearTimeout(t);lock("No pude leer la configuración",String(e&&e.message||e&&e.code||""))});
+}
+function lock(title,msg){$("app").hidden=true;$("locked").hidden=false;$("lockedT").textContent=title;$("lockedM").textContent=msg}
+async function onAccess(){
+  const prev=CL.access&&JSON.stringify(CL.access);CL.access=computeAccess();
+  if(!CL.access){lock("Todavía no tenés un rol asignado","Tu pedido de acceso quedó registrado. Avisale al administrador para que te asigne un rol RRHH. Cuando lo haga, esta página se habilita sola.");stopAll();
+    if(!CL.reqSent&&CL.uid){CL.reqSent=true;try{await CL.db.doc("req/"+CL.uid).set({at:Date.now()})}catch(e){
+      $("lockedM").textContent="No pude registrar tu pedido: el artifact no te permite guardar datos. Pedile al administrador que te comparta el artifact por mail con nivel Editor (o Colaborador si sos de su organización) y volvé a abrir el link."}}
+    return}
+  $("locked").hidden=true;$("app").hidden=false;
+  if(CL.access.admin&&!CL.subs.req)CL.subs.req=CL.db.collection("req").onSnapshot(s=>{CL.reqs=s.docs.map(x=>({id:x.id,...x.data()}));
+    $("tabUsers").textContent="Usuarios y roles"+(pendingReqs().length?` (${pendingReqs().length})`:"");if(!$("viewUsers").hidden)renderUsers()},()=>{});
+  $("tabHist").hidden=false;$("tabUsers").hidden=!CL.access.admin;
+  renderWho();
+  if(!CL.started){CL.started=true;startShared()}
+  else if(prev!==JSON.stringify(CL.access))applyRows();
+  if(!$("viewUsers").hidden)renderUsers();
+}
+async function renderWho(){let nm="";try{nm=await CL.user.name()}catch(e){}
+  const w=$("who");w.hidden=false;w.innerHTML=`${esc(nm||"Usuario")} · <b>${esc(CL.access.name)}</b>`+(CL.access.admin||CL.access.mode==="all"?"":` <span class="sync">(arranca en: ${esc(CL.access.mode==="except"?"todas menos "+(CL.access.uns||[]).join(", "):(CL.access.uns||[]).join(", "))})</span>`)}
+function stopAll(){["days","art","emps","nov","exps","mail"].forEach(k=>{if(CL.subs[k]){CL.subs[k]();delete CL.subs[k]}});CL.started=false;CL.day=null}
+function startShared(){const db=CL.db;
+  CL.subs.days=db.collection("days").orderBy("id","desc").limit(120).onSnapshot(s=>{
+    CL.days=s.docs.map(d=>({...d.data()}));renderDaySel();if(CL.rowsAll)padStamp();if(!$("viewHist").hidden)renderHist();
+    if(!CL.day&&CL.days.length)openDay(CL.days[0].id)},e=>toast("No pude leer las fechas guardadas ("+(e&&e.code)+")."));
+  CL.subs.art=db.doc("shared/art").onSnapshot(s=>{const it=s.exists&&s.data().items;S.art=Array.isArray(it)?JSON.parse(JSON.stringify(it)):[];
+    CL.artLoaded=true;renderArt();maybeApplyArt()},()=>{});
+  CL.subs.mail=db.doc("shared/mail").onSnapshot(s=>{if(s.exists){MAILCFG={...s.data()};if(!$("panelPMail").hidden&&!$("panelPMail").contains(document.activeElement))fillMail()}},()=>{});
+}
+function renderDaySel(){const sel=$("daySel");sel.hidden=!CL.days.length;
+  sel.innerHTML=CL.days.map(d=>`<option value="${esc(d.id)}"${d.id===CL.day?" selected":""}>${esc(d.id.split("-").reverse().join("/"))}${d.fer?" · F":""}</option>`).join("")}
+$("daySel").addEventListener("change",e=>{if(CL.on)openDay(e.target.value);else localDay(e.target.value)});
+async function openDay(id){if(CL.day===id)return;await flushNov();
+  ["emps","nov","exps"].forEach(k=>{if(CL.subs[k]){CL.subs[k]();delete CL.subs[k]}});
+  CL.day=id;CL.rowsAll=null;CL.empDocs=null;CL.novDocs=null;CL.synced={};CL.dirty.clear();CL.exps=[];CL.artApplied=false;
+  S.nov={};S.sel.clear();S.geo=null;S.pad=null;const [y,m,d]=id.split("-").map(Number);S.date={y,m,d,txt:""};
+  renderDaySel();setDateChip();render();
+  const base=CL.db.doc("days/"+id);
+  let ready;CL.empReady=new Promise(r=>ready=r);setTimeout(()=>ready(),8000);
+  CL.subs.emps=base.collection("emps").onSnapshot(s=>{CL.empDocs=s.docs.map(x=>({id:x.id,...x.data()}));ready();applyRows()},e=>{ready();toast("No pude leer la base de la fecha ("+(e&&e.code)+").")});
+  CL.subs.nov=base.collection("nov").onSnapshot(s=>{CL.novDocs=s.docs.map(x=>({id:x.id,data:x.data()}));ingestNov()},e=>toast("No pude leer las novedades ("+(e&&e.code)+")."));
+  CL.subs.exps=base.collection("exports").orderBy("at","desc").limit(50).onSnapshot(s=>{CL.exps=s.docs.map(x=>({id:x.id,...x.data()}));if(!$("viewHist").hidden)renderHist()},()=>{});
+}
+// Reconstruye los empleados de la fecha desde la base y aplica el alcance del rol
+function applyRows(){if(!CL.empDocs)return;
+  const all=[];CL.empDocs.slice().sort((a,b)=>a.id.localeCompare(b.id)).forEach(d=>(d.rows||[]).forEach(x=>all.push({dni:x.d,ape:x.a||"",nom:x.n||"",grupo:x.g||"",turno:x.t||"",cargo:x.c||"",perm:x.p||"",marks:x.m||[],st:x.s==="ni"&&isDescT(x.t)?"de":x.s,pad:x.x||null})));
+  CL.rowsAll=all;CL.rowMap=new Map(all.map(r=>[r.dni,r]));all.forEach(r=>{if(r.pad)CL.padCache.set(r.dni,r.pad)});
+  const meta=CL.days.find(d=>d.id===CL.day)||{};
+  S.geo=all.filter(r=>inScopeUN(rowUN(r)));
+  const withPad=S.geo.filter(r=>r.pad);S.pad=withPad.length?new Map(withPad.map(r=>[r.dni,r.pad])):null;
+  S.padHeaders=PAD_KEEP.filter(k=>k!=="Nombre");renderCols();
+  // Vista inicial según el rol: preselecciona sus UN en el filtro (se puede quitar con "Todas las UN")
+  const pk=CL.day+"|"+JSON.stringify(CL.access);
+  if(all.length&&CL.presetKey!==pk){CL.presetKey=pk;DD.un.sel.clear();
+    if(CL.access&&!CL.access.admin&&CL.access.mode!=="all")S.geo.forEach(r=>{if(defScopeUN(rowUN(r)))DD.un.sel.add(unOf(r))})}
+  const nDef=DD.un.sel.size?S.geo.filter(r=>DD.un.sel.has(unOf(r))).length:0;
+  $("geoInfo").textContent=all.length?`${meta.geo||"Base guardada"} · ${all.length} empleados`+(nDef&&CL.access&&!CL.access.admin?` · arrancás viendo tus ${nDef} (filtro de UN)`:""):"Arrastrá o elegí el .xlsx con Identificador, Permiso y fichadas";
+  $("dropGeo").classList.toggle("done",!!all.length);
+  if(meta.pad){$("padInfo").textContent=`${meta.pad} · cruzado con la base guardada`;$("dropPad").classList.add("done")}
+  else if(withPad.length&&!S.padLocal){$("padInfo").textContent=`Padrón guardado con la base · ${withPad.length} empleados cruzados`;$("dropPad").classList.add("done")}
+  // Última actualización de cada archivo (las fechas viejas sin geoAt usan la última escritura)
+  setStamp("geoWhen",all.length?(meta.geoAt||meta.at):0,meta.geoAt?meta.geoBy:meta.by);
+  padStamp();
+  ingestNov();setDateChip();buildFilters();refreshViews();
+}
+function ingestNov(){if(!CL.novDocs||!CL.rowsAll)return;
+  const nov={},synced={};
+  // Cada novedad se guarda como texto JSON: así un campo borrado no queda vivo en la base
+  CL.novDocs.forEach(doc=>Object.entries(doc.data||{}).forEach(([d,v])=>{if(d.startsWith("_"))return;const r=CL.rowMap.get(d);if(!r||!inScopeUN(rowUN(r)))return;
+    synced[d]=typeof v==="string"?v:null;if(typeof v==="string"){try{nov[d]=JSON.parse(v)}catch(e){}}}));
+  CL.dirty.forEach(d=>{if(S.nov[d])nov[d]=S.nov[d];else delete nov[d];synced[d]=CL.synced[d]});   // cambios propios aún no guardados
+  S.nov=nov;CL.synced=synced;maybeApplyArt();refreshViews(true)}
+// No re-dibujar la tabla mientras alguien está escribiendo en ella
+function refreshViews(soft){updateStats();
+  if(!$("viewNov").hidden){if(soft&&$("tbody").contains(document.activeElement)){CL.pendingRender=true}else render()}
+  renderArt();if(!$("viewPres").hidden)renderPres()}
+$("tbody").addEventListener("focusout",()=>setTimeout(()=>{if(CL.pendingRender&&!$("tbody").contains(document.activeElement)){CL.pendingRender=false;render()}},0));
+function maybeApplyArt(){if(!CL.on||!CL.artLoaded||!CL.rowsAll||!CL.novDocs)return;applyArt();if(!$("viewArt").hidden)renderArt()}
+
+// Novedades: se guardan solo las que cambiaron, agrupadas por UN, con una pausa para no escribir por cada tecla
+function cloudQueueNov(){if(!CL.rowsAll||CL.readOnly)return;
+  const keys=new Set([...Object.keys(S.nov),...Object.keys(CL.synced)]);
+  keys.forEach(d=>{const r=CL.rowMap.get(d);if(!r||!inScopeUN(rowUN(r)))return;
+    const n=S.nov[d],cur=n&&(!empty(n.code)||!empty(n.com)||!empty(n.hi)||!empty(n.hf)||!empty(n.asg))?JSON.stringify(n):null;
+    if(cur!==(CL.synced[d]??null))CL.dirty.add(d)});
+  clearTimeout(CL.novT);CL.novT=setTimeout(flushNov,700)}
+async function flushNov(){clearTimeout(CL.novT);if(!CL.on||!CL.dirty.size||!CL.day||CL.flushing)return;CL.flushing=true;
+  const by={};[...CL.dirty].forEach(d=>{const k=unKeyOfDni(d);(by[k]=by[k]||{})[d]=S.nov[d]?JSON.stringify(S.nov[d]):null});
+  const day=CL.day;let fatal=false;
+  try{for(const [k,data] of Object.entries(by)){await upsert(CL.db.doc(`days/${day}/nov/${k}`),data);
+      Object.entries(data).forEach(([d,v])=>{CL.synced[d]=v;if((S.nov[d]?JSON.stringify(S.nov[d]):null)===v)CL.dirty.delete(d)})}}
+  catch(e){writeErr(e);if(e&&e.code==="invalid_argument"){fatal=true;CL.readOnly=true}}
+  finally{CL.flushing=false;if(!fatal&&CL.dirty.size&&CL.day===day){clearTimeout(CL.novT);CL.novT=setTimeout(flushNov,3000)}}}
+async function upsert(ref,data){try{await ref.update(data)}catch(e){if(e&&e.code==="invalid_argument")await ref.set(data);else throw e}}
+function writeErr(e){const c=e&&e.code;
+  toast(c==="invalid_argument"?"No pude guardar: tu acceso es de solo lectura. Pedile al administrador que te comparta el artifact como Colaborador.":
+    c==="quota_exceeded"?"La base compartida está llena. El administrador tiene que borrar fechas viejas del historial.":"No pude guardar los cambios ("+(c||"error")+"). Se reintenta solo.")}
+window.addEventListener("pagehide",()=>{flushNov()});
+
+// Carga de la base de Geo: guarda la fecha para todos
+// Devuelve "new" (fecha nueva), "upd" (cambió y se reemplazó) o "same" (igual a la guardada, no se escribe)
+async function cloudUploadGeo(g,fname,quiet){const id=dayIdOf(g.date);
+  if(CL.day!==id)await openDay(id);
+  await CL.empReady;
+  const prev=CL.rowMap||new Map(),had=!!(CL.rowsAll&&CL.rowsAll.length);
+  // Padrón: el recién cargado, si no el que ya tenía esa fecha, si no el último conocido de otra fecha
+  let rows=g.rows.map(r=>({...r,pad:padKeep(S.padLocal&&S.padLocal.get(r.dni))||(prev.get(r.dni)||{}).pad||CL.padCache.get(r.dni)||null}));
+  // Reporte parcial (trae menos del 90% de los empleados ya guardados): se suma a lo que había, no lo reemplaza
+  let merged=false;
+  if(had){const up=new Set(rows.map(r=>r.dni)),old=[...prev.values()],cov=old.filter(r=>up.has(r.dni)).length/old.length;
+    if(cov<0.9){rows=rows.concat(old.filter(r=>!up.has(r.dni)));merged=true}}
+  const sig=list=>JSON.stringify(list.map(r=>[r.dni,r.ape,r.nom,r.grupo,r.turno,r.cargo,r.perm,r.marks,r.st,r.pad]).sort((a,b)=>a[0].localeCompare(b[0])));
+  if(had&&sig(rows)===sig([...prev.values()]))return "same";
+  await cloudSaveRows(rows,{geo:fname,fer:rows.some(r=>r.st==="fe"),txt:g.date.txt},S.padLocal?S.padLocalName:null,quiet);
+  return !had?"new":merged?"mrg":"upd";
+}
+async function cloudSaveRows(rows,geoMeta,padName,quiet){const id=CL.day;if(!id)return;
+  if(!quiet)toast("Guardando la base de la fecha para todos…");
+  const groups={};rows.forEach(r=>{const k=unSlug(rowUN(r));(groups[k]=groups[k]||[]).push({d:r.dni,a:r.ape,n:r.nom,g:r.grupo,t:r.turno,c:r.cargo,p:r.perm,m:r.marks,s:r.st,x:r.pad||null})});
+  const docs={};Object.entries(groups).forEach(([k,list])=>{let part=[],size=0,i=0;
+    list.forEach(x=>{const s=JSON.stringify(x).length;if(size+s>150000&&part.length){docs[`${k}~${i++}`]=part;part=[];size=0}part.push(x);size+=s});
+    if(part.length)docs[`${k}~${i}`]=part});
+  try{const base=CL.db.doc("days/"+id);
+    for(const [k,list] of Object.entries(docs))await base.collection("emps").doc(k).set({rows:list,un:k});
+    for(const d of (CL.empDocs||[]))if(!docs[d.id])await base.collection("emps").doc(d.id).delete();
+    const old=CL.days.find(d=>d.id===id)||{};
+    const now=Date.now();
+    await base.set({...old,id,n:rows.length,by:CL.uid,at:now,...(geoMeta||{}),...(geoMeta?{geoAt:now,geoBy:CL.uid}:{}),...(padName?{pad:padName,padAt:now,padBy:CL.uid}:{})});
+    if(!quiet)toast(`Guardé la base del ${id.split("-").reverse().join("/")}: ${rows.length} empleados. Ya la ven todos los usuarios.`)}
+  catch(e){writeErr(e);if(quiet)throw e}}
+async function cloudSaveArt(){try{await CL.db.doc("shared/art").set({items:JSON.parse(JSON.stringify(S.art)),at:Date.now(),by:CL.uid})}catch(e){writeErr(e)}}
+async function cloudLogExport(recs,nNov){if(!CL.day)return;
+  try{await CL.db.doc("days/"+CL.day).collection("exports").add({at:Date.now(),by:CL.uid,scope:ddScope()||"Todas las UN",role:CL.access.admin?"admin":CL.access.id,n:recs.length,nNov,recs})}catch(e){writeErr(e)}}
+
+// Nombres de usuarios (se resuelven al mostrar; nunca se guardan)
+async function namesOf(ids){ids=[...new Set(ids.filter(Boolean))];if(!ids.length||!CL.user)return {};
+  CL.mails=CL.mails||{};
+  try{const ps=await CL.user.profiles(ids);Object.entries(ps).forEach(([k,p])=>{CL.names[k]=p.name||"";CL.mails[k]=p.email||""})}catch(e){}return CL.names}
+const mailOf=id=>(CL.mails&&CL.mails[id])||"";
+const mailCell=id=>`<td class="mail">${mailOf(id)?esc(mailOf(id)):'<span class="note">no visible</span>'}</td>`;
+const nameOf=id=>CL.names[id]||(id===CL.uid?"Vos":"Usuario");
+// "Actualizado: lun 16/11 16:09 · por Matías"
+const whenTxt=t=>{const d=new Date(t);return ["dom","lun","mar","mié","jue","vie","sáb"][d.getDay()]+` ${p2(d.getDate())}/${p2(d.getMonth()+1)} ${p2(d.getHours())}:${p2(d.getMinutes())}`};
+// Padrón: el de esta fecha si se subió con ella; si no, el último padrón subido en cualquier fecha
+function padStamp(){const meta=(CL.days||[]).find(d=>d.id===CL.day)||{};
+  if(meta.pad){setStamp("padWhen",meta.padAt||meta.at,meta.padAt?meta.padBy:meta.by);return}
+  const tAt=d=>d.padAt||d.at||0,last=(CL.days||[]).filter(d=>d.pad).sort((a,b)=>tAt(b)-tAt(a))[0];
+  if(!last){setStamp("padWhen",0);return}
+  if(!S.padLocal&&CL.rowsAll&&CL.rowsAll.some(r=>r.pad))$("padInfo").textContent=`Último padrón: ${last.pad}`;
+  setStamp("padWhen",tAt(last),last.padAt?last.padBy:last.by,"Subido")}
+function setStamp(id,at,by,lab){const el=$(id);if(!at){el.hidden=true;return}
+  const put=()=>{el.innerHTML=`${lab||"Actualizado"}: <b>${esc(whenTxt(at))}</b>${by?` · por ${esc(by===CL.uid?"vos":(CL.names[by]||"otro usuario"))}`:""}`};
+  el.hidden=false;put();if(by&&by!==CL.uid&&!CL.names[by])namesOf([by]).then(put)}
+
+// Historial
+async function renderHist(){if(!CL.on){$("histDays").innerHTML='<tr><td colspan="5" class="note">El historial necesita la base compartida (abrí el artifact en claude.ai).</td></tr>';return}
+  await namesOf([...CL.days.map(d=>d.by),...CL.exps.map(x=>x.by)]);
+  const f=ts=>ts?new Date(ts).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"";
+  $("histDays").innerHTML=CL.days.map(d=>`<tr><td class="mono">${esc(d.id.split("-").reverse().join("/"))}${d.fer?" · Feriado":""}</td><td class="mono">${esc(d.n||0)}</td><td>${esc(nameOf(d.by))}</td><td class="mono">${esc(f(d.at))}</td>
+    <td>${d.id===CL.day?'<span class="pill ok">Abierta</span>':`<button type="button" class="btn" data-open="${esc(d.id)}">Abrir</button>`}${CL.access&&CL.access.admin?` <button type="button" class="btn link" data-delday="${esc(d.id)}">Borrar</button>`:""}</td></tr>`).join("")||'<tr><td colspan="5" class="note">Todavía no hay fechas guardadas. Cargá una base de Geo.</td></tr>';
+  $("histExpT").textContent="Exportaciones del "+(CL.day?CL.day.split("-").reverse().join("/"):"—");
+  const mine=CL.exps;
+  $("histExps").innerHTML=mine.map(x=>`<tr><td class="mono">${esc(f(x.at))}</td><td>${esc(nameOf(x.by))}</td><td>${esc(x.scope||"")}</td><td class="mono">${esc(x.n)}</td><td><button type="button" class="btn" data-dl="${esc(x.id)}">Descargar Excel</button></td></tr>`).join("")||'<tr><td colspan="5" class="note">No hay exportaciones para esta fecha.</td></tr>'}
+$("histDays").addEventListener("click",async e=>{const o=e.target.closest("[data-open]");if(o){await openDay(o.dataset.open);renderHist();return}
+  const del=e.target.closest("[data-delday]");if(!del)return;const id=del.dataset.delday;
+  if(!del.dataset.arm){del.dataset.arm="1";del.textContent="¿Seguro? Tocá de nuevo";setTimeout(()=>{delete del.dataset.arm;del.textContent="Borrar"},4000);return}
+  try{const base=CL.db.doc("days/"+id);
+    for(const sub of ["emps","nov","exports"]){const s=await base.collection(sub).get();for(const d of s.docs)await base.collection(sub).doc(d.id).delete()}
+    await base.delete();if(CL.day===id){stopDay();}toast("Borré la fecha "+id.split("-").reverse().join("/")+" y todo lo guardado en ella.")}catch(er){writeErr(er)}});
+function stopDay(){$("geoWhen").hidden=true;$("padWhen").hidden=true;["emps","nov","exps"].forEach(k=>{if(CL.subs[k]){CL.subs[k]();delete CL.subs[k]}});CL.day=null;S.geo=null;S.nov={};S.date=null;setDateChip();render()}
+$("histExps").addEventListener("click",async e=>{const b=e.target.closest("[data-dl]");if(!b)return;const x=CL.exps.find(y=>y.id===b.dataset.dl);if(!x)return;
+  const dt=new Date(x.at);await saveNovXlsx(x.recs||[],`Novedades ${CL.day} ${p2(dt.getHours())}${p2(dt.getMinutes())}${x.scope&&!["Todas las UN","Administrador"].includes(x.scope)?" "+x.scope.replace(/[\\/:*?"<>|]/g,"").slice(0,60):""}.xlsx`,`Descargué la exportación de las ${p2(dt.getHours())}:${p2(dt.getMinutes())}.`)});
+
+// Usuarios y roles (solo Administrador)
+let rolesDraft=null;
+async function renderUsers(){if(!CL.on||!CL.access||!CL.access.admin)return;
+  if(!rolesDraft)rolesDraft=JSON.parse(JSON.stringify(roleDefs()));
+  const users=(CL.cfg&&CL.cfg.users)||{};const reqs=pendingReqs();await namesOf([...Object.keys(users),...reqs.map(r=>r.id)]);
+  const opts=sel=>Object.entries(rolesDraft).map(([k,r])=>`<option value="${esc(k)}"${k===sel?" selected":""}>${esc(r.name)}</option>`).join("");
+  const f=ts=>ts?new Date(ts).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"";
+  $("uReqs").innerHTML=reqs.map(r=>`<tr data-rid="${esc(r.id)}"><td>${esc(CL.names[r.id]||"Usuario sin nombre visible")}</td>${mailCell(r.id)}<td class="mono">${esc(f(r.at))}</td><td><select data-rqrole>${opts("")}</select></td>
+    <td><button type="button" class="btn primary" data-rqok>Asignar</button> <button type="button" class="btn link" data-rqno>Descartar</button></td></tr>`).join("")||'<tr><td colspan="5" class="note">No hay pedidos pendientes. Cuando alguien sin rol abra el link, aparece acá.</td></tr>';
+  $("rolesSum").textContent=`${Object.keys(rolesDraft).length} roles RRHH · tocá para ${$("rolesBox").open?"contraer":"ver y editar"}`;
+  if(!CL.me){try{CL.me=await CL.user.me()}catch(e){CL.me={}}}
+  $("uList").innerHTML=`<tr><td><b>${esc(CL.me.name||"Vos")}</b></td><td class="mail">${CL.me.email?esc(CL.me.email):'<span class="note">no visible</span>'}</td><td><b>Administrador</b></td><td></td></tr>`+Object.entries(users).map(([id,rid])=>`<tr data-uid="${esc(id)}"><td>${esc(CL.names[id]||"Usuario sin nombre visible")}</td>${mailCell(id)}<td><select data-urole>${opts(rid)}</select></td><td><button type="button" class="btn link" data-udel>Quitar</button></td></tr>`).join("")||'<tr><td colspan="4" class="note">Todavía no asignaste usuarios.</td></tr>';
+  const uns=[...new Set([...UNS_KNOWN,...(CL.rowsAll||[]).map(r=>unNorm(rowUN(r))?rowUN(r).replace(/\s*\(o\)\s*$/,""):"").filter(Boolean)])];
+  $("roleList").innerHTML=`<div class="role fixed"><b>Administrador</b><span class="note">Ve todas las UN, asigna roles y borra fechas. Sos vos, el dueño del artifact.</span></div>`+
+    Object.entries(rolesDraft).map(([k,r])=>`<div class="role" data-role="${esc(k)}"><div class="bar"><input type="text" data-rname value="${esc(r.name)}" aria-label="Nombre del rol">
+      <button type="button" class="btn link" data-rdel>Borrar</button></div>
+      <select data-rmode>${Object.entries(MODE_LAB).map(([m,l])=>`<option value="${m}"${m===r.mode?" selected":""}>${l}</option>`).join("")}</select>
+      <div class="uns"${r.mode==="all"?" hidden":""}>${uns.map(u=>`<label><input type="checkbox" data-run value="${esc(u)}"${(r.uns||[]).some(x=>unNorm(x)===unNorm(u))?" checked":""}> ${esc(u)}</label>`).join("")}</div></div>`).join("")}
+$("roleList").addEventListener("input",e=>{const box=e.target.closest("[data-role]");if(!box)return;const r=rolesDraft[box.dataset.role];
+  if(e.target.matches("[data-rname]"))r.name=e.target.value;
+  if(e.target.matches("[data-rmode]")){r.mode=e.target.value;box.querySelector(".uns").hidden=r.mode==="all"}
+  if(e.target.matches("[data-run]")){const v=e.target.value;r.uns=(r.uns||[]).filter(x=>unNorm(x)!==unNorm(v));if(e.target.checked)r.uns.push(v)}
+  $("roleMsg").textContent="Hay cambios sin guardar."});
+$("roleList").addEventListener("click",e=>{const b=e.target.closest("[data-rdel]");if(!b)return;const k=b.closest("[data-role]").dataset.role;
+  const used=Object.values((CL.cfg&&CL.cfg.users)||{}).filter(x=>x===k).length;if(used){toast(`No se puede borrar: hay ${used} usuario(s) con ese rol. Cambiales el rol primero.`);return}
+  delete rolesDraft[k];renderUsers();$("roleMsg").textContent="Hay cambios sin guardar."});
+$("roleAdd").addEventListener("click",()=>{const k="r"+Date.now().toString(36);rolesDraft[k]={name:"RRHH nuevo",mode:"only",uns:[]};renderUsers();$("roleMsg").textContent="Hay cambios sin guardar."});
+async function saveCfg(patch){const cur=JSON.parse(JSON.stringify(CL.cfg||{}));const next={roles:roleDefs(),users:{},...cur,...patch};
+  try{await CL.db.doc("cfg/main").set(next);return true}catch(e){writeErr(e);return false}}
+$("roleSave").addEventListener("click",async()=>{if(Object.values(rolesDraft).some(r=>!String(r.name).trim())){toast("Cada rol necesita un nombre.");return}
+  if(await saveCfg({roles:rolesDraft})){$("roleMsg").textContent="Roles guardados.";rolesDraft=null;renderUsers()}});
+$("uList").addEventListener("change",async e=>{const s=e.target.closest("[data-urole]");if(!s)return;const id=s.closest("tr").dataset.uid;
+  const users={...((CL.cfg&&CL.cfg.users)||{}),[id]:s.value};if(await saveCfg({users}))toast("Rol actualizado.")});
+$("uList").addEventListener("click",async e=>{if(!e.target.closest("[data-udel]"))return;const id=e.target.closest("tr").dataset.uid;
+  const users={...((CL.cfg&&CL.cfg.users)||{})};delete users[id];if(await saveCfg({users}))toast("Quité el acceso de ese usuario.")});
+$("rolesBox").addEventListener("toggle",()=>{if(rolesDraft)$("rolesSum").textContent=`${Object.keys(rolesDraft).length} roles RRHH · tocá para ${$("rolesBox").open?"contraer":"ver y editar"}`});
+function pendingReqs(){const users=(CL.cfg&&CL.cfg.users)||{};return (CL.reqs||[]).filter(r=>!users[r.id]&&r.id!==CL.uid)}
+$("uReqs").addEventListener("click",async e=>{const tr=e.target.closest("[data-rid]");if(!tr)return;const id=tr.dataset.rid;
+  if(e.target.closest("[data-rqok]")){const users={...((CL.cfg&&CL.cfg.users)||{}),[id]:tr.querySelector("[data-rqrole]").value};
+    if(await saveCfg({users})){try{await CL.db.doc("req/"+id).delete()}catch(er){}toast("Rol asignado. La persona ya puede trabajar.")}}
+  else if(e.target.closest("[data-rqno]")){try{await CL.db.doc("req/"+id).delete();toast("Pedido descartado.")}catch(er){writeErr(er)}}});
+async function searchUsers(){const q=$("uSearch").value.trim();let hits=[];try{hits=await CL.user.search(q)}catch(e){}
+  const users=(CL.cfg&&CL.cfg.users)||{};
+  $("uHits").innerHTML=hits.filter(h=>!h.isMe&&!users[h.id]).map(h=>{CL.names[h.id]=h.name;return `<span class="uhit" data-hid="${esc(h.id)}"><span>${esc(h.name)}${h.email?` <small class="note">${esc(h.email)}</small>`:""}</span>
+    <select data-hrole>${Object.entries(roleDefs()).map(([k,r])=>`<option value="${esc(k)}">${esc(r.name)}</option>`).join("")}</select><button type="button" class="btn" data-hadd>Agregar</button></span>`}).join("")||(q?'<span class="note">Sin resultados. La persona tiene que ser de tu organización o tener el artifact compartido.</span>':"")}
+$("uSearch").addEventListener("focus",searchUsers);$("uSearch").addEventListener("input",searchUsers);
+$("uHits").addEventListener("click",async e=>{const b=e.target.closest("[data-hadd]");if(!b)return;const h=b.closest("[data-hid]");
+  const users={...((CL.cfg&&CL.cfg.users)||{}),[h.dataset.hid]:h.querySelector("[data-hrole]").value};
+  if(await saveCfg({users})){toast("Usuario agregado. Recordá compartirle el artifact como Colaborador.");$("uSearch").value="";$("uHits").innerHTML=""}});
+
+render();renderArt();cloudInit();
+})();
+</script>
+
+</body></html>

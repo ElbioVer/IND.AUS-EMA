@@ -1,0 +1,9059 @@
+const {useState,useMemo,useCallback,useEffect,useRef} = React;
+
+/* Estado que sobrevive al cambiar de pestaña (las pestañas se desmontan al salir de ellas). */
+const KEPT_UI_STATE = new Map();
+function useKeptState(key, initial){
+  const [value, setValue] = useState(() => KEPT_UI_STATE.has(key) ? KEPT_UI_STATE.get(key) : (typeof initial==="function" ? initial() : initial));
+  const set = useCallback(val => {
+    setValue(prev => {
+      const next = typeof val==="function" ? val(prev) : val;
+      KEPT_UI_STATE.set(key, next);
+      return next;
+    });
+  }, [key]);
+  return [value, set];
+}
+function escHtml(s){
+  return String(s==null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+/* ===================== supabase (login + guardado de cronicos) ===================== */
+const SUPABASE_URL = "https://rfavfuibywwaytlgpcqp.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_SiBV5y1l6xs2bLr8HvCl6A_Syc89Xkn";
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ===================== modo claro / oscuro (botón de la cabecera) =====================
+   Se guarda en este navegador (radar.theme). Sin elegir, sigue el del sistema. La Carga Geo (iframe) lo recibe por mensaje. */
+const THEME_KEY = "radar.theme";
+function getTheme(){ try{ const v = localStorage.getItem(THEME_KEY); return v==="light" || v==="dark" ? v : null; }catch(e){ return null; } }
+function applyTheme(t){ if(t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); }
+function effectiveTheme(){ return getTheme() || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); }
+const themeListeners = new Set();
+function setThemeSaved(t){ try{ localStorage.setItem(THEME_KEY, t); }catch(e){} applyTheme(t); themeListeners.forEach(f=>f(t)); }
+applyTheme(getTheme());
+function ThemeToggle(){
+  const [t, setT] = useState(effectiveTheme());
+  useEffect(()=>{ const f = v=>setT(v); themeListeners.add(f); return ()=>{ themeListeners.delete(f); }; }, []);
+  return (
+    <button type="button" className="btn secondary" onClick={()=>setThemeSaved(t==="dark" ? "light" : "dark")}
+      title={t==="dark" ? "Pasar al modo claro" : "Pasar al modo oscuro"}>{t==="dark" ? "☀ Modo claro" : "☾ Modo oscuro"}</button>
+  );
+}
+
+/* ===================== guardado en Supabase: ausentismo + plantel ===================== */
+const AUSENTISMO_TABLE = "ausentismo_registros";
+const PLANTEL_TABLE = "plantel_empleados";
+// Espacio de la base de datos (plan Free de Supabase = 500 MB). Si se pasa a Pro, cambiar DB_LIMIT_MB (ej. 8192).
+const DB_LIMIT_MB = 500;
+const DB_WARN_PCT = 70;   // desde acá aparece una marca discreta arriba (ámbar)
+const DB_ALERT_PCT = 85;  // y desde acá se pone roja
+const SYNC_PAGE_SIZE = 1000;
+const SYNC_BATCH_SIZE = 1000;
+
+// Trae solo las filas nuevas/modificadas desde "sinceIso" (updated_at > sinceIso).
+// Sin sinceIso, trae todo — se usa una sola vez, la primera vez que se abre en un navegador.
+// tieField (opcional): columna única para desempatar el orden. Muchas filas se guardan con el mismo updated_at (mismo milisegundo),
+// y sin desempate dos páginas seguidas podrían repetir o saltear filas. onProgress(cantidad) avisa cuántas filas se bajaron.
+async function fetchRowsSince(table, sinceIso, onProgress, tieField){
+  let from = 0, out = [];
+  while(true){
+    let q = supabaseClient.from(table).select("*");
+    if(sinceIso) q = q.gt("updated_at", sinceIso);
+    q = q.order("updated_at", {ascending:true});
+    if(tieField) q = q.order(tieField, {ascending:true});
+    q = q.range(from, from+SYNC_PAGE_SIZE-1);
+    const {data, error} = await q;
+    if(error) throw error;
+    out = out.concat(data);
+    if(onProgress) onProgress(out.length);
+    if(!data.length || data.length < SYNC_PAGE_SIZE) break;
+    from += SYNC_PAGE_SIZE;
+  }
+  return out;
+}
+function maxUpdatedAt(rows, startFrom){
+  return rows.reduce((a,r)=> (r.updated_at && r.updated_at>a ? r.updated_at : a), startFrom||"1970-01-01T00:00:00Z");
+}
+function mergeRawRowsById(existingRows, newRows, idField){
+  const map = new Map(existingRows.map(r=>[r[idField], r]));
+  newRows.forEach(r=> map.set(r[idField], r));
+  return Array.from(map.values());
+}
+
+/* ===================== caché local (IndexedDB) — evita re-descargar todo en cada visita ===================== */
+const IDB_NAME = "radar_ausentismo_cache";
+const IDB_STORE = "kv";
+function idbOpen(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+async function idbGet(key){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error);
+    });
+  }catch(e){ return undefined; } // sin IndexedDB (privado/bloqueado): sigue andando sin caché
+}
+async function idbSet(key, value){
+  try{
+    const db = await idbOpen();
+    await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = ()=> resolve();
+      tx.onerror = ()=> reject(tx.error);
+    });
+  }catch(e){ /* caché best-effort, no rompe nada si falla */ }
+}
+async function upsertWithRetry(table, batch, onConflict, attempts){
+  let lastErr = null;
+  for(let a=0; a<attempts; a++){
+    if(a>0) await new Promise(res=>setTimeout(res, 800*a));
+    const {error} = await supabaseClient.from(table).upsert(batch, {onConflict});
+    if(!error) return null;
+    lastErr = error;
+  }
+  return lastErr;
+}
+async function upsertBisect(table, batch, onConflict, badRows){
+  const err = await upsertWithRetry(table, batch, onConflict, 3);
+  if(!err) return;
+  if(batch.length===1){ badRows.push({row:batch[0], error:err}); return; }
+  // una fila con datos raros puede tumbar toda la tanda — se parte a la mitad hasta aislar
+  // exactamente cuál fila falla, en vez de perder las 1000 de la tanda entera.
+  const mid = Math.ceil(batch.length/2);
+  await upsertBisect(table, batch.slice(0,mid), onConflict, badRows);
+  await upsertBisect(table, batch.slice(mid), onConflict, badRows);
+}
+async function upsertInBatches(table, rows, onConflict, onProgress){
+  const badRows = [];
+  for(let i=0;i<rows.length;i+=SYNC_BATCH_SIZE){
+    const batch = rows.slice(i, i+SYNC_BATCH_SIZE);
+    await upsertBisect(table, batch, onConflict, badRows);
+    if(onProgress) onProgress(Math.min(i+SYNC_BATCH_SIZE, rows.length), rows.length);
+  }
+  if(badRows.length){
+    const sample = badRows.slice(0,5).map(b=>{
+      const label = b.row.id || b.row.legajo || JSON.stringify(b.row).slice(0,60);
+      return label+": "+(b.error && b.error.message ? b.error.message : String(b.error));
+    }).join(" | ");
+    const msg = badRows.length+" de "+rows.length+" filas no se pudieron guardar en el servidor. "+
+      "Detalle: "+sample+(badRows.length>5 ? " (+"+(badRows.length-5)+" más)" : "")+". "+
+      "El resto sí se guardó. Revisá esas filas en el Excel y volvé a subir el archivo para reintentar solo lo que falta.";
+    const err = new Error(msg);
+    err.badRows = badRows;
+    throw err;
+  }
+}
+function tsToISODate(ts){ const d = new Date(ts); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+function isoDateToTs(s){ if(!s) return null; const [y,m,d] = s.split("-").map(Number); return Date.UTC(y,m-1,d); }
+
+function ausRecordToRow(r){
+  return {
+    id: (r.legajo||"").toUpperCase()+"|"+r.dateKey,
+    legajo: r.legajo||"", fecha: r.anio+"-"+pad2(r.mes)+"-"+pad2(r.dia), anio: r.anio, mes: r.mes, dia: r.dia,
+    agrup: r.agrup||"", unidad: r.unidad||"", sector: r.sector||"", gerencia: r.gerencia||"",
+    departamento: r.departamento||"", empresa: r.empresa||"", nombre: r.nombre||"",
+    id_motivo: r.idMotivo||"", motivo: r.motivo||"", estado: r.estado||"", razon: r.razon||"",
+    puesto: r.puesto||"", jefe: r.jefe||"", presidencia: r.presidencia||"", sindicato: r.sindicato||"",
+    tipo_contrat: r.tipoContrat||"",
+    // origen: "geo" = fila provisoria armada desde la Carga Geo (la reemplaza Calipso); vacío = viene de Calipso. Solo se envía si hay algo que marcar o limpiar
+    // (así todo sigue funcionando aunque todavía no se haya corrido supabase-migracion-geo.sql).
+    ...((r.origen || r.origenLimpiar) ? {origen: r.origen||""} : {}),
+    updated_at: new Date().toISOString()
+  };
+}
+function ausRowToRecord(row){
+  const ts = Date.UTC(row.anio, row.mes-1, row.dia);
+  const monthKey = row.anio+"-"+pad2(row.mes);
+  const dateKey = monthKey+"-"+pad2(row.dia);
+  return {legajo:row.legajo||"", agrup:row.agrup||"", cat:row.agrup||"F", unidad:row.unidad||"", sector:row.sector||"",
+    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", nombre:row.nombre||"",
+    idMotivo:row.id_motivo||"", motivo:row.motivo||"", estado:row.estado||"", razon:row.razon||"", puesto:row.puesto||"",
+    jefe:row.jefe||"", presidencia:row.presidencia||"", sindicato:row.sindicato||"", tipoContrat:row.tipo_contrat||"", origen:row.origen||"",
+    valid:true, dia:row.dia, mes:row.mes, anio:row.anio, ts, monthKey, dateKey};
+}
+function plantelRecordToRow(p){
+  return {
+    legajo: p.legajo, nombre: p.nombre||"", fecha_alta: tsToISODate(p.altaTs),
+    fecha_baja: p.bajaTs!=null ? tsToISODate(p.bajaTs) : null,
+    fecha_nacimiento: p.nacimientoTs!=null ? tsToISODate(p.nacimientoTs) : null,
+    estado: p.estado||"", unidad: p.unidad||"", sector: p.sector||"", gerencia: p.gerencia||"",
+    departamento: p.departamento||"", empresa: p.empresa||"", grupo: p.grupo||"",
+    puesto: p.puesto||"", jefe: p.jefe||"", celular: p.celular||"",
+    domicilio: p.domicilio||"", sindicato: p.sindicato||"",
+    updated_at: new Date().toISOString()
+  };
+}
+function plantelRowToRecord(row){
+  return {legajo:row.legajo, nombre:row.nombre||"", altaTs: isoDateToTs(row.fecha_alta), bajaTs: isoDateToTs(row.fecha_baja),
+    nacimientoTs: isoDateToTs(row.fecha_nacimiento), estado:row.estado||"", unidad:row.unidad||"", sector:row.sector||"",
+    gerencia:row.gerencia||"", departamento:row.departamento||"", empresa:row.empresa||"", grupo:row.grupo||"",
+    puesto:row.puesto||"", jefe:row.jefe||"", celular:row.celular||"", domicilio:row.domicilio||"", sindicato:row.sindicato||""};
+}
+
+function LoginForm({onSignedIn}){
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  async function handleSubmit(e){
+    e.preventDefault();
+    setError(""); setLoading(true);
+    const {data, error} = await supabaseClient.auth.signInWithPassword({email, password});
+    setLoading(false);
+    if(error){ setError(error.message==="Invalid login credentials" ? "Email o password incorrectos." : error.message); return; }
+    onSignedIn(data.session);
+  }
+  return (
+    <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center"}}>
+      <form onSubmit={handleSubmit} className="card login-form" style={{width:320, padding:28}}>
+        <h2 style={{margin:"0 0 4px"}}>Indicador de Ausentismo</h2>
+        <p className="desc" style={{margin:"0 0 18px"}}>Login para continuar.</p>
+        <div style={{display:"flex", flexDirection:"column", gap:10}}>
+          <input type="email" required autoComplete="username" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
+          <input type="password" required autoComplete="current-password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
+          {error && <div style={{color:"var(--cat-anp,#f0605d)", fontSize:12.5}}>{error}</div>}
+          <button type="submit" className="btn" disabled={loading} style={{marginTop:4}}>{loading?"Ingresando...":"Ingresar"}</button>
+          <InstallButton />
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function InstallButton({style}){
+  const [evt, setEvt] = useState(window.__installEvt);
+  useEffect(()=>{
+    const h = ()=> setEvt(window.__installEvt);
+    window.addEventListener("installready", h);
+    return ()=> window.removeEventListener("installready", h);
+  }, []);
+  const standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone===true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(standalone || (!evt && !isIOS)) return null;
+  async function onClick(){
+    if(evt){
+      evt.prompt();
+      try{ await evt.userChoice; }catch(e){}
+      window.__installEvt = null;
+      setEvt(null);
+    } else {
+      alert("En iPhone/iPad: tocá el botón Compartir de Safari y elegí \"Añadir a pantalla de inicio\".");
+    }
+  }
+  return <button type="button" className="btn secondary no-print" style={style} onClick={onClick}>Instalar app</button>;
+}
+
+// Cada usuario cambia su propia contraseña: se pide la actual (se verifica iniciando sesión de nuevo) y la nueva dos veces.
+// Las contraseñas nunca se guardan ni se muestran en la app: Supabase solo conserva una versión cifrada.
+function ChangePasswordButton({userEmail}){
+  const [open, setOpen] = useState(false);
+  const [actual, setActual] = useState("");
+  const [nueva, setNueva] = useState("");
+  const [repetir, setRepetir] = useState("");
+  const [ver, setVer] = useState(false);
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  function cerrar(){ setOpen(false); setActual(""); setNueva(""); setRepetir(""); setVer(false); setError(""); setOk(false); }
+  async function guardar(e){
+    e.preventDefault();
+    setError("");
+    if(nueva.length<8){ setError("La contraseña nueva debe tener al menos 8 caracteres."); return; }
+    if(nueva!==repetir){ setError("La contraseña nueva y su repetición no coinciden."); return; }
+    if(nueva===actual){ setError("La contraseña nueva tiene que ser distinta de la actual."); return; }
+    setBusy(true);
+    try{
+      const {error:errLogin} = await supabaseClient.auth.signInWithPassword({email:userEmail, password:actual});
+      if(errLogin){ setError(errLogin.message==="Invalid login credentials" ? "La contraseña actual no es correcta." : errLogin.message); setBusy(false); return; }
+      const {error:errUpd} = await supabaseClient.auth.updateUser({password:nueva});
+      if(errUpd){ setError("No se pudo cambiar la contraseña: "+errUpd.message); setBusy(false); return; }
+      setBusy(false); setOk(true); setActual(""); setNueva(""); setRepetir("");
+      setTimeout(cerrar, 2200);
+    }catch(err){
+      setBusy(false);
+      setError("No se pudo cambiar la contraseña: "+((err && err.message) ? err.message : String(err)));
+    }
+  }
+  return (
+    <React.Fragment>
+      <button type="button" className="btn secondary no-print" onClick={()=>setOpen(true)}>Cambiar contraseña</button>
+      {open && (
+        <div className="modal-backdrop no-print" onClick={busy ? undefined : cerrar}>
+          <div className="modal-panel" style={{maxWidth:420}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Cambiar mi contraseña</h3>
+              <button type="button" className="btn secondary small" onClick={cerrar} disabled={busy}>Cerrar</button>
+            </div>
+            {ok ? (
+              <p className="desc" style={{margin:0, color:"var(--good)", fontWeight:700}}>Contraseña actualizada. Desde ahora usá la nueva para entrar.</p>
+            ) : (
+              <form onSubmit={guardar} style={{display:"flex", flexDirection:"column", gap:12}}>
+                <p className="hint" style={{margin:0}}>Usuario: <b>{userEmail}</b></p>
+                <div className="field"><label>Contraseña actual</label>
+                  <input type={ver?"text":"password"} autoComplete="current-password" value={actual} onChange={e=>setActual(e.target.value)} required autoFocus /></div>
+                <div className="field"><label>Contraseña nueva (mínimo 8 caracteres)</label>
+                  <input type={ver?"text":"password"} autoComplete="new-password" value={nueva} onChange={e=>setNueva(e.target.value)} required minLength={8} /></div>
+                <div className="field"><label>Repetir contraseña nueva</label>
+                  <input type={ver?"text":"password"} autoComplete="new-password" value={repetir} onChange={e=>setRepetir(e.target.value)} required minLength={8} /></div>
+                <label className="motivo-check" style={{cursor:"pointer"}}>
+                  <input type="checkbox" checked={ver} onChange={e=>setVer(e.target.checked)} /> Mostrar lo que escribo
+                </label>
+                {error && <div className="warn-banner">{error}</div>}
+                <div style={{display:"flex", gap:10}}>
+                  <button type="submit" className="btn" disabled={busy}>{busy ? "Guardando…" : "Guardar contraseña"}</button>
+                  <button type="button" className="btn secondary" onClick={cerrar} disabled={busy}>Cancelar</button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
+
+function AuthGate(){
+  const [session, setSession] = useState(undefined); // undefined=cargando, null=sin sesion, obj=logueado
+  useEffect(()=>{
+    supabaseClient.auth.getSession().then(({data})=> setSession(data.session||null));
+    const {data:sub} = supabaseClient.auth.onAuthStateChange((_event, sess)=> setSession(sess||null));
+    return ()=> sub.subscription.unsubscribe();
+  }, []);
+  if(session===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando...</div>;
+  if(!session) return <LoginForm onSignedIn={setSession} />;
+  return <RoleGate userId={session.user.id} userEmail={session.user.email} onSignOut={()=>supabaseClient.auth.signOut()} />;
+}
+
+/* ===================== perfiles y permisos ===================== */
+// Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
+// ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel","carga_geo","presentismo","permisos_geo"];
+const ROLES = {
+  admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
+    tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
+  rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. En Crónicos actualiza teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución, cita a Medicina Laboral (Consulta Médica Planta o Control Laboral Cons. Ext.) y marca «Sancionar»; en Sanciones define e imprime (sin editar lo definido ni quitar); en Medicina Laboral ve la ficha, busca y carga los resultados del Control Laboral Cons. Ext. Gestión de Plantel solo con la carga.",
+    tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, cronicosParcial:true, plantelCompleto:false, medicinaEditar:false, medicinaExt:true, citar:true, sancionar:true, sancionDefinir:true},
+  medico: {label:"Servicio médico", desc:"Medicina Laboral (atiende, anota, cita e imprime el reporte de la jornada), Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión. Ve solo la empresa Propios y los motivos por defecto.",
+    tabs:["medicina_laboral","cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false, medicinaEditar:true, medicinaExt:true, citar:true,
+    // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
+    soloPropios:true, motivosPorDefecto:true},
+  // Visor: solo mira, y solo la(s) Unidad(es) de Negocio que le asigna el Administrador (tabla perfiles, columna `unidades`).
+  visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Evolución mensual, Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
+    tabs:["resumen","cuadro_diario","evolucion","ranking","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
+  gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
+    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
+};
+
+function RoleGate({userId, userEmail, onSignOut}){
+  const [perfil, setPerfil] = useState(undefined); // undefined=cargando | {rol} | {rol,legacy} | null=sin perfil | {error}
+  const load = useCallback(async ()=>{
+    setPerfil(undefined);
+    try{
+      let {data, error} = await supabaseClient.from("perfiles").select("rol,email,unidades").eq("user_id", userId).maybeSingle();
+      // si todavía no se corrió supabase-migracion-visor.sql la columna `unidades` no existe: se lee el perfil sin ella
+      if(error && /unidades|42703/i.test((error.message||"")+" "+(error.code||""))) ({data, error} = await supabaseClient.from("perfiles").select("rol,email").eq("user_id", userId).maybeSingle());
+      if(error){
+        const txt = (error.message||"")+" "+(error.code||"");
+        // todavía no se creó la tabla de perfiles (no se corrió el SQL de permisos): se sigue como hasta ahora, con aviso
+        if(/PGRST205|42P01|does not exist|schema cache/i.test(txt)) setPerfil({rol:"admin", legacy:true});
+        else setPerfil({error: error.message||"Error desconocido"});
+        return;
+      }
+      setPerfil(data && ROLES[data.rol] ? data : null);
+    }catch(err){
+      setPerfil({error: (err && err.message) ? err.message : String(err)});
+    }
+  }, [userId]);
+  useEffect(()=>{ load(); }, [load]);
+  if(perfil===undefined) return <div style={{padding:60, textAlign:"center"}} className="hint">Cargando permisos...</div>;
+  if(perfil===null || perfil.error){
+    return (
+      <div className="app" style={{maxWidth:560}}>
+        <div className="card" style={{padding:"24px 26px", display:"flex", flexDirection:"column", gap:12}}>
+          <h2 style={{margin:0, fontSize:18}}>{perfil===null ? "Tu usuario no tiene un perfil asignado" : "No se pudieron verificar tus permisos"}</h2>
+          <p className="desc" style={{margin:0}}>
+            {perfil===null
+              ? <React.Fragment>Iniciaste sesión como <b>{userEmail}</b>, pero todavía no tiene un perfil. Pedile al administrador que te asigne uno.</React.Fragment>
+              : <React.Fragment>No se pudo leer tu perfil ({perfil.error}). Probá de nuevo; si sigue igual, avisale al administrador.</React.Fragment>}
+          </p>
+          <div style={{display:"flex", gap:10}}>
+            <button type="button" className="btn" onClick={load}>Reintentar</button>
+            <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return <App userEmail={userEmail} userId={userId} rol={perfil.rol} unidades={Array.isArray(perfil.unidades) ? perfil.unidades : []} permisosSinActivar={!!perfil.legacy} onSignOut={onSignOut} />;
+}
+
+// Administración de perfiles (solo Administrador). Los usuarios nuevos se crean en Supabase (Authentication → Users) y nacen como "Gerencias".
+// Elección de las Unidades de Negocio de un Visor (lista desplegable con tildes).
+function UnidadesPicker({options, selected, onChange}){
+  const sel = new Set(selected.map(unidadBase));
+  const lista = Array.from(new Set([...options, ...sel])).sort((a,b)=>a.localeCompare(b, "es"));
+  const resumen = !sel.size ? "Sin unidad (no ve datos)" : sel.size<=2 ? Array.from(sel).join(", ") : sel.size+" unidades";
+  return (
+    <details>
+      <summary style={{cursor:"pointer", fontWeight:600, color: sel.size ? undefined : "var(--bad)"}}>{resumen}</summary>
+      <div style={{display:"flex", flexDirection:"column", gap:4, padding:"6px 2px", maxHeight:220, overflowY:"auto"}}>
+        {lista.map(u=>(
+          <label key={u} className="motivo-check" style={{cursor:"pointer"}}>
+            <input type="checkbox" checked={sel.has(u)} onChange={()=>{ const n = new Set(sel); if(n.has(u)) n.delete(u); else n.add(u); onChange(Array.from(n)); }} /> {u}
+          </label>
+        ))}
+        {!lista.length && <span className="hint">Todavía no hay datos cargados para listar unidades.</span>}
+      </div>
+    </details>
+  );
+}
+function UsuariosTab({userId, unidadesDisponibles}){
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState(null);
+  const [msg, setMsg] = useState("");
+  const load = useCallback(async ()=>{
+    let {data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at,unidades").order("email");
+    // sin la migración del Visor (supabase-migracion-visor.sql) la columna `unidades` no existe todavía
+    if(error && /unidades|42703/i.test((error.message||"")+" "+(error.code||""))) ({data, error} = await supabaseClient.from("perfiles").select("user_id,email,rol,created_at").order("email"));
+    if(error){ setError(error.message); return; }
+    setError(null); setRows(data||[]);
+  }, []);
+  async function guardarUnidades(row, unidades){
+    setMsg("Guardando...");
+    const {error} = await supabaseClient.from("perfiles").update({unidades}).eq("user_id", row.user_id);
+    if(error){ setMsg("Error al guardar las unidades: "+error.message+(/unidades|column/i.test(error.message||"") ? " — ¿corriste supabase-migracion-visor.sql?" : "")); return; }
+    setRows(rs=>rs.map(r=> r.user_id===row.user_id ? {...r, unidades} : r));
+    setMsg("Guardado: "+row.email+" → "+(unidades.length ? unidades.join(", ") : "sin unidad"));
+  }
+  useEffect(()=>{ load(); }, [load]);
+  const sort = useTableSort(rows||[], {email:{get:r=>r.email, type:"text"}, rol:{get:r=>(ROLES[r.rol]||{}).label||r.rol, type:"text"}});
+  async function cambiarRol(row, rol){
+    if(row.user_id===userId || !ROLES[rol]) return;
+    setMsg("Guardando...");
+    const {error} = await supabaseClient.from("perfiles").update({rol}).eq("user_id", row.user_id);
+    if(error){ setMsg("Error al guardar: "+error.message+(/perfiles_rol_check/.test(error.message||"") ? " — falta correr supabase-migracion-visor.sql en el SQL Editor de Supabase (habilita el perfil Visor)." : "")); return; }
+    setRows(rs=>rs.map(r=> r.user_id===row.user_id ? {...r, rol} : r));
+    setMsg("Guardado: "+row.email+" → "+ROLES[rol].label);
+  }
+  return (
+    <div className="tabpanel">
+      <div className="card table-card">
+        <h3>Usuarios y permisos</h3>
+        <div className="caption">Elegí el perfil de cada usuario. Los cambios se aplican la próxima vez que esa persona abra o recargue la app. Tu propio perfil no se puede cambiar desde acá, para no quedarte sin acceso.</div>
+        {error && <div className="warn-banner">No se pudo leer la lista de usuarios: {error}</div>}
+        {rows && (
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="email" label="Usuario (correo)" sort={sort.sort} toggle={sort.toggle} />
+                <SortTh k="rol" label="Perfil" sort={sort.sort} toggle={sort.toggle} />
+                <th>Unidades de Negocio (Visor)</th>
+              </tr></thead>
+              <tbody>
+                {!rows.length && <tr><td colSpan="3" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin usuarios.</td></tr>}
+                {sort.sorted.map(r=>(
+                  <tr key={r.user_id}>
+                    <td>{r.email}{r.user_id===userId ? " (vos)" : ""}</td>
+                    <td>
+                      <select value={r.rol} disabled={r.user_id===userId} onChange={e=>cambiarRol(r, e.target.value)}>
+                        {Object.keys(ROLES).map(k=>(<option key={k} value={k}>{ROLES[k].label}</option>))}
+                      </select>
+                    </td>
+                    <td style={{minWidth:230}}>
+                      {r.rol==="visor"
+                        ? <UnidadesPicker options={unidadesDisponibles||[]} selected={Array.isArray(r.unidades) ? r.unidades : []} onChange={u=>guardarUnidades(r, u)} />
+                        : <span className="hint">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {msg && <p className="hint" style={{margin:0}}>{msg}</p>}
+        <p className="hint" style={{margin:0}}>Para dar de alta a una persona nueva: en Supabase → Authentication → Users → Add user. Entra con el perfil <b>Gerencias</b> (el más acotado) y desde acá se lo cambiás.</p>
+      </div>
+      <div className="card table-card">
+        <h3>Qué puede hacer cada perfil</h3>
+        <div className="overflow-x">
+          <table>
+            <thead><tr><th>Perfil</th><th>Permisos</th></tr></thead>
+            <tbody>
+              {Object.keys(ROLES).map(k=>(<tr key={k}><td style={{whiteSpace:"nowrap"}}><b>{ROLES[k].label}</b></td><td>{ROLES[k].desc}</td></tr>))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const MESES_CORTOS = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+const REQUIRED_COLS = ["Legajo","Agrupador cuadro presentismo","Entrada"];
+const OPTIONAL_COLS = {unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", nombre:"Empleado", idMotivo:"Id Motivo", motivo:"Motivo",
+  estado:"Estado", razon:"Razon", puesto:"Puesto", jefe:"Jefe directo", presidencia:"Agrupador cuadro presidencia", sindicato:"Sindicato", tipoContrat:"Agrup. tipo contratacion"};
+
+/* ===================== Cuadro Diario (constantes editables) ===================== */
+// Empresa subcontratada -> unidad de negocio donde se cuenta en la columna Sub-Cont (se compara sin mayúsculas ni acentos).
+const EMPRESA_SERVICIO = {"VIETA FACUNDO":"Servicios Electricos","DELFINO CLAUDIO":"Servicios Electricos","REDELED":"Servicios Electricos"};
+// Etiqueta con que se muestra cada unidad en el Cuadro Diario.
+const CUADRO_UNIT_LABEL = {"Operaciones Comerciales":"AySA Medidores","Indirectos":"A Repartir"};
+
+/* ===================== plantel de activos ===================== */
+const PLANTEL_FIELD_ALIASES = {
+  legajo: ["Legajo","Nro Legajo","N° Legajo","Legajo Nro"],
+  nombre: ["Apellido y Nombre","Empleado","Nombre","Apellido Nombre"],
+  fechaAlta: ["Fecha cálculo vacaciones","Fecha calculo vacaciones","Fecha de Alta","Fecha Alta","F. Alta","Alta","Fecha de Ingreso","Fecha Ingreso"],
+  fechaBaja: ["Fecha de Baja","Fecha Baja","F. Baja","Baja","Fecha de egreso","Fecha Egreso","Fecha de Egreso"],
+  fechaNacimiento: ["Fecha de Nacimiento","Fecha de nacimiento","Fecha Nacimiento","F. Nacimiento","Nacimiento"],
+  estado: ["Estado","Estado Empleado"],
+  unidad: ["Unidad de Negocio","UN","Unidad"],
+  sector: ["Sector"],
+  gerencia: ["Gerencia"],
+  departamento: ["Departamento"],
+  empresa: ["Empresa"],
+  grupo: ["Grupo"],
+  puesto: ["Puesto"],
+  jefe: ["Responsable","Jefe directo","Jefe Directo","Jefe"],
+  celular: ["Celular","Teléfono","Telefono","Teléfono celular","Telefono celular","Tel. Celular","Tel","Tel.","Móvil","Movil"],
+  domicilio: ["Domicilio","Dirección","Direccion"],
+  sindicato: ["Sindicato"]
+};
+const PLANTEL_REQUIRED_FIELDS = ["legajo","fechaAlta"];
+const PLANTEL_FIELD_LABELS = {legajo:"Legajo", nombre:"Apellido y Nombre", fechaAlta:"Fecha de Alta", fechaBaja:"Fecha de Baja",
+  fechaNacimiento:"Fecha de Nacimiento", estado:"Estado", unidad:"Unidad de Negocio", sector:"Sector", gerencia:"Gerencia", departamento:"Departamento", empresa:"Empresa", grupo:"Grupo", puesto:"Puesto", jefe:"Jefe directo (Responsable)", celular:"Celular (Teléfono)", domicilio:"Domicilio", sindicato:"Sindicato"};
+const PLANTEL_FIELD_ORDER = ["legajo","nombre","fechaAlta","fechaBaja","fechaNacimiento","estado","unidad","sector","gerencia","departamento","empresa","grupo","puesto","jefe","celular","domicilio","sindicato"];
+function findColByAliases(headerRow, aliases){
+  for(let a=0;a<aliases.length;a++){
+    const idx = findColIndex(headerRow, aliases[a]);
+    if(idx!==-1) return idx;
+  }
+  return -1;
+}
+const RANKING_DEFAULT_PRESIDENCIA_INCLUDE = new Set(["ENF","NO JUST"]);
+// Nombre base de una Unidad de Negocio: el plantel escribe algunas como "Lectura (o)" y el ausentismo como "Lectura"; para el Visor son la misma unidad.
+function unidadBase(u){ return String(u==null ? "" : u).replace(/\s*\(o\)\s*$/i, "").trim(); }
+const UNIT_ORDER = ["Distribucion y Logistica","Operaciones Comerciales","Servicios Electricos","Lectura","Interior","Indirectos"];
+function unitOrderIndex(name){ const i = UNIT_ORDER.indexOf(name); return i===-1 ? UNIT_ORDER.length : i; }
+const DEFAULT_MOTIVO_TABLE = [
+  {key:"AT", refLabel:"Accidente de trabajo", incluir:true},
+  {key:"CA", refLabel:"Con aviso", incluir:true},
+  {key:"SA", refLabel:"Sin aviso", incluir:true},
+  {key:"CE", refLabel:"Cesante", incluir:false},
+  {key:"BA", refLabel:"Baja", incluir:false},
+  {key:"CJ", refLabel:"Citacion judicial", incluir:true},
+  {key:"DAC", refLabel:"Dia a compensar", incluir:true},
+  {key:"DC", refLabel:"Dia compensado", incluir:false},
+  {key:"DS", refLabel:"Donacion de sangre", incluir:true},
+  {key:"EN", refLabel:"Enfermedad", incluir:true},
+  {key:"EFS", refLabel:"Enf Fam Sgbatos", incluir:true},
+  {key:"ET", refLabel:"Enfermedad (ART)", incluir:true},
+  {key:"CAE", refLabel:"CAE (ausencia por salud)", incluir:true},
+  {key:"EX", refLabel:"Examen", incluir:true},
+  {key:"ED", refLabel:"Excedencia", incluir:true},
+  {key:"FA", refLabel:"Fallecimiento", incluir:true},
+  {key:"FER", refLabel:"Feriado", incluir:false},
+  {key:"JDL", refLabel:"Jornada de Lluvia", incluir:false},
+  {key:"LSP", refLabel:"Lic Sanitaria Preventiva (S9)", incluir:true},
+  {key:"MT", refLabel:"Maternidad", incluir:true},
+  {key:"LVC", refLabel:"Licencia por Vacuna contra Covid", incluir:true},
+  {key:"LSS", refLabel:"Licencia sin goce de sueldo", incluir:true},
+  {key:"MA", refLabel:"Matrimonio", incluir:true},
+  {key:"MU", refLabel:"Mudanza", incluir:true},
+  {key:"NAC", refLabel:"Nacimiento", incluir:true},
+  {key:"PH", refLabel:"Paro / huelga", incluir:true},
+  {key:"PSI", refLabel:"P. Sindical", incluir:false},
+  {key:"PCG", refLabel:"Permiso con Goce", incluir:false},
+  {key:"JRP", refLabel:"Jornada reducida - Permiso", incluir:true},
+  {key:"PHO", refLabel:"Pres Home Office (S3)", incluir:false},
+  {key:"PCT", refLabel:"Presente Contratista", incluir:false},
+  {key:"PRD", refLabel:"Proceso Desvinculacion", incluir:false},
+  {key:"RP", refLabel:"Reserva de puesto", incluir:true},
+  {key:"SFT", refLabel:"Suspension falta de trabajo", incluir:false},
+  {key:"SUS", refLabel:"Suspension", incluir:false},
+  {key:"SP", refLabel:"Susp. prev. Art. 224 LCT", incluir:false},
+  {key:"PG", refLabel:"Permiso gremial", incluir:false},
+  {key:"VAC", refLabel:"Vacaciones", incluir:true},
+  {key:"VAP", refLabel:"Vacaciones (Pagas)", incluir:false}
+];
+const DEFAULT_MOTIVO_INCLUDE_KEYS = new Set(DEFAULT_MOTIVO_TABLE.filter(m=>m.incluir).map(m=>m.key));
+function isDefaultIncludedMotivoCode(code){ return DEFAULT_MOTIVO_INCLUDE_KEYS.has((code||"").toUpperCase()); }
+const PERIODO_OPTIONS = [
+  {value:"1", label:"Enero", months:[1]}, {value:"2", label:"Febrero", months:[2]}, {value:"3", label:"Marzo", months:[3]},
+  {value:"4", label:"Abril", months:[4]}, {value:"5", label:"Mayo", months:[5]}, {value:"6", label:"Junio", months:[6]},
+  {value:"7", label:"Julio", months:[7]}, {value:"8", label:"Agosto", months:[8]}, {value:"9", label:"Septiembre", months:[9]},
+  {value:"10", label:"Octubre", months:[10]}, {value:"11", label:"Noviembre", months:[11]}, {value:"12", label:"Diciembre", months:[12]},
+  {value:"cuatri1", label:"1º Cuatrimestre (Ene-Abr)", months:[1,2,3,4]},
+  {value:"cuatri2", label:"2º Cuatrimestre (May-Ago)", months:[5,6,7,8]},
+  {value:"cuatri3", label:"3º Cuatrimestre (Sep-Dic)", months:[9,10,11,12]},
+  {value:"todos", label:"Todos", months:[1,2,3,4,5,6,7,8,9,10,11,12]},
+  {value:"personalizado", label:"Personalizado", months:null}
+];
+const CUATRI_OPTIONS = [
+  {value:"", label:"Todos", months:[1,2,3,4,5,6,7,8,9,10,11,12]},
+  {value:"1", label:"1º Cuatrimestre (Ene-Abr)", months:[1,2,3,4]},
+  {value:"2", label:"2º Cuatrimestre (May-Ago)", months:[5,6,7,8]},
+  {value:"3", label:"3º Cuatrimestre (Sep-Dic)", months:[9,10,11,12]}
+];
+const REF_ROWS = 195699;
+const REF_MONTHS = {1:21452,2:20322,3:22694,4:22802,5:22778,6:23430,7:23579,8:22299,9:16343};
+const CAT_COLOR = {P:"var(--cat-p)",AP:"var(--cat-ap)",ANP:"var(--cat-anp)",V:"var(--cat-v)",CE:"var(--cat-ce)",BAJA:"var(--cat-baja)"};
+const CAT_LABEL = {P:"Presentes",AP:"Ausente pago",ANP:"Ausente no pago",V:"Vacaciones",CE:"Cesante",BAJA:"Baja",F:"Franco"};
+const SERIES_COLOR = ["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
+const ENTRADA_RE = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+const DAYS_IN_MONTH = [31,28,31,30,31,30,31,31,30,31,30,31];
+
+function fmt(n){ return Math.round(n||0).toLocaleString("es-AR"); }
+function fmtPct(n,d){ d = d==null?1:d; return (n||0).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d})+"%"; }
+function pad2(n){ return String(n).padStart(2,"0"); }
+function fmtDate(d,m,y){ return pad2(d)+"/"+pad2(m)+"/"+y; }
+function isLeap(y){ return (y%4===0 && y%100!==0) || y%400===0; }
+function daysInMonth(m,y){ return m===2 && isLeap(y) ? 29 : DAYS_IN_MONTH[m-1]; }
+function monthLabel(mk){ const [y,m]=mk.split("-"); return MESES_CORTOS[+m-1]+" "+y.slice(2); }
+function isCountedCat(cat){ return cat==="AP"||cat==="ANP"; }
+function isExcludedCat(cat){ return cat==="CE"||cat==="BAJA"; }
+function normTxt(s){ return (s||"").toString().trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,""); }
+function motivoKeyOf(r){ return r.idMotivo ? r.idMotivo.toUpperCase() : ("TXT:"+normTxt(r.motivo||"sin especificar")); }
+function motivoLabelOf(r){ return r.idMotivo ? (r.idMotivo+" — "+(r.motivo||r.idMotivo)) : (r.motivo||"Sin especificar"); }
+const DEFAULT_EXCLUDED_MOTIVO_CODES = ["BA","CE","SUS","SFT","RP","PRD"];
+const DEFAULT_EXCLUDED_MOTIVO_TEXT = ["baja","cesante","suspension","suspension falta de trabajo","reserva de puesto","proceso desvinculacion"];
+function isDefaultExcludedMotivoKey(key){
+  if(key.indexOf("TXT:")===0) return DEFAULT_EXCLUDED_MOTIVO_TEXT.includes(key.slice(4));
+  return !isDefaultIncludedMotivoCode(key);
+}
+
+function parseEntrada(raw){
+  if(typeof raw === "number" && isFinite(raw)){
+    const ms = Date.UTC(1899,11,30) + raw*86400000;
+    const dt = new Date(ms);
+    return {valid:true, dia:dt.getUTCDate(), mes:dt.getUTCMonth()+1, anio:dt.getUTCFullYear()};
+  }
+  const s = String(raw==null ? "" : raw).trim();
+  const m = ENTRADA_RE.exec(s);
+  if(!m) return {valid:false};
+  const dia = parseInt(m[1],10), mes = parseInt(m[2],10), anio = parseInt(m[3],10);
+  if(mes < 1 || mes > 12) return {valid:false};
+  if(dia < 1 || dia > daysInMonth(mes,anio)) return {valid:false};
+  return {valid:true, dia, mes, anio};
+}
+
+function findColIndex(headerRow, target){
+  for(let i=0;i<headerRow.length;i++){
+    if(String(headerRow[i]==null?"":headerRow[i]).trim() === target) return i;
+  }
+  return -1;
+}
+function cellStr(row, idx){ return idx===-1 ? "" : String(row[idx]==null?"":row[idx]).trim(); }
+function stripLegajoPrefix(nombre, legajo){
+  if(!nombre || !legajo) return nombre||"";
+  const esc = legajo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return nombre.replace(new RegExp("^"+esc+"\\s+"), "").trim();
+}
+
+/* ---- ausentismo: parseo, agregados y fusión reutilizables (carga inicial y "Actualizar archivo") ---- */
+function parseAusentismoRows(rows2d){
+  const header = rows2d[0] || [];
+  const idxLegajo = findColIndex(header, "Legajo");
+  const idxAgrup = findColIndex(header, "Agrupador cuadro presentismo");
+  const idxEntrada = findColIndex(header, "Entrada");
+  const missing = [];
+  if(idxLegajo === -1) missing.push("Legajo");
+  if(idxAgrup === -1) missing.push("Agrupador cuadro presentismo");
+  if(idxEntrada === -1) missing.push("Entrada");
+  if(missing.length){
+    return {error: "Falta" + (missing.length>1?"n":"") + " la" + (missing.length>1?"s":"") + " columna" + (missing.length>1?"s":"") + " " + missing.map(m=>'"'+m+'"').join(" y ") + " en el archivo. Verificá que la hoja 'Sheet1' tenga esos encabezados exactos en la fila 1."};
+  }
+  const idxUnidad = findColIndex(header, OPTIONAL_COLS.unidad);
+  const idxSector = findColIndex(header, OPTIONAL_COLS.sector);
+  const idxGerencia = findColIndex(header, OPTIONAL_COLS.gerencia);
+  const idxDepartamento = findColIndex(header, OPTIONAL_COLS.departamento);
+  const idxEmpresa = findColIndex(header, OPTIONAL_COLS.empresa);
+  const idxNombre = findColIndex(header, OPTIONAL_COLS.nombre);
+  const idxIdMotivo = findColIndex(header, OPTIONAL_COLS.idMotivo);
+  const idxMotivo = findColIndex(header, OPTIONAL_COLS.motivo);
+  const idxEstado = findColIndex(header, OPTIONAL_COLS.estado);
+  const idxRazon = findColIndex(header, OPTIONAL_COLS.razon);
+  const idxPuesto = findColIndex(header, OPTIONAL_COLS.puesto);
+  const idxJefe = findColIndex(header, OPTIONAL_COLS.jefe);
+  const idxPresidencia = findColIndex(header, OPTIONAL_COLS.presidencia);
+  const idxSindicato = findColIndex(header, OPTIONAL_COLS.sindicato);
+  const idxTipoContrat = findColIndex(header, OPTIONAL_COLS.tipoContrat);
+
+  const dataRows = rows2d.slice(1);
+  const records = [];
+  let invalidCount = 0;
+  dataRows.forEach(row => {
+    const legajoRaw = row[idxLegajo];
+    const legajo = String(legajoRaw==null?"":legajoRaw).trim();
+    const agrupRaw = row[idxAgrup];
+    const agrup = String(agrupRaw==null?"":agrupRaw).trim().toUpperCase();
+    const entradaRaw = row[idxEntrada];
+    const d = parseEntrada(entradaRaw);
+    const unidad = cellStr(row, idxUnidad);
+    const sector = cellStr(row, idxSector);
+    const gerencia = cellStr(row, idxGerencia);
+    const departamento = cellStr(row, idxDepartamento);
+    const empresa = cellStr(row, idxEmpresa);
+    const nombre = stripLegajoPrefix(cellStr(row, idxNombre), legajo);
+    const idMotivo = cellStr(row, idxIdMotivo);
+    const motivo = cellStr(row, idxMotivo);
+    const estado = cellStr(row, idxEstado);
+    const razon = cellStr(row, idxRazon);
+    const puesto = cellStr(row, idxPuesto);
+    const jefe = cellStr(row, idxJefe);
+    const presidencia = cellStr(row, idxPresidencia).toUpperCase();
+    const sindicato = cellStr(row, idxSindicato);
+    const tipoContrat = cellStr(row, idxTipoContrat);
+    if(!d.valid){
+      invalidCount++;
+      records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, tipoContrat, valid:false});
+      return;
+    }
+    const ts = Date.UTC(d.anio, d.mes-1, d.dia);
+    const monthKey = d.anio+"-"+pad2(d.mes);
+    const dateKey = monthKey+"-"+pad2(d.dia);
+    records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, tipoContrat,
+      valid:true, dia:d.dia, mes:d.mes, anio:d.anio, ts, monthKey, dateKey});
+  });
+  return {error:null, records, invalidCount, hasMotivoCol: idxIdMotivo!==-1 || idxMotivo!==-1,
+    missingTipoContrat: idxTipoContrat===-1 ? "Falta la columna '"+OPTIONAL_COLS.tipoContrat+"': el Cuadro Diario no podrá separar Propios / Contratados." : null};
+}
+
+function buildParsedAggregates(records, fileName, hasMotivo){
+  const legajosSet = new Set();
+  let minTs=null, maxTs=null;
+  const unidadesSet=new Set(), sectoresSet=new Set(), gerenciasSet=new Set(), departamentosSet=new Set(), empresasSet=new Set();
+  let invalidCount = 0;
+  records.forEach(r=>{
+    if(r.legajo) legajosSet.add(r.legajo.toUpperCase());
+    if(r.unidad) unidadesSet.add(r.unidad);
+    if(r.sector) sectoresSet.add(r.sector);
+    if(r.gerencia) gerenciasSet.add(r.gerencia);
+    if(r.departamento) departamentosSet.add(r.departamento);
+    if(r.empresa) empresasSet.add(r.empresa);
+    if(!r.valid){ invalidCount++; return; }
+    if(minTs===null || r.ts<minTs) minTs=r.ts;
+    if(maxTs===null || r.ts>maxTs) maxTs=r.ts;
+  });
+
+  const categoriesSet = new Set();
+  records.forEach(r => { if(r.agrup !== "") categoriesSet.add(r.agrup); });
+  const categories = Array.from(categoriesSet).sort();
+
+  const motivoUniverseMap = new Map();
+  records.forEach(r => {
+    if(!r.valid || !isCountedCat(r.cat)) return;
+    const k = motivoKeyOf(r);
+    if(!motivoUniverseMap.has(k)) motivoUniverseMap.set(k, {key:k, label: motivoLabelOf(r), count:0, ap:0, anp:0});
+    const mu = motivoUniverseMap.get(k);
+    mu.count++;
+    if(r.cat==="AP") mu.ap++; else mu.anp++;
+  });
+  const motivoUniverse = Array.from(motivoUniverseMap.values()).sort((a,b)=>b.count-a.count);
+
+  const idMotivoUniverseMap = new Map();
+  records.forEach(r => {
+    if(!r.idMotivo) return;
+    const k = r.idMotivo.toUpperCase();
+    if(!idMotivoUniverseMap.has(k)) idMotivoUniverseMap.set(k, {key:k, label:k+" — "+(r.motivo||k), ap:0, anp:0});
+    // cuántas filas AP / ANP tiene cada Id Motivo: sirve para la selección rápida "AP" / "ANP" de los filtros
+    if(r.valid){ const m = idMotivoUniverseMap.get(k); if(r.cat==="AP") m.ap++; else if(r.cat==="ANP") m.anp++; }
+  });
+  const idMotivoUniverse = Array.from(idMotivoUniverseMap.values()).sort((a,b)=>a.key.localeCompare(b.key));
+
+  const presidenciaUniverseSet = new Set();
+  const presidenciaCats = {}; // valor -> {ap, anp}
+  records.forEach(r => {
+    if(!r.presidencia) return;
+    presidenciaUniverseSet.add(r.presidencia);
+    if(!presidenciaCats[r.presidencia]) presidenciaCats[r.presidencia] = {ap:0, anp:0};
+    if(r.valid){ if(r.cat==="AP") presidenciaCats[r.presidencia].ap++; else if(r.cat==="ANP") presidenciaCats[r.presidencia].anp++; }
+  });
+  const presidenciaUniverse = Array.from(presidenciaUniverseSet).sort();
+
+  const monthMap = new Map();
+  records.forEach(r => {
+    if(!r.valid) return;
+    const key = r.anio + "-" + pad2(r.mes);
+    monthMap.set(key, (monthMap.get(key)||0)+1);
+  });
+  const monthKeys = Array.from(monthMap.keys()).sort();
+
+  return {
+    fileName,
+    totalRows: records.length,
+    records,
+    categories,
+    invalidCount,
+    empleadosTotal: legajosSet.size,
+    minTs, maxTs,
+    monthMap, monthKeys,
+    unidades: Array.from(unidadesSet).sort(),
+    sectores: Array.from(sectoresSet).sort(),
+    gerencias: Array.from(gerenciasSet).sort(),
+    departamentos: Array.from(departamentosSet).sort(),
+    empresas: Array.from(empresasSet).sort(),
+    hasUnidad: unidadesSet.size>0,
+    hasMotivo,
+    motivoUniverse,
+    idMotivoUniverse,
+    presidenciaUniverse, presidenciaCats
+  };
+}
+
+/* ---- nombre de empresa: el del PLANTEL manda ----
+   En el ausentismo una misma empresa puede venir con otra escritura ("DELFINO CLAUDIO" / "Delfino Claudio"). Se unifican
+   (sin importar mayúsculas, acentos ni espacios sobrantes) y se muestra siempre como figura en el plantel; si la empresa no
+   está en el plantel, se usa la escritura más frecuente en el ausentismo. */
+function buildEmpresaCanon(plantel, parsedRaw){
+  const canon = new Map(); // clave normalizada -> nombre que se muestra
+  const pCount = new Map();
+  (plantel||[]).forEach(p=>{
+    if(!p.empresa) return;
+    const k = normTxt(p.empresa);
+    if(!pCount.has(k)) pCount.set(k, new Map());
+    const m = pCount.get(k);
+    m.set(p.empresa, (m.get(p.empresa)||0)+1);
+  });
+  pCount.forEach((m,k)=>{
+    let best = null, bestN = -1;
+    m.forEach((n,name)=>{ if(n>bestN){ best = name; bestN = n; } });
+    canon.set(k, best);
+  });
+  const variants = new Map(); // empresas que no están en el plantel pero vienen con más de una escritura
+  (parsedRaw.empresas||[]).forEach(name=>{
+    const k = normTxt(name);
+    if(canon.has(k)) return;
+    if(!variants.has(k)) variants.set(k, []);
+    variants.get(k).push(name);
+  });
+  const multi = Array.from(variants.entries()).filter(([k,arr])=>arr.length>1);
+  if(multi.length){
+    const counts = new Map();
+    parsedRaw.records.forEach(r=>{ if(r.empresa) counts.set(r.empresa, (counts.get(r.empresa)||0)+1); });
+    multi.forEach(([k,arr])=>{ arr.sort((a,b)=>(counts.get(b)||0)-(counts.get(a)||0)); canon.set(k, arr[0]); });
+  }
+  return canon;
+}
+function withCanonEmpresa(parsedRaw, plantel){
+  if(!parsedRaw) return parsedRaw;
+  const canon = buildEmpresaCanon(plantel, parsedRaw);
+  const nameOf = n => canon.get(normTxt(n)) || n;
+  const empresas = Array.from(new Set(parsedRaw.empresas.map(nameOf))).sort();
+  const needsFix = empresas.length!==parsedRaw.empresas.length || parsedRaw.empresas.some(n=>nameOf(n)!==n);
+  if(!needsFix) return parsedRaw;
+  const records = parsedRaw.records.map(r=>{
+    if(!r.empresa) return r;
+    const c = nameOf(r.empresa);
+    return c===r.empresa ? r : {...r, empresa:c};
+  });
+  return {...parsedRaw, records, empresas};
+}
+
+const AUS_UPDATE_CMP_FIELDS =["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato","tipoContrat"];
+function mergeAusentismoRecords(existingRecords, newRecords){
+  const validExisting = existingRecords.filter(r=>r.valid);
+  const invalidExisting = existingRecords.filter(r=>!r.valid);
+  const validNew = newRecords.filter(r=>r.valid);
+  const invalidNew = newRecords.filter(r=>!r.valid);
+
+  const map = new Map();
+  const order = [];
+  validExisting.forEach(r=>{
+    const key = (r.legajo||"").toUpperCase()+"|"+r.dateKey;
+    map.set(key, r);
+    order.push(key);
+  });
+  let nuevos=0, modificados=0, sinCambios=0;
+  const changedRows = [];
+  validNew.forEach(r=>{
+    const key = (r.legajo||"").toUpperCase()+"|"+r.dateKey;
+    if(map.has(key)){
+      const prev = map.get(key);
+      // si la carga nueva trae una columna opcional vacía, no borra el valor ya cargado para esa fila
+      const mergedRow = {...r};
+      // fila provisoria de Geo (o la que llega es de Geo): se reemplaza completa; si no, una columna opcional vacía no borra lo ya cargado
+      const provisoria = prev.origen==="geo" || r.origen==="geo";
+      if(!provisoria) AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
+      // Calipso reemplaza una fila provisoria de Geo: además de los campos, hay que limpiar la marca "geo"
+      if(prev.origen==="geo" && r.origen!=="geo"){ mergedRow.origen = ""; mergedRow.origenLimpiar = true; }
+      // la empresa se compara sin mayúsculas: escribirla distinto no es un cambio real
+      const changed = (prev.origen==="geo" && r.origen!=="geo") || AUS_UPDATE_CMP_FIELDS.some(f=> f==="empresa" ? normTxt(prev[f])!==normTxt(mergedRow[f]) : (prev[f]||"")!==(mergedRow[f]||""));
+      map.set(key, mergedRow);
+      if(changed){ modificados++; changedRows.push(mergedRow); } else sinCambios++;
+    } else {
+      map.set(key, r);
+      order.push(key);
+      nuevos++;
+      changedRows.push(r);
+    }
+  });
+  const merged = order.map(k=>map.get(k)).concat(invalidExisting).concat(invalidNew);
+  return {merged, nuevos, modificados, sinCambios, nuevosInvalidos: invalidNew.length, changedRows};
+}
+
+function buildCategoryRows(records, categories){
+  const counts = {};
+  categories.forEach(c => counts[c]=0);
+  let blank = 0;
+  records.forEach(r => { if(r.agrup==="") blank++; else counts[r.agrup] = (counts[r.agrup]||0)+1; });
+  const rows = categories.map(c => ({key:c, label:c, n:counts[c]||0}));
+  rows.push({key:"__blank", label:"(vacío)", n:blank});
+  const total = rows.reduce((a,r)=>a+r.n,0);
+  return {rows, total};
+}
+
+function passesFilters(r, FILTERS, empresaIncluded, includeMes){
+  if(FILTERS.departamento && r.departamento && !FILTERS.departamento.has(r.departamento)) return false;
+  if(FILTERS.gerencia && r.gerencia && !FILTERS.gerencia.has(r.gerencia)) return false;
+  if(FILTERS.sector && r.sector && !FILTERS.sector.has(r.sector)) return false;
+  if(includeMes && FILTERS.mes && r.monthKey && !FILTERS.mes.has(r.monthKey)) return false;
+  if(empresaIncluded && r.empresa && !empresaIncluded.has(r.empresa)) return false;
+  return true;
+}
+function buildUnitsMap(rows){
+  const map = new Map();
+  rows.forEach(r=>{
+    const key = r.unidad || "(Sin unidad)";
+    if(!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  });
+  return map;
+}
+function buildGroupMap(rows, field){
+  const map = new Map();
+  rows.forEach(r=>{
+    const key = r[field] || "(Sin "+field+")";
+    if(!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  });
+  return map;
+}
+function unitStats(rows, excludedMotivos){
+  const exMot = excludedMotivos || new Set();
+  const dotSet = new Set(), daySet = new Set();
+  let presentes=0, ausencias=0, excluded=0, vac=0, franco=0, ap=0, anp=0, baja=0, ce=0, apContado=0, anpContado=0;
+  rows.forEach(r=>{
+    if(r.legajo) dotSet.add(r.legajo.toUpperCase());
+    daySet.add(r.dateKey);
+    if(r.cat==="P") presentes++;
+    else if(r.cat==="V") vac++;
+    else if(r.cat==="F") franco++;
+    else if(isCountedCat(r.cat)){
+      if(r.cat==="AP") ap++; else anp++;
+      if(exMot.has(motivoKeyOf(r))) excluded++;
+      else { ausencias++; if(r.cat==="AP") apContado++; else anpContado++; }
+    }
+    else if(isExcludedCat(r.cat)){ excluded++; if(r.cat==="BAJA") baja++; else ce++; }
+  });
+  const total = rows.length;
+  const base = total - excluded;
+  const pct = base>0 ? ausencias/base*100 : 0;
+  return {dotacion:dotSet.size, presentes, ausencias, excluded, vac, franco, ap, anp, apContado, anpContado, baja, ce, base, total, dias:daySet.size, pct};
+}
+/* ---- plantel: días activos / jornales de dotación ---- */
+// cutoffTs = último día con datos cargados: el mes en curso se cuenta solo hasta esa fecha (no el mes completo).
+function monthLastTs(year, month, cutoffTs){
+  const last = Date.UTC(year, month-1, daysInMonth(month, year));
+  return cutoffTs!=null && cutoffTs<last ? cutoffTs : last;
+}
+function activeDaysInMonth(altaTs, bajaTs, year, month, cutoffTs){
+  const first = Date.UTC(year, month-1, 1);
+  const last = monthLastTs(year, month, cutoffTs);
+  const start = Math.max(altaTs, first);
+  const end = bajaTs!=null ? Math.min(bajaTs, last) : last;
+  if(end < start) return 0;
+  return Math.round((end-start)/86400000) + 1;
+}
+function monthKeyParts(mk){ const [y,m] = mk.split("-"); return {year:+y, month:+m}; }
+function plantelScopeStats(employees, monthKeys, cutoffTs){
+  let jornalesDotacion = 0, diasPeriodo = 0, empleadosConsiderados = 0;
+  const months = (monthKeys||[]).map(monthKeyParts);
+  months.forEach(({year,month}) => {
+    const first = Date.UTC(year, month-1, 1), last = monthLastTs(year, month, cutoffTs);
+    if(last >= first) diasPeriodo += Math.round((last-first)/86400000) + 1;
+  });
+  employees.forEach(p => {
+    let dias = 0;
+    months.forEach(({year,month}) => { dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month, cutoffTs); });
+    if(dias>0) empleadosConsiderados++;
+    jornalesDotacion += dias;
+  });
+  const dotacionEquivalente = diasPeriodo>0 ? jornalesDotacion/diasPeriodo : 0;
+  return {empleados: employees.length, empleadosConsiderados, diasPeriodo, jornalesDotacion, dotacionEquivalente};
+}
+function passesPlantelFilters(p, FILTERS, empresaIncluded){
+  if(FILTERS.departamento && p.departamento && !FILTERS.departamento.has(p.departamento)) return false;
+  if(FILTERS.gerencia && p.gerencia && !FILTERS.gerencia.has(p.gerencia)) return false;
+  if(FILTERS.sector && p.sector && !FILTERS.sector.has(p.sector)) return false;
+  if(empresaIncluded && p.empresa && !empresaIncluded.has(p.empresa)) return false;
+  return true;
+}
+function semaforo(pct, objetivo){
+  if(pct<=objetivo) return {level:"good", label:"En objetivo"};
+  if(pct<=objetivo*1.15) return {level:"warn", label:"Alerta"};
+  return {level:"bad", label:"Fuera de objetivo"};
+}
+function SemChip({pct, objetivo}){
+  const sem = semaforo(pct, objetivo);
+  return <span className={"schip "+sem.level}><span className="dot"></span>{sem.label}</span>;
+}
+
+const CATEGORY_SORT_COLS = {label:{get:r=>r.label, type:"text"}, n:{get:r=>r.n, type:"num"}};
+function CategoryTable({title, caption, rows: rowsIn, total}){
+  const {sorted: rows, sort, toggle} = useTableSort(rowsIn, CATEGORY_SORT_COLS);
+  return (
+    <div className="card table-card">
+      <h3>{title}</h3>
+      {caption && <div className="caption">{caption}</div>}
+      <div className="overflow-x">
+        <table>
+          <thead>
+            <tr><SortTh k="label" label="Agrupador cuadro presentismo" sort={sort} toggle={toggle} /><SortTh k="n" label="Cantidad" className="num" sort={sort} toggle={toggle} /></tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.key}>
+                <td>
+                  <span className="cat">
+                    <span className="dot" style={{background: CAT_COLOR[r.key] || "var(--cat-blank)"}}></span>
+                    {r.label}
+                  </span>
+                </td>
+                <td className="num">{fmt(r.n)}</td>
+              </tr>
+            ))}
+            <tr className="total">
+              <td>Total</td>
+              <td className="num">{fmt(total)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function KpiTile({label, value, month}){
+  return (
+    <div className={"card kpi-tile" + (month ? " month" : "")}>
+      <div className="kpi-label">{label}</div>
+      <div className="kpi-value">{fmt(value)}</div>
+    </div>
+  );
+}
+function KTile({label, value}){
+  return (
+    <div className="ktile">
+      <span className="kt-label">{label}</span>
+      <span className="kt-value">{value}</span>
+    </div>
+  );
+}
+// incidencia de AP, ANP y Vacaciones sobre el mismo denominador que la tasa de ausentismo
+function incidenciaStats(agg, plantelStats){
+  const denom = plantelStats && plantelStats.jornalesDotacion>0 ? plantelStats.jornalesDotacion : agg.base;
+  const pc = v => denom>0 ? v/denom*100 : 0;
+  return {pctAp: pc(agg.apContado), pctAnp: pc(agg.anpContado), pctVac: pc(agg.vac)};
+}
+function KpiGroups({plantelActive, dotacion, plantelStats, agg}){
+  const inc = incidenciaStats(agg, plantelActive ? plantelStats : null);
+  return (
+    <div className="kgroups no-print">
+      <div className="kgroup">
+        <div className="kgroup-head">Distribución Empleados</div>
+        <div className="kgroup-tiles">
+          <KTile label={plantelActive ? "Dotación equiv." : "Dotación"} value={fmt(dotacion)} />
+          <KTile label="Jornales" value={fmt(plantelActive && plantelStats ? plantelStats.jornalesDotacion : 0)} />
+        </div>
+      </div>
+      <div className="kgroup xwide">
+        <div className="kgroup-head">Ausentismo</div>
+        <div className="kgroup-tiles">
+          <KTile label="Tasa de ausentismo" value={fmtPct(agg.pct,2)} />
+          <KTile label="Total ausentes" value={fmt(agg.ausencias)} />
+        </div>
+        <div className="kgroup-tiles kt-detail">
+          <KTile label="AP" value={fmt(agg.apContado)} />
+          <KTile label="% AP" value={fmtPct(inc.pctAp,2)} />
+          <KTile label="ANP" value={fmt(agg.anpContado)} />
+          <KTile label="% ANP" value={fmtPct(inc.pctAnp,2)} />
+        </div>
+      </div>
+      <div className="kgroup">
+        <div className="kgroup-head">Tasa de Vacaciones</div>
+        <div className="kgroup-tiles">
+          <KTile label="Vacaciones" value={fmt(agg.vac)} />
+          <KTile label="% s/ jornales" value={fmtPct(inc.pctVac,2)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== multi-select filter ===================== */
+function MultiSelect({label, options, selected, onChange, allLabel}){
+  const [open,setOpen] = useState(false);
+  const [search,setSearch] = useState("");
+  const ref = useRef(null);
+  useEffect(()=>{
+    function onDoc(e){ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("click", onDoc);
+    return ()=>document.removeEventListener("click", onDoc);
+  },[]);
+  if(!options.length) return null;
+  const total = options.length;
+  const selSet = selected || new Set(options.map(o=>o.value));
+  let toggleText;
+  if(selSet.size===0) toggleText = "Ninguno";
+  else if(selSet.size===total) toggleText = allLabel;
+  else if(selSet.size<=2) toggleText = options.filter(o=>selSet.has(o.value)).map(o=>o.label).join(", ");
+  else toggleText = fmt(selSet.size)+" seleccionados";
+  const filtered = options.filter(o=> o.label.toLowerCase().includes(search.toLowerCase()));
+  function toggleVal(v){
+    const next = new Set(selSet);
+    if(next.has(v)) next.delete(v); else next.add(v);
+    onChange(next.size===total ? null : next);
+  }
+  return (
+    <div className="msel" ref={ref}>
+      <span className="msel-label">{label}</span>
+      <button type="button" className="msel-toggle" onClick={()=>setOpen(o=>!o)}>{toggleText}</button>
+      {open && (
+        <div className="msel-menu">
+          <input className="msel-search" placeholder="Buscar…" value={search} onChange={e=>setSearch(e.target.value)} />
+          <div className="msel-menu-actions">
+            <button type="button" onClick={()=>onChange(null)}>Todos</button>
+            <button type="button" onClick={()=>onChange(new Set())}>Ninguno</button>
+          </div>
+          <div className="msel-options">
+            {filtered.map(o=>(
+              <label key={o.value} className="msel-opt">
+                <input type="checkbox" checked={selSet.has(o.value)} onChange={()=>toggleVal(o.value)} />
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// Barra de "Selección rápida" de los cuadros de filtros: Todos · Ninguno · AP · ANP · Por defecto.
+// all: todas las claves; apKeys/anpKeys: claves de categoría predominante AP / ANP (si no se pasan, no se muestran esos botones);
+// defaultKeys: selección recomendada (si no se pasa, o es igual a "Todos", no se muestra); selected: Set de claves incluidas.
+function QuickSelectBar({all, apKeys, anpKeys, defaultKeys, selected, onChange}){
+  const sameAs = keys => keys.length===selected.size && keys.every(k=>selected.has(k));
+  const presets = [{label:"Todos", title:"Incluir todos", keys:all}, {label:"Ninguno", title:"No incluir ninguno", keys:[]}];
+  if(apKeys) presets.push({label:"AP", title:"Solo los de Ausente Pago", keys:apKeys});
+  if(anpKeys) presets.push({label:"ANP", title:"Solo los de Ausente No Pago", keys:anpKeys});
+  if(defaultKeys && !(defaultKeys.length===all.length)) presets.push({label:"Por defecto", title:"Selección recomendada", keys:defaultKeys});
+  return (
+    <div className="msel-menu-actions" style={{marginBottom:4, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+      <span className="hint" style={{margin:0}}>Selección rápida:</span>
+      {presets.map(p=>(
+        <button key={p.label} type="button" title={p.title} className="btn secondary"
+          style={sameAs(p.keys) ? {padding:"5px 12px", fontSize:12.5, background:"var(--accent)", color:"var(--accent-ink)", borderColor:"var(--accent)"} : {padding:"5px 12px", fontSize:12.5}}
+          onClick={()=>onChange(new Set(p.keys))}>{p.label}</button>
+      ))}
+      <span className="hint" style={{margin:0}}>{selected.size} de {all.length} incluidos</span>
+    </div>
+  );
+}
+// categoría predominante: AP si tiene más (o igual) días AP que ANP; ANP si tiene más ANP; sin ausencias no es ninguna
+const isApItem = it => (it.ap||0)>0 && (it.ap||0)>=(it.anp||0);
+const isAnpItem = it => (it.anp||0)>0 && (it.anp||0)>(it.ap||0);
+
+// Cabecera de los cuadros de filtros: tocándola se expanden o se retraen. Arrancan retraídos (con un resumen de lo elegido) para
+// no ocupar pantalla; solo se abren cuando hace falta filtrar. El estado abierto/cerrado se conserva al cambiar de menú.
+function FilterCardHead({title, open, onToggle, summary}){
+  return (
+    <div role="button" tabIndex={0} aria-expanded={open} onClick={onToggle}
+      onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); onToggle(); } }}
+      style={{display:"flex", alignItems:"center", gap:10, cursor:"pointer", userSelect:"none", flexWrap:"wrap"}}>
+      <h3 style={{margin:0}}>{title}</h3>
+      {summary && <span className="hint" style={{margin:0}}>{summary}</span>}
+      <span className="hint" style={{marginLeft:"auto", margin:"0 0 0 auto", fontWeight:700, color:"var(--accent)"}}>{open ? "▾ Retraer" : "▸ Expandir"}</span>
+    </div>
+  );
+}
+
+// Tarjeta que se contrae/expande (Medicina Laboral); arranca contraída y recuerda el estado al cambiar de menú. `right` queda siempre visible.
+function CollapsibleCard({id, title, summary, right, children, defaultOpen}){
+  const [open, setOpen] = useKeptState("ml.open|"+id, !!defaultOpen);
+  const toggle = ()=>setOpen(o=>!o);
+  return (
+    <div className="card table-card">
+      <div style={{display:"flex", alignItems:"center", gap:12, flexWrap:"wrap"}}>
+        <div role="button" tabIndex={0} aria-expanded={open} onClick={toggle}
+          onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); toggle(); } }}
+          style={{display:"flex", alignItems:"center", gap:10, cursor:"pointer", userSelect:"none", flex:"1 1 260px", flexWrap:"wrap"}}>
+          <h3 style={{margin:0}}>{title}</h3>
+          {summary && <span className="hint" style={{margin:0}}>{summary}</span>}
+          <span className="hint" style={{marginLeft:"auto", fontWeight:700, color:"var(--accent)"}}>{open ? "▾ Contraer" : "▸ Expandir"}</span>
+        </div>
+        {right}
+      </div>
+      {open && children}
+    </div>
+  );
+}
+
+function EmpresaChecklist({options, included, onChange}){
+  const [open, setOpen] = useKeptState("fc.open|Empresa", false);
+  if(!options.length) return null;
+  const inc = included || new Set(options);
+  return (
+    <div className="card motivo-settings">
+      <FilterCardHead title="Empresa" open={open} onToggle={()=>setOpen(o=>!o)} summary={options.filter(n=>inc.has(n)).length+" de "+options.length+" incluidas"} />
+      {open && (
+        <React.Fragment>
+          <QuickSelectBar all={options} selected={inc} onChange={next=>onChange(next.size===options.length ? null : next)} />
+          <p className="hint">Incluí o excluí legajos según la empresa que los emplea (propios, contratistas). Se aplica a toda la base. Tildada = incluida.</p>
+          <div className="motivo-checklist">
+            {options.map(name=>(
+              <label key={name} className="motivo-check">
+                <input type="checkbox" checked={inc.has(name)} onChange={()=>{
+                  const next = new Set(inc);
+                  if(next.has(name)) next.delete(name); else next.add(name);
+                  onChange(next.size===options.length ? null : next);
+                }} />
+                {name}
+              </label>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+/* ===================== charts ===================== */
+function RankingChart({units, objetivo}){
+  if(!units.length) return <div className="hint">Sin datos para mostrar con estos filtros.</div>;
+  const rowH=40, topPad=14, chartW=640;
+  const maxVal = Math.max(objetivo*1.3, ...units.map(u=>u.pct))*1.08 || 1;
+  const H = topPad*2 + rowH*units.length + 22;
+  const labelW=170, barX0=labelW, barMaxW=chartW-labelW-70;
+  const steps=4, gridLines=[];
+  for(let i=0;i<=steps;i++){ const v=maxVal*i/steps; gridLines.push({x:barX0+barMaxW*v/maxVal, v}); }
+  const tx = barX0 + barMaxW*objetivo/maxVal;
+  return (
+    <svg className="chart" viewBox={"0 0 "+chartW+" "+H}>
+      {gridLines.map((g,i)=>(
+        <g key={i}>
+          <line x1={g.x} x2={g.x} y1={topPad-4} y2={H-18} stroke="var(--grid)" strokeWidth="1" />
+          <text x={g.x} y={H-6} fontSize="10" textAnchor="middle" fill="var(--muted)">{g.v.toFixed(0)}%</text>
+        </g>
+      ))}
+      <line x1={tx} x2={tx} y1={topPad-4} y2={H-18} stroke="var(--critical)" strokeWidth="1.5" strokeDasharray="3,3" />
+      <text x={tx} y={topPad-4} fontSize="10" textAnchor="middle" fill="var(--critical)">Objetivo {fmtPct(objetivo,1)}</text>
+      {units.map((u,i)=>{
+        const y = topPad + 6 + i*rowH, barH=16;
+        const w = Math.max(2, barMaxW*u.pct/maxVal);
+        const sem = semaforo(u.pct, objetivo);
+        const color = sem.level==="good"?"var(--good)":sem.level==="warn"?"var(--warning)":"var(--critical)";
+        return (
+          <g key={u.name}>
+            <text x={labelW-10} y={y+barH/2+4} fontSize="12" textAnchor="end" fill="var(--ink)">{u.name.length>22?u.name.slice(0,21)+"…":u.name}</text>
+            <rect x={barX0} y={y} width={barMaxW} height={barH} rx="4" fill="var(--plane)" />
+            <rect x={barX0} y={y} width={w} height={barH} rx="4" fill={color}>
+              <title>{u.name}: {fmtPct(u.pct,1)} — Dotación {fmt(u.dotacionEquivalente!=null ? u.dotacionEquivalente : u.dotacion)}, Ausencias {fmt(u.ausencias)}</title>
+            </rect>
+            <text x={barX0+w+8} y={y+barH/2+4} fontSize="12" fontWeight="700" fill="var(--ink)">{fmtPct(u.pct,1)}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+function EvolutionChart({months, series, objetivo}){
+  if(!months.length || !series.length) return <div className="hint">Sin datos para mostrar con estos filtros.</div>;
+  const chartW=640,chartH=300,padL=44,padR=16,padT=16,padB=32;
+  const plotW=chartW-padL-padR, plotH=chartH-padT-padB;
+  const allVals = series.flatMap(s=>s.pts);
+  const maxVal = Math.max(objetivo*1.3, ...allVals, 0.001)*1.1;
+  const steps=4, gridLines=[];
+  for(let i=0;i<=steps;i++){ const v=maxVal*i/steps; gridLines.push({y:padT+plotH-plotH*v/maxVal, v}); }
+  const ty = padT+plotH-plotH*objetivo/maxVal;
+  function xAt(i){ return padL + plotW*(months.length===1?0.5:i/(months.length-1)); }
+  return (
+    <svg className="chart" viewBox={"0 0 "+chartW+" "+chartH}>
+      {gridLines.map((g,i)=>(
+        <g key={i}>
+          <line x1={padL} x2={chartW-padR} y1={g.y} y2={g.y} stroke="var(--grid)" strokeWidth="1" />
+          <text x={padL-8} y={g.y+3} fontSize="10" textAnchor="end" fill="var(--muted)">{g.v.toFixed(0)}%</text>
+        </g>
+      ))}
+      {months.map((mk,i)=>(<text key={mk} x={xAt(i)} y={chartH-10} fontSize="10" textAnchor="middle" fill="var(--muted)">{monthLabel(mk)}</text>))}
+      <line x1={padL} x2={chartW-padR} y1={ty} y2={ty} stroke="var(--critical)" strokeWidth="1.5" strokeDasharray="3,3" />
+      {series.map(s=>{
+        const d = s.pts.map((v,i)=>(i===0?"M":"L")+xAt(i).toFixed(1)+","+(padT+plotH-plotH*v/maxVal).toFixed(1)).join(" ");
+        const lastY = padT+plotH-plotH*s.pts[s.pts.length-1]/maxVal;
+        return (
+          <g key={s.name}>
+            <path d={d} fill="none" stroke={s.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            {s.pts.map((v,i)=>(
+              <circle key={i} cx={xAt(i)} cy={padT+plotH-plotH*v/maxVal} r="3.5" fill={s.color}>
+                <title>{s.name} — {monthLabel(months[i])}: {fmtPct(v,1)}</title>
+              </circle>
+            ))}
+            <text x={xAt(s.pts.length-1)+6} y={lastY+3} fontSize="10" fontWeight="700" fill="var(--ink)">{fmtPct(s.pts[s.pts.length-1],1)}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+const COMPOSITION_CATS = [
+  {key:"ausC", label:"Ausencia (contabilizada)", color:"var(--critical)"},
+  {key:"ausX", label:"Ausencia (excluida)", color:"var(--muted)"}
+];
+const AP_ANP_CATS = [
+  {key:"ap", label:"AP (Ausente pago)", color:"var(--cat-ap)"},
+  {key:"anp", label:"ANP (Ausente no pago)", color:"var(--cat-anp)"}
+];
+function CompositionChart({units, cats}){
+  const CATS = cats || COMPOSITION_CATS;
+  if(!units.length) return <div className="hint">Sin datos para mostrar con estos filtros.</div>;
+  const chartW=640, rowH=34, topPad=8;
+  const H = topPad*2+rowH*units.length;
+  const labelW=160, barX0=labelW, barW=chartW-labelW-16;
+  return (
+    <React.Fragment>
+      <svg className="chart" viewBox={"0 0 "+chartW+" "+H}>
+        {units.map((u,i)=>{
+          const y = topPad+i*rowH;
+          const total = CATS.reduce((a,cat)=>a+(u[cat.key]||0),0) || 1;
+          let x = barX0;
+          const segs = [];
+          CATS.forEach(cat=>{
+            const v = u[cat.key]||0;
+            const w = Math.max(0, barW*v/total - 2);
+            if(w>0){
+              segs.push(<rect key={cat.key} x={x} y={y+7} width={w} height={20} rx="3" fill={cat.color}><title>{u.name} — {cat.label}: {fmt(v)} ({fmtPct(v/total*100,1)})</title></rect>);
+              x += w+2;
+            }
+          });
+          return (
+            <g key={u.name}>
+              <text x={labelW-10} y={y+rowH/2+4} fontSize="12" textAnchor="end" fill="var(--ink)">{u.name.length>20?u.name.slice(0,19)+"…":u.name}</text>
+              {segs}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="legend">
+        {CATS.map(c=>(<div key={c.key} className="item"><span className="swatch" style={{background:c.color}}></span>{c.label}</div>))}
+      </div>
+    </React.Fragment>
+  );
+}
+function MotivoChart({entries}){
+  if(!entries.length) return <div className="hint">No hay ausencias contabilizadas (AP/ANP) con los filtros actuales.</div>;
+  const total = entries.reduce((a,e)=>a+e.count,0);
+  const chartW=640, rowH=30, topPad=8;
+  const H = topPad*2+rowH*entries.length;
+  const labelW=200, barX0=labelW, barMaxW=chartW-labelW-70;
+  const maxCount = Math.max(...entries.map(e=>e.count));
+  return (
+    <svg className="chart" viewBox={"0 0 "+chartW+" "+H}>
+      {entries.map((e,i)=>{
+        const y=topPad+i*rowH, barY=y+6, barH=14;
+        const w = Math.max(2, barMaxW*e.count/maxCount);
+        return (
+          <g key={e.label}>
+            <text x={labelW-10} y={barY+barH/2+4} fontSize="12" textAnchor="end" fill="var(--ink)">{e.label.length>30?e.label.slice(0,29)+"…":e.label}</text>
+            <rect x={barX0} y={barY} width={w} height={barH} rx="3" fill="var(--accent)"><title>{e.label}: {fmt(e.count)} ({fmtPct(e.count/total*100,1)})</title></rect>
+            <text x={barX0+w+8} y={barY+barH/2+4} fontSize="11" fill="var(--ink)">{fmtPct(e.count/total*100,1)}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ===================== auditor de tablas ===================== */
+const AUDIT_COLS = ["Legajo","Empleado","Unidad","Departamento","Gerencia","Sector","Empresa","Fecha","Agrupador","Id Motivo","Motivo"];
+function auditRowArr(r){
+  return [r.legajo, r.nombre, r.unidad, r.departamento, r.gerencia, r.sector, r.empresa,
+    fmtDate(r.dia,r.mes,r.anio), (r.agrup||"(vacío)"), r.idMotivo, r.motivo];
+}
+function fmtDateFromTs(ts){ const d = new Date(ts); return fmtDate(d.getUTCDate(), d.getUTCMonth()+1, d.getUTCFullYear()); }
+function calcEdad(birthTs){
+  if(birthTs==null) return null;
+  const birth = new Date(birthTs);
+  const now = new Date();
+  let age = now.getFullYear() - birth.getUTCFullYear();
+  const beforeBirthdayThisYear = (now.getMonth()+1 < birth.getUTCMonth()+1) || (now.getMonth()+1===birth.getUTCMonth()+1 && now.getDate()<birth.getUTCDate());
+  if(beforeBirthdayThisYear) age--;
+  return age;
+}
+
+/* ===================== feriados argentina (para no cortar rachas de crónicos) ===================== */
+// Cubre feriados nacionales fijos + móviles calculados por ley (Pascua, tercer lunes de agosto, etc.).
+// No incluye "feriados puente" decretados año a año sin regla fija — si hace falta, se pueden sumar
+// fechas puntuales a mano en EXTRA_FERIADOS más abajo.
+const EXTRA_FERIADOS = new Set([
+  // "2026-05-22", // ejemplo: agregar acá un feriado puente puntual como "YYYY-MM-DD"
+]);
+function easterSundayUTC(year){
+  const a = year % 19, b = Math.floor(year/100), c = year % 100;
+  const d = Math.floor(b/4), e = b % 4, f = Math.floor((b+8)/25);
+  const g = Math.floor((b-f+1)/3), h = (19*a+b-d-g+15) % 30;
+  const i = Math.floor(c/4), k = c % 4, l = (32+2*e+2*i-h-k) % 7;
+  const m = Math.floor((a+11*h+22*l)/451);
+  const month = Math.floor((h+l-7*m+114)/31);
+  const day = ((h+l-7*m+114) % 31) + 1;
+  return Date.UTC(year, month-1, day);
+}
+function movableToMondayUTC(year, month, day){
+  const ts = Date.UTC(year, month-1, day);
+  const dow = new Date(ts).getUTCDay(); // 0=domingo..6=sabado
+  let offsetDays;
+  if(dow===1) offsetDays = 0;
+  else if(dow>=2 && dow<=4) offsetDays = -(dow-1);
+  else offsetDays = (8-dow)%7;
+  return ts + offsetDays*86400000;
+}
+function tsToYmd(ts){ const d = new Date(ts); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+const feriadosCache = new Map();
+function computeArgFeriados(year){
+  if(feriadosCache.has(year)) return feriadosCache.get(year);
+  const set = new Set();
+  const addFixed = (m,d)=> set.add(tsToYmd(Date.UTC(year,m-1,d)));
+  addFixed(1,1); addFixed(5,1); addFixed(5,25); addFixed(6,20); addFixed(7,9);
+  addFixed(12,8); addFixed(12,25); addFixed(4,2); addFixed(6,17);
+  const easter = easterSundayUTC(year);
+  set.add(tsToYmd(easter - 48*86400000)); // lunes de carnaval
+  set.add(tsToYmd(easter - 47*86400000)); // martes de carnaval
+  set.add(tsToYmd(easter - 2*86400000));  // viernes santo
+  // San Martín: tercer lunes de agosto
+  let mondays = 0;
+  for(let day=1; day<=31; day++){
+    const ts = Date.UTC(year,7,day);
+    if(new Date(ts).getUTCMonth()!==7) break;
+    if(new Date(ts).getUTCDay()===1){ mondays++; if(mondays===3){ set.add(tsToYmd(ts)); break; } }
+  }
+  set.add(tsToYmd(movableToMondayUTC(year,10,12))); // diversidad cultural
+  set.add(tsToYmd(movableToMondayUTC(year,11,20))); // soberanía nacional
+  feriadosCache.set(year, set);
+  return set;
+}
+function isArgFeriado(ts){
+  if(EXTRA_FERIADOS.has(tsToYmd(ts))) return true;
+  return computeArgFeriados(new Date(ts).getUTCFullYear()).has(tsToYmd(ts));
+}
+function isNonWorkingGapDay(ts){
+  const dow = new Date(ts).getUTCDay();
+  if(dow===0 || dow===6) return true;
+  return isArgFeriado(ts);
+}
+function gapIsBridgeable(prevTs, curTs){
+  for(let t=prevTs+86400000; t<curTs; t+=86400000){
+    if(!isNonWorkingGapDay(t)) return false;
+  }
+  return true;
+}
+
+/* ===================== crónicos ===================== */
+// Selección "Por defecto" de los motivos que generan un caso crónico (la selección vigente al 13/10/2026).
+const CRONICOS_DEFAULT_MOTIVOS = new Set(["AT","CA","CAE","CJ","DS","EFS","EN","ET","EX","FA","LSS","MA","MT","MU","NAC","PH","PRD","RP","SA","SUS"]);
+const CRONICO_TIPOS =["", "ACTUAL", "CRONICO", "RES PTO", "PROC BAJA"];
+const CRONICO_TIPO_ORDEN = ["RES PTO", "CRONICO", "ACTUAL", "PROC BAJA"];
+function sanitizeIdSeg(s){ const c = (s||"").toString().toUpperCase().replace(/[^A-Z0-9_\-.~:@+]/g,""); return c || "X"; }
+function cronicoCaseId(legajo, motivoKey, anio){ return sanitizeIdSeg(legajo)+"-"+sanitizeIdSeg(motivoKey)+"-"+sanitizeIdSeg(anio); }
+function cronicoTipoAuto(c){
+  const mk = (c.codpla||"").toUpperCase();
+  if(mk==="RP") return "RES PTO";
+  if(mk==="PRD") return "PROC BAJA";
+  if(cronicoDias(c.inicioTs) > 10) return "CRONICO";
+  return "ACTUAL";
+}
+// Estado de alerta de la fila según la fecha de "Notificar Res. Puesto" (c.notificar, "YYYY-MM-DD"):
+// "alert" (rojo) el día de la notificación o después; "warn" (naranja) durante la semana previa; si no, null.
+function cronicoNotificarStatus(c){
+  const ts = isoDateToTs(c.notificar);
+  if(ts==null) return null;
+  const now = new Date();
+  const todayTs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  if(todayTs >= ts) return "alert";
+  if(todayTs >= ts - 7*86400000) return "warn";
+  return null;
+}
+function cronicoDias(inicioTs){
+  const now = new Date();
+  const todayTs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((todayTs-inicioTs)/86400000) + 1;
+}
+// agrupa los días de una racha en tramos consecutivos con la misma categoría y motivo (para la historia clínica)
+function groupStreakTramos(rows){
+  const tramos = [];
+  rows.forEach(r=>{
+    const label = motivoLabelOf(r), cat = r.cat;
+    const last = tramos[tramos.length-1];
+    if(last && last.label===label && last.cat===cat){ last.hastaTs = r.ts; last.dias++; }
+    else tramos.push({desdeTs:r.ts, hastaTs:r.ts, label, cat, dias:1});
+  });
+  return tramos;
+}
+// Un empleado del plantel está vigente si NO tiene fecha de baja y su Estado es «Vigente» (o viene vacío). Cualquier otro Estado
+// (Renuncia, Despido, Fin Período Prueba, Vto. Contrato, Baja Definitiva…) = dado de baja: no se lista más en Crónicos.
+function plantelVigente(p){ return !!p && p.bajaTs==null && (!p.estado || normTxt(p.estado)==="vigente"); }
+function buildCronicoCases(records, plantel, motivoIncluded){
+  if(!motivoIncluded || !motivoIncluded.size) return [];
+  // Fila que puede formar un caso: una ausencia (AP/ANP) o cualquier día cuyo Id Motivo esté tildado en el filtro (ej. VAC, que no es AP/ANP).
+  const esCaso = r => r.cat==="AP" || r.cat==="ANP" || (!!r.idMotivo && motivoIncluded.has(motivoKeyOf(r)));
+  const byLegajo = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.legajo) return;
+    if(!esCaso(r)) return;
+    const k = r.legajo.toUpperCase();
+    if(!byLegajo.has(k)) byLegajo.set(k, []);
+    byLegajo.get(k).push(r);
+  });
+  const plantelByLegajo = new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p]));
+  const lastRecordByLegajo = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.legajo) return;
+    const k = r.legajo.toUpperCase();
+    const prev = lastRecordByLegajo.get(k);
+    if(!prev || r.ts>prev.ts) lastRecordByLegajo.set(k, r);
+  });
+
+  const cases = [];
+  byLegajo.forEach((rowsIn, legU)=>{
+    const rows = rowsIn.slice().sort((a,b)=>a.ts-b.ts);
+    // Arma "rachas" continuas: toleran huecos de fin de semana/feriado (sin corte) y días
+    // marcados "CA — Con aviso" (no cortan ni cambian el motivo de la racha, en cualquier sentido).
+    // Cualquier otro cambio de motivo, o un hueco que incluya un día hábil sin registrar, corta la racha.
+    const streaks = [];
+    let streakStart=null, streakMotivoKey=null, streakRows=[], prevTs=null;
+    rows.forEach(r=>{
+      const mk = motivoKeyOf(r);
+      const isCA = mk==="CA";
+      if(streakStart===null){
+        streakStart=r.ts; streakMotivoKey=mk; streakRows=[r]; prevTs=r.ts;
+        return;
+      }
+      const contiguous = r.ts===prevTs || gapIsBridgeable(prevTs, r.ts);
+      const sameMotivo = isCA || streakMotivoKey==="CA" || mk===streakMotivoKey;
+      if(contiguous && sameMotivo){
+        streakRows.push(r);
+        if(!isCA) streakMotivoKey = mk;
+        prevTs = r.ts;
+      } else {
+        streaks.push({start:streakStart, motivoKey:streakMotivoKey, rows:streakRows});
+        streakStart=r.ts; streakMotivoKey=mk; streakRows=[r]; prevTs=r.ts;
+      }
+    });
+    if(streakStart!==null) streaks.push({start:streakStart, motivoKey:streakMotivoKey, rows:streakRows});
+
+    // sólo la racha más reciente puede ser un caso activo
+    const lastStreak = streaks[streaks.length-1];
+    if(!lastStreak) return;
+    if(!motivoIncluded.has(lastStreak.motivoKey)) return;
+
+    const first = lastStreak.rows[0], last = lastStreak.rows[lastStreak.rows.length-1];
+    const p = plantelByLegajo.get(legU);
+    // sólo casos que siguen vigentes: el último registro cargado de ese legajo (de todo el archivo)
+    // todavía es parte de esta racha — si ya volvió a "P" o cambió de motivo, el caso se cerró.
+    const lastRec = lastRecordByLegajo.get(legU);
+    const continua = lastRec && esCaso(lastRec) && lastRec.ts===last.ts;
+    if(!continua) return;
+    // sólo empleados activos: con plantel, sin fecha de baja; sin plantel, que su último registro no sea CE/BAJA.
+    const activo = p ? plantelVigente(p) : (lastRec.cat!=="CE" && lastRec.cat!=="BAJA");
+    if(!activo) return;
+    // para mostrar el motivo/diagnóstico, preferir una fila real (no CA) dentro de la racha
+    const motivoRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA") || last;
+    // "Motivo - Razón": la razón es la que figura en la fila más reciente de la racha que la tenga cargada
+    const razonRow = lastStreak.rows.slice().reverse().find(r=>motivoKeyOf(r)!=="CA" && r.razon) || lastStreak.rows.slice().reverse().find(r=>r.razon);
+    const razon = razonRow ? razonRow.razon : "";
+    cases.push({
+      id: cronicoCaseId(first.legajo, lastStreak.motivoKey, first.anio),
+      legajo: first.legajo,
+      anio: first.anio,
+      nombre: last.nombre || first.nombre || (p ? p.nombre : "") || "",
+      grupo: last.departamento || first.departamento || "",
+      sindicato: last.sindicato || first.sindicato || "",
+      gerencia: last.gerencia || first.gerencia || "",
+      codpla: (motivoRow.idMotivo || first.idMotivo || "").toUpperCase(),
+      motivoLabel: motivoLabelOf(motivoRow) + (razon ? " - " + razon : ""),
+      razon,
+      // unidad de negocio actual: la del plantel; si el legajo no está, la de sus registros de ausentismo
+      unidad: (p && p.unidad) || last.unidad || first.unidad || "",
+      inicioTs: first.ts,
+      ultimaTs: last.ts,
+      filas: lastStreak.rows.length,
+      fechaIngresoTs: p ? p.altaTs : null,
+      tramos: groupStreakTramos(lastStreak.rows),
+      // fechas (ts) de los días del caso: para armar las fechas de las ausencias en las sanciones
+      diasTs: Array.from(new Set(lastStreak.rows.map(r=>r.ts))).sort((a,b)=>a-b)
+    });
+  });
+  return cases.sort((a,b)=> b.inicioTs-a.inicioTs);
+}
+const AUDIT_COLS_PLANTEL = ["Legajo","Nombre","Unidad","Sector","Gerencia","Departamento","Empresa","Fecha Alta","Fecha Baja","Días activos en el período"];
+function auditPlantelRowArr(p){
+  return [p.legajo, p.nombre, p.unidad, p.sector, p.gerencia, p.departamento, p.empresa,
+    p.altaTs!=null ? fmtDateFromTs(p.altaTs) : "—",
+    p.bajaTs!=null ? fmtDateFromTs(p.bajaTs) : "—",
+    fmt(p._diasActivos||0)];
+}
+/* ---- orden de tablas: clic en el encabezado ordena (números y fechas de mayor a menor primero; texto de la A a la Z primero) ---- */
+// Convierte un valor mostrado ("1.234", "12,5%", "04/10/2026") en número para poder ordenarlo; null si es texto.
+function sortNumOf(v){
+  if(typeof v==="number") return isNaN(v) ? null : v;
+  const s = String(v==null?"":v).trim();
+  const d = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if(d) return (+d[3])*10000 + (+d[2])*100 + (+d[1]);
+  if(/^-?\d{1,3}(\.\d{3})+(,\d+)?%?$/.test(s) || /^-?\d+(,\d+)?%?$/.test(s) || /^-?\d+\.\d+%?$/.test(s)) return parseFloat(s.replace(/\./g,"").replace(",",".").replace("%",""));
+  return null;
+}
+function smartCompare(x, y){
+  const nx = sortNumOf(x), ny = sortNumOf(y);
+  if(nx!=null && ny!=null) return nx-ny;
+  return String(x==null?"":x).localeCompare(String(y==null?"":y), "es", {sensitivity:"base", numeric:true});
+}
+// cols: {clave: {get: fila=>valor, type:"num"|"text"}}. Devuelve las filas ordenadas, el estado y el alternador.
+function useTableSort(rows, cols, initial){
+  const [sort, setSort] = useState(initial||null);
+  let sorted = rows;
+  if(sort && cols[sort.key]){
+    const col = cols[sort.key], dir = sort.dir==="asc" ? 1 : -1;
+    sorted = rows.slice().sort((a,b)=>{
+      const va = col.get(a), vb = col.get(b);
+      return (col.type==="num" ? ((va||0)-(vb||0)) : smartCompare(va, vb)) * dir;
+    });
+  }
+  function toggle(key){
+    setSort(prev => (prev && prev.key===key)
+      ? {key, dir: prev.dir==="asc" ? "desc" : "asc"}
+      : {key, dir: (cols[key] && cols[key].type==="num") ? "desc" : "asc"});
+  }
+  return {sorted, sort, toggle};
+}
+function SortTh({label, k, sort, toggle, className, style}){
+  const active = !!sort && sort.key===k;
+  return (
+    <th className={className} title="Ordenar" aria-sort={active ? (sort.dir==="asc" ? "ascending" : "descending") : "none"}
+      style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap", ...style}} onClick={()=>toggle(k)}>
+      {label}{active ? (sort.dir==="asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
+}
+
+// Índice del plantel (legajo en mayúsculas -> registro) para los informes de detalle; lo provee App (PlantelAuditCtx). Se arma una vez por cada lista de plantel.
+const PlantelAuditCtx = React.createContext(null);
+let _plantelIdxFor = null, _plantelIdx = null;
+function plantelIndexOf(plantel){
+  if(_plantelIdxFor!==plantel){ _plantelIdxFor = plantel; _plantelIdx = new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p])); }
+  return _plantelIdx;
+}
+// Estado del empleado y fecha de egreso según el PLANTEL: Activo / Egresado (baja ya ocurrida) / Baja programada (fecha futura) / Sin plantel.
+function estadoEgresoPlantel(idx, legajo){
+  const p = idx ? idx.get(String(legajo||"").toUpperCase()) : null;
+  if(!p) return ["Sin plantel", "—"];
+  if(p.bajaTs==null) return ["Activo", "—"];
+  return [p.bajaTs<=Date.now() ? "Egresado" : "Baja programada", fmtDateFromTs(p.bajaTs)];
+}
+// Sanciones por día de ausencia (legajo|fecha): lo que se hizo con cada ausencia en «Sanciones por lote» (enviada, omitida con su motivo, en lote)
+// y en el menú Sanciones. Lo provee App (solo Administrador y RRHH); en los informes de detalle es una columna discreta y sale completa al exportar.
+const SancionAuditCtx = React.createContext(null);
+async function cargarSancionesIdx(){
+  const m = new Map();
+  const add = (leg, iso, x) => { const k = slLeg(leg)+"|"+iso; if(!m.has(k)) m.set(k, []); m.get(k).push(x); };
+  const dmy = ts => ts ? new Date(ts).toLocaleDateString("es-AR") : "";
+  let motivos = SL_MOTIVOS_DEF;
+  try{ const mo = await slFetchAll(SL_T.motivos, "id"); if(mo.length) motivos = mo; }catch(e){}
+  try{
+    const its = await slFetchAll(SL_T.items, "id");
+    its.forEach(it=>{
+      const san = (it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "");
+      let x;
+      if(it.incluir && it.enviado_ts) x = {tipo:"emitida", txt:"✔ Sancionada: "+san+(it.n_interno ? " · N° "+it.n_interno : "")+" · enviada "+dmy(it.enviado_ts)};
+      else if(!it.incluir) x = {tipo:"omitida", txt:"✎ No sancionada: "+(it.motivo_omision || "sin motivo cargado")};
+      else x = {tipo:"enlote", lote:true, txt:"• En lote de sanción (sin enviar): "+san};
+      (it.fechas||[]).forEach(d=>add(it.legajo, d, x));
+    });
+  }catch(e){ /* sin las tablas de Sanciones por lote */ }
+  try{
+    const cs = await loadSanciones();
+    cs.forEach(s=>{ const x = s.estado==="emitida" ? {tipo:"emitida", txt:"✔ Sancionada (menú Sanciones): "+(s.medida||"sanción")+(s.emitidaTs ? " · emitida "+dmy(s.emitidaTs) : "")}
+      : {tipo:"enlote", txt:"• En menú Sanciones ("+((SANCION_ESTADOS[s.estado]||{}).txt||s.estado)+")"+(s.medida ? ": "+s.medida : "")};
+      diasDeSancion(s).forEach(d=>add(s.legajo, d, x)); });
+  }catch(e){}
+  m.nj = slCodigosNoJust(motivos);
+  return m;
+}
+// texto de la columna para una fila de ausentismo; lo que sigue «en lote» sin enviar solo se muestra si ese día todavía es sancionable
+function sancionDeFila(idx, r){
+  if(!idx || !r || !r.dateKey) return "";
+  const xs = idx.get(slLeg(r.legajo)+"|"+r.dateKey); if(!xs) return "";
+  const cod = String(r.idMotivo||"").trim().toUpperCase();
+  const njHoy = cod ? idx.nj.has(cod) : String(r.presidencia||"").trim().toUpperCase()==="NO JUST";
+  return xs.filter(x=>!(x.lote && !njHoy)).map(x=>x.txt).join(" / ");
+}
+function AuditModal({title, rows, onClose, cols, rowToArr}){
+  const pIdx = React.useContext(PlantelAuditCtx);
+  const sIdx = React.useContext(SancionAuditCtx);
+  // informe estándar (filas del ausentismo): se le suman el estado del empleado y su fecha de egreso, tomados del plantel,
+  // y (para Administrador y RRHH) la sanción o intervención registrada para ese día
+  const estandar = !cols && !rowToArr;
+  const conSancion = estandar && !!sIdx;
+  const columns = cols || (estandar ? AUDIT_COLS.concat(["Estado empleado","Fecha de egreso"], conSancion ? ["Sanción / intervención"] : []) : AUDIT_COLS);
+  const colSancion = conSancion ? columns.length-1 : -1;
+  const toArr = rowToArr || (estandar ? (r=>auditRowArr(r).concat(estadoEgresoPlantel(pIdx, r.legajo), conSancion ? [sancionDeFila(sIdx, r)] : [])) : auditRowArr);
+  const [copied, setCopied] = useState("idle");
+  const [sort, setSort] = useState(null); // {i: índice de columna, dir}
+  const prepared = useMemo(()=> rows.map(r=>({r, a: toArr(r)})), [rows, pIdx, sIdx]);
+  const sortedPrepared = useMemo(()=>{
+    if(!sort) return prepared;
+    const dir = sort.dir==="asc" ? 1 : -1;
+    return prepared.slice().sort((p,q)=> smartCompare(p.a[sort.i], q.a[sort.i]) * dir);
+  }, [prepared, sort]);
+  function toggleSort(i){
+    setSort(prev=>{
+      if(prev && prev.i===i) return {i, dir: prev.dir==="asc" ? "desc" : "asc"};
+      const sample = prepared.find(p=>p.a[i]!=null && String(p.a[i]).trim()!=="" && String(p.a[i]).trim()!=="—");
+      return {i, dir: sample && sortNumOf(sample.a[i])!=null ? "desc" : "asc"};
+    });
+  }
+  function toCsv(){
+    const lines = [columns.join(";")];
+    sortedPrepared.forEach(p => lines.push(p.a.map(v=>String(v==null?"":v).replace(/;/g,",")).join(";")));
+    return lines.join("\n");
+  }
+  async function handleCopy(){
+    const csv = toCsv();
+    try{
+      await navigator.clipboard.writeText(csv);
+      setCopied("ok");
+    }catch(e){
+      try{
+        const ta = document.createElement("textarea");
+        ta.value = csv; ta.style.position="fixed"; ta.style.opacity="0";
+        document.body.appendChild(ta); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied("ok");
+      }catch(e2){ setCopied("err"); }
+    }
+    setTimeout(()=>setCopied("idle"), 2500);
+  }
+  // descarga en Excel con TODAS las filas, en el orden de la pantalla (incluye la columna de sanción completa)
+  function handleExcel(){
+    if(!window.XLSX) return;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([columns, ...sortedPrepared.map(p=>p.a)]), "Detalle");
+    XLSX.writeFile(wb, (String(title||"detalle").replace(/[\\\/:*?"<>|]+/g,"").replace(/\s+/g," ").trim().slice(0,90) || "detalle")+".xlsx");
+  }
+  const preview = sortedPrepared.slice(0,200);
+  const nConSancion = conSancion ? prepared.filter(p=>p.a[colSancion]).length : 0;
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" onClick={e=>e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{title}</h3>
+          <button type="button" className="btn secondary small" onClick={onClose}>Cerrar</button>
+        </div>
+        <p className="hint">{fmt(rows.length)} fila{rows.length===1?"":"s"} encontrada{rows.length===1?"":"s"}{rows.length>200 ? " — mostrando las primeras 200 en pantalla (el Excel y la copia llevan todas)" : ""}.{nConSancion ? " "+fmt(nConSancion)+" con sanción o intervención registrada (columna «Sanción / intervención»)." : ""}</p>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+          <button type="button" className="btn small" onClick={handleExcel} disabled={!rows.length}>Descargar Excel</button>
+          <button type="button" className="btn secondary small" onClick={handleCopy} disabled={!rows.length}>
+            {copied==="ok" ? "Copiado ✓" : copied==="err" ? "No se pudo copiar" : "Copiar detalle (CSV)"}
+          </button>
+        </div>
+        <div className="overflow-x modal-table-wrap">
+          <table>
+            <thead><tr>{columns.map((c,i)=>(
+              <th key={c} title="Ordenar" aria-sort={sort && sort.i===i ? (sort.dir==="asc" ? "ascending" : "descending") : "none"}
+                style={{cursor:"pointer", userSelect:"none", whiteSpace:"nowrap"}} onClick={()=>toggleSort(i)}>
+                {c}{sort && sort.i===i ? (sort.dir==="asc" ? " ▲" : " ▼") : ""}
+              </th>
+            ))}</tr></thead>
+            <tbody>
+              {!preview.length && <tr><td colSpan={columns.length} style={{textAlign:"center",color:"var(--muted)",padding:"14px 0"}}>Sin filas.</td></tr>}
+              {preview.map((p,i)=>(<tr key={i}>{p.a.map((v,j)=><td key={j}>{j===colSancion && v
+                ? <span title={v} style={{fontSize:11.5, whiteSpace:"nowrap", color: v.startsWith("✔") ? "var(--good)" : v.startsWith("✎") ? "var(--warning)" : "var(--muted)"}}>{v.length>44 ? v.slice(0,42)+"…" : v}</span>
+                : v}</td>)}</tr>))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+function CellLink({onClick, children}){
+  return <button type="button" className="cell-link" onClick={onClick}>{children}</button>;
+}
+
+// Los motivos tildados son los que CUENTAN como ausentismo. Internamente se sigue guardando el conjunto de
+// motivos NO incluidos ("excluded"), por eso tildar = sacarlo de ese conjunto.
+function MotivoChecklist({motivoUniverse, excluded, onChange, onAudit}){
+  const [open, setOpen] = useKeptState("fc.open|Motivos de Ausencia (AP/ANP) incluidos en el cálculo", false);
+  if(!motivoUniverse.length) return null;
+  const isAp = m => (m.ap||0) >= (m.anp||0); // categoría predominante del motivo
+  const presets = [
+    {label:"Todos", title:"Cuentan todos los motivos", excludedKeys: []},
+    {label:"Ninguno", title:"No cuenta ningún motivo", excludedKeys: motivoUniverse.map(m=>m.key)},
+    {label:"AP", title:"Solo los motivos de Ausente Pago", excludedKeys: motivoUniverse.filter(m=>!isAp(m)).map(m=>m.key)},
+    {label:"ANP", title:"Solo los motivos de Ausente No Pago", excludedKeys: motivoUniverse.filter(m=>isAp(m)).map(m=>m.key)},
+    {label:"Por defecto", title:"Selección recomendada de la tabla fija de motivos", excludedKeys: motivoUniverse.filter(m=>isDefaultExcludedMotivoKey(m.key)).map(m=>m.key)}
+  ];
+  const sameAs = keys => keys.length===excluded.size && keys.every(k=>excluded.has(k));
+  const incluidos = motivoUniverse.filter(m=>!excluded.has(m.key)).length;
+  return (
+    <div className="card motivo-settings">
+      <FilterCardHead title="Motivos de Ausencia (AP/ANP) incluidos en el cálculo" open={open} onToggle={()=>setOpen(o=>!o)} summary={incluidos+" de "+motivoUniverse.length+" motivos incluidos"} />
+      {open && (
+      <React.Fragment>
+      <p className="hint">Tildá los motivos que querés que cuenten como ausentismo. Aunque el Agrupador los marque AP/ANP, los que dejes sin tildar no cuentan (bajas, suspensiones, licencias especiales, etc.). Se recalcula todo al instante, en todas las pestañas. La selección rápida AP / ANP elige los motivos según su categoría predominante. Hacé clic en la cantidad para ver y copiar el detalle.</p>
+      <div className="msel-menu-actions" style={{marginBottom:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+        <span className="hint" style={{margin:0}}>Selección rápida:</span>
+        {presets.map(p=>(
+          <button key={p.label} type="button" title={p.title} className="btn secondary"
+            style={sameAs(p.excludedKeys) ? {padding:"5px 12px", fontSize:12.5, background:"var(--accent)", color:"var(--accent-ink)", borderColor:"var(--accent)"} : {padding:"5px 12px", fontSize:12.5}}
+            onClick={()=>onChange(new Set(p.excludedKeys))}>{p.label}</button>
+        ))}
+        <span className="hint" style={{margin:0}}>{incluidos} de {motivoUniverse.length} motivos incluidos</span>
+      </div>
+      <div className="motivo-checklist">
+        {motivoUniverse.map(m=>(
+          <label key={m.key} className="motivo-check">
+            <input type="checkbox" checked={!excluded.has(m.key)} onChange={()=>{
+              const next = new Set(excluded);
+              if(next.has(m.key)) next.delete(m.key); else next.add(m.key);
+              onChange(next);
+            }} />
+            {m.label} (<CellLink onClick={(e)=>{ e.preventDefault(); e.stopPropagation(); onAudit(m); }}>{fmt(m.count)}</CellLink>)
+          </label>
+        ))}
+      </div>
+      </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+const MOTIVO_REF_SORT_COLS = {key:{get:m=>m.key, type:"text"}, label:{get:m=>m.refLabel, type:"text"}, incluir:{get:m=>m.incluir?1:0, type:"num"}};
+function DefaultMotivoRefTable(){
+  const {sorted, sort, toggle} = useTableSort(DEFAULT_MOTIVO_TABLE, MOTIVO_REF_SORT_COLS);
+  return (
+    <div className="card table-card">
+      <h3>Tabla fija — Motivos de Ausencia por defecto</h3>
+      <p className="caption">Referencia fija usada como preselección en "Motivos de Ausencia incluidos" (Resumen) y en "Id Motivo a incluir" (Ranking). Se puede editar libremente en esas pestañas — esta tabla no cambia.</p>
+      <div className="overflow-x">
+        <table>
+          <thead><tr><SortTh k="key" label="Código" sort={sort} toggle={toggle} /><SortTh k="label" label="Motivo" sort={sort} toggle={toggle} /><SortTh k="incluir" label="Incluir" sort={sort} toggle={toggle} /></tr></thead>
+          <tbody>
+            {sorted.map(m=>(
+              <tr key={m.key}>
+                <td>{m.key}</td>
+                <td>{m.refLabel}</td>
+                <td><span className={"toggle-pill "+(m.incluir?"yes":"no")}>{m.incluir?"SÍ":"NO"}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== gestión de plantel ===================== */
+// cutoffTs: primer día del primer mes con datos de ausentismo. Los empleados con baja anterior a esa fecha no aportan
+// ningún día a la dotación ni a los jornales, así que no se cargan (se pueden subir los archivos completos sin recortarlos a mano).
+function buildPlantelPreview(rows2d, mapping, existingPlantel, cutoffTs){
+  const header = rows2d[0] || [];
+  const dataRows = rows2d.slice(1);
+  const idxIngreso = findColByAliases(header, ["Fecha de Ingreso","Fecha Ingreso"]);
+  const idxLocalidad = findColByAliases(header, ["Localidad"]);   // se suma al Domicilio ("Calle 123, Localidad")
+  const existingByLegajo = new Map(existingPlantel.map(p=>[p.legajo, p]));
+  const seen = new Set();
+  const records = [];
+  const changedRecords = [];
+  const errors = [];
+  let nuevos = 0, modificados = 0, sinCambios = 0, descartados = 0;
+  const FIELD_KEYS = ["unidad","sector","gerencia","departamento","empresa","grupo","estado","nombre","puesto","jefe","celular","domicilio","sindicato"];
+  dataRows.forEach((row, i) => {
+    const excelRow = i + 2 + (rows2d.headerOffset||0);   // número de fila real del Excel (si hay títulos arriba de los encabezados)
+    const legajo = cellStr(row, mapping.legajo).trim();
+    if(legajo===""){ errors.push({row:excelRow, legajo:"(vacío)", problem:"Legajo vacío"}); return; }
+    const legajoKey = legajo.toUpperCase();
+    if(seen.has(legajoKey)){ errors.push({row:excelRow, legajo, problem:"Legajo duplicado dentro del archivo"}); return; }
+    // Baja anterior al primer mes con datos: no aporta días, se descarta aunque le falte la fecha de alta (no cuenta como error).
+    if(cutoffTs!=null && mapping.fechaBaja!==-1){
+      const bajaPre = String(row[mapping.fechaBaja]==null?"":row[mapping.fechaBaja]).trim();
+      if(bajaPre!==""){
+        const bp = parseEntrada(row[mapping.fechaBaja]);
+        if(bp.valid && Date.UTC(bp.anio, bp.mes-1, bp.dia) < cutoffTs){ seen.add(legajoKey); descartados++; return; }
+      }
+    }
+    let altaRaw = mapping.fechaAlta!==-1 ? row[mapping.fechaAlta] : "";
+    // Si la columna elegida para el alta (p. ej. "Fecha cálculo vacaciones") viene vacía en esa fila, se usa la Fecha de Ingreso.
+    if(String(altaRaw==null?"":altaRaw).trim()==="" && idxIngreso!==-1) altaRaw = row[idxIngreso];
+    const altaParsed = parseEntrada(altaRaw);
+    if(!altaParsed.valid){ errors.push({row:excelRow, legajo, problem:"Fecha de alta inválida o vacía"}); return; }
+    const altaTs = Date.UTC(altaParsed.anio, altaParsed.mes-1, altaParsed.dia);
+    const bajaRaw = mapping.fechaBaja!==-1 ? row[mapping.fechaBaja] : "";
+    const bajaStr = String(bajaRaw==null?"":bajaRaw).trim();
+    let bajaTs = null;
+    if(bajaStr!==""){
+      const bajaParsed = parseEntrada(bajaRaw);
+      if(!bajaParsed.valid){ errors.push({row:excelRow, legajo, problem:"Fecha de baja inválida"}); return; }
+      bajaTs = Date.UTC(bajaParsed.anio, bajaParsed.mes-1, bajaParsed.dia);
+      if(bajaTs < altaTs){ errors.push({row:excelRow, legajo, problem:"Fecha de baja anterior a la fecha de alta"}); return; }
+      if(cutoffTs!=null && bajaTs < cutoffTs){ seen.add(legajoKey); descartados++; return; }
+    }
+    const nacRaw = mapping.fechaNacimiento!==-1 ? row[mapping.fechaNacimiento] : "";
+    const nacStr = String(nacRaw==null?"":nacRaw).trim();
+    let nacimientoTs = null;
+    if(nacStr!==""){
+      const nacParsed = parseEntrada(nacRaw);
+      if(nacParsed.valid) nacimientoTs = Date.UTC(nacParsed.anio, nacParsed.mes-1, nacParsed.dia);
+    }
+    const rec = {
+      legajo, altaTs, bajaTs, nacimientoTs,
+      nombre: cellStr(row, mapping.nombre),
+      estado: cellStr(row, mapping.estado),
+      unidad: cellStr(row, mapping.unidad),
+      sector: cellStr(row, mapping.sector),
+      gerencia: cellStr(row, mapping.gerencia),
+      departamento: cellStr(row, mapping.departamento),
+      empresa: cellStr(row, mapping.empresa),
+      grupo: cellStr(row, mapping.grupo),
+      puesto: cellStr(row, mapping.puesto),
+      jefe: cellStr(row, mapping.jefe),
+      celular: cellStr(row, mapping.celular),
+      domicilio: [cellStr(row, mapping.domicilio), cellStr(row, idxLocalidad)].filter(Boolean).join(", "),
+      sindicato: cellStr(row, mapping.sindicato)
+    };
+    seen.add(legajoKey);
+    const prev = existingByLegajo.get(legajo);
+    if(!prev){ nuevos++; changedRecords.push(rec); }
+    else {
+      const changed = prev.altaTs!==rec.altaTs || prev.bajaTs!==rec.bajaTs || prev.nacimientoTs!==rec.nacimientoTs || FIELD_KEYS.some(k=>(prev[k]||"")!==(rec[k]||""));
+      if(changed){ modificados++; changedRecords.push(rec); } else sinCambios++;
+    }
+    records.push(rec);
+  });
+  const noIncluidos = existingPlantel.filter(p=>!seen.has(p.legajo.toUpperCase())).length;
+  return {
+    totalEncontrados: dataRows.length,
+    nuevos, modificados, sinCambios, noIncluidos, descartados, cutoffTs,
+    errores: errors,
+    records,
+    changedRecords
+  };
+}
+function PlantelUploadForm({onFile, label, loading}){
+  const inputId = "plantelFile_"+label.replace(/\s+/g,"");
+  return (
+    <React.Fragment>
+      <label className="btn" htmlFor={inputId}>{loading ? "Leyendo…" : label}</label>
+      <input id={inputId} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>{ const f=e.target.files && e.target.files[0]; if(f) onFile(f); e.target.value=""; }} />
+    </React.Fragment>
+  );
+}
+/* ---- estado del espacio de la base de datos (Supabase) ---- */
+const MB = 1048576;
+function dbUsagePct(usage){ return usage ? usage.db_bytes/MB/DB_LIMIT_MB*100 : 0; }
+function dbUsageLevel(pct){ return pct>=DB_ALERT_PCT ? "bad" : pct>=DB_WARN_PCT ? "warn" : "good"; }
+// Cantidad típica de filas de ausentismo que se agregan por mes (promedio de los meses completos ya cargados).
+function rowsPerMonthOf(parsed){
+  if(!parsed || !parsed.monthMap || !parsed.monthKeys.length) return 0;
+  const keys = parsed.monthKeys.length>2 ? parsed.monthKeys.slice(0,-1) : parsed.monthKeys; // el último mes puede estar incompleto
+  return keys.reduce((a,k)=>a+(parsed.monthMap.get(k)||0),0)/keys.length;
+}
+function DbUsageCard({usage, error, checking, onCheck, rowsPerMonth}){
+  const used = usage ? usage.db_bytes/MB : 0;
+  const pct = dbUsagePct(usage), level = dbUsageLevel(pct);
+  const color = level==="bad" ? "var(--critical)" : level==="warn" ? "var(--warning)" : "var(--good)";
+  const bytesPerRow = usage && usage.aus_filas>0 ? usage.aus_bytes/usage.aus_filas : 0;
+  const mbPerMonth = rowsPerMonth>0 && bytesPerRow>0 ? rowsPerMonth*bytesPerRow/MB : 0;
+  const monthsLeft = mbPerMonth>0 ? Math.max(0, (DB_LIMIT_MB-used)/mbPerMonth) : null;
+  const limitDate = monthsLeft!=null ? new Date(Date.now()+monthsLeft*30.4*86400000) : null;
+  const tables = usage ? [
+    {name:"Ausentismo (registros diarios)", filas:usage.aus_filas, bytes:usage.aus_bytes},
+    {name:"Plantel", filas:usage.plantel_filas, bytes:usage.plantel_bytes},
+    {name:"Crónicos (casos y observaciones)", filas:usage.cronicos_filas, bytes:usage.cronicos_bytes}
+  ] : [];
+  return (
+    <div className="card table-card">
+      <h3>Estado de la base de datos</h3>
+      {error && <div className="warn-banner">{error}</div>}
+      {usage && (
+        <React.Fragment>
+          <div style={{display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap"}}>
+            <b style={{fontSize:20, color}}>{fmt(used)} MB</b>
+            <span className="hint">de {fmt(DB_LIMIT_MB)} MB del plan · {fmtPct(pct,0)} usado</span>
+          </div>
+          <div style={{height:10, borderRadius:6, background:"var(--border)", overflow:"hidden"}} role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin="0" aria-valuemax="100">
+            <div style={{width:Math.min(100,pct)+"%", height:"100%", background:color}}></div>
+          </div>
+          <div className="overflow-x">
+            <table>
+              <thead><tr><th>Tabla</th><th className="num">Filas</th><th className="num">Tamaño</th></tr></thead>
+              <tbody>
+                {tables.map(t=>(<tr key={t.name}><td>{t.name}</td><td className="num">{fmt(t.filas)}</td><td className="num">{t.bytes/MB>=10 ? fmt(t.bytes/MB) : (t.bytes/MB).toLocaleString("es-AR",{maximumFractionDigits:1})} MB</td></tr>))}
+              </tbody>
+            </table>
+          </div>
+          {monthsLeft!=null && (
+            <p className="caption" style={{margin:0}}>
+              Ritmo estimado: ~{mbPerMonth.toLocaleString("es-AR",{maximumFractionDigits:1})} MB por mes (≈ {fmt(rowsPerMonth)} filas por mes × {(bytesPerRow/1024).toLocaleString("es-AR",{maximumFractionDigits:2})} KB por fila).
+              {level==="bad" || monthsLeft<=0
+                ? " Estás muy cerca del límite."
+                : " A este ritmo se llegaría al límite en ~"+fmt(Math.round(monthsLeft))+" meses (aprox. "+MESES[limitDate.getMonth()]+" "+limitDate.getFullYear()+")."}
+            </p>
+          )}
+          {level!=="good" && (
+            <p className="caption" style={{margin:0, color}}>
+              Conviene liberar espacio (archivar un año anterior y borrarlo de la base) o pasar al plan Pro antes de llegar al límite: al superarlo, la base queda en solo lectura y no se pueden guardar cargas nuevas.
+            </p>
+          )}
+        </React.Fragment>
+      )}
+      <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+        <button type="button" className="btn secondary small" onClick={onCheck} disabled={checking}>{checking ? "Verificando…" : "Verificar ahora"}</button>
+        <span className="hint">Se verifica sola al abrir la app y al terminar cada carga. Avisa con una marca arriba desde el {DB_WARN_PCT} %.</span>
+      </div>
+    </div>
+  );
+}
+
+function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs, soloCarga}){
+  const [stage, setStage] = useState("idle");
+  const [rawRows, setRawRows] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [mapping, setMapping] = useState({});
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [errAudit, setErrAudit] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
+
+  const indicadorRows = globalPlantelStats ? [
+    {name:"Empleados considerados", v:globalPlantelStats.empleadosConsiderados},
+    {name:"Días del período", v:globalPlantelStats.diasPeriodo},
+    {name:"Jornales de dotación", v:globalPlantelStats.jornalesDotacion},
+    {name:"Dotación equivalente", v:globalPlantelStats.dotacionEquivalente},
+    {name:"AP", v:globalPlantelStats.ap},
+    {name:"ANP", v:globalPlantelStats.anp},
+    {name:"AP + ANP", v:globalPlantelStats.ap+globalPlantelStats.anp}
+  ] : [];
+  const indSort = useTableSort(indicadorRows, {name:{get:r=>r.name, type:"text"}, v:{get:r=>r.v, type:"num"}});
+  const histSort = useTableSort(plantelHistorial, {
+    fecha:{get:h=>h.fecha.getTime(), type:"num"}, archivo:{get:h=>h.archivo, type:"text"},
+    encontrados:{get:h=>h.encontrados, type:"num"}, nuevos:{get:h=>h.nuevos, type:"num"},
+    modificados:{get:h=>h.modificados, type:"num"}, errores:{get:h=>h.errores, type:"num"}
+  });
+
+  function onFile(file){
+    setError(null);
+    setLoading(true);
+    setFileName(file.name);
+    const isCsv = /\.csv$/i.test(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try{
+        const wb = isCsv ? XLSX.read(e.target.result, {type:"string", raw:true, cellDates:false}) : XLSX.read(new Uint8Array(e.target.result), {type:"array", cellDates:false});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        let rows2d = XLSX.utils.sheet_to_json(ws, {header:1, defval:"", raw:true});
+        // Algunos listados traen títulos arriba ("Listado de Legajos", usuario y fecha de emisión…): la fila de encabezados es la primera
+        // (de las 20 primeras) que tiene las columnas Legajo y Fecha de Alta/Ingreso; todo lo de arriba se ignora.
+        let hIdx = 0;
+        for(let i=0; i<Math.min(rows2d.length, 20); i++){
+          if(findColByAliases(rows2d[i], PLANTEL_FIELD_ALIASES.legajo)!==-1 && findColByAliases(rows2d[i], PLANTEL_FIELD_ALIASES.fechaAlta)!==-1){ hIdx = i; break; }
+        }
+        if(hIdx>0){ const off = hIdx; rows2d = rows2d.slice(hIdx); rows2d.headerOffset = off; }
+        if(!rows2d.length || !rows2d[0].length){ setError("El archivo está vacío o no tiene encabezados."); setLoading(false); return; }
+        const header = rows2d[0];
+        const autoMap = {};
+        PLANTEL_FIELD_ORDER.forEach(f => { autoMap[f] = findColByAliases(header, PLANTEL_FIELD_ALIASES[f]); });
+        setRawRows(rows2d);
+        setMapping(autoMap);
+        setStage("mapping");
+      }catch(err){
+        setError("No se pudo leer el archivo: " + (err && err.message ? err.message : String(err)));
+      }
+      setLoading(false);
+    };
+    reader.onerror = () => { setError("No se pudo leer el archivo."); setLoading(false); };
+    if(isCsv) reader.readAsText(file, "utf-8"); else reader.readAsArrayBuffer(file);
+  }
+
+  const header = rawRows ? rawRows[0] : [];
+  const missingRequired = PLANTEL_REQUIRED_FIELDS.filter(f => mapping[f]==null || mapping[f]===-1);
+
+  const preview = useMemo(() => {
+    if(stage!=="preview" || !rawRows) return null;
+    // primer día del primer mes con datos de ausentismo cargados (si todavía no hay datos, no se descarta a nadie)
+    const dataStart = dataStartTs!=null ? new Date(dataStartTs) : null;
+    const cutoffTs = dataStart ? Date.UTC(dataStart.getUTCFullYear(), dataStart.getUTCMonth(), 1) : null;
+    return buildPlantelPreview(rawRows, mapping, plantel, cutoffTs);
+  }, [stage, rawRows, mapping, plantel, dataStartTs]);
+
+  function confirmar(){
+    if(!preview) return;
+    const byLegajo = new Map(plantel.map(p=>[p.legajo, p]));
+    preview.records.forEach(r => byLegajo.set(r.legajo, r));
+    setPlantel(Array.from(byLegajo.values()));
+    setPlantelUpdatedAt(new Date());
+    setPlantelHistorial(h => [{
+      fecha: new Date(), archivo: fileName, encontrados: preview.totalEncontrados,
+      nuevos: preview.nuevos, modificados: preview.modificados, errores: preview.errores.length
+    }, ...h]);
+    // solo se suben los legajos nuevos o modificados: los que no cambiaron no se re-envían ni obligan a los demás usuarios a re-bajarlos.
+    const rowsToSync = preview.changedRecords.map(plantelRecordToRow);
+    const doneFileName = fileName;
+    setStage("idle"); setRawRows(null); setMapping({}); setFileName("");
+    if(rowsToSync.length){
+      setSyncStatus({done:0, total:rowsToSync.length});
+      upsertInBatches(PLANTEL_TABLE, rowsToSync, "legajo", (done,total)=>setSyncStatus({done,total}))
+        .then(()=> setSyncStatus(null))
+        .catch(err=>{ setSyncStatus(null); setError("No se pudo guardar el plantel (\""+doneFileName+"\") en el servidor: " + (err && err.message ? err.message : String(err))); });
+    }
+  }
+  function cancelar(){ setStage("idle"); setRawRows(null); setMapping({}); setFileName(""); setError(null); }
+
+  return (
+    <div className="tabpanel">
+      <div className="card motivo-settings">
+        <h3>Gestión de Plantel</h3>
+        <p className="hint">
+          {plantelActive
+            ? <React.Fragment>Plantel cargado: <b>{fmt(plantel.length)}</b> legajos · Última actualización: <b>{plantelUpdatedAt ? plantelUpdatedAt.toLocaleString("es-AR") : "—"}</b>. La dotación y los jornales del resto de la herramienta se calculan a partir de este plantel (alta/baja), no contando filas.</React.Fragment>
+            : <React.Fragment>Sin plantel cargado — la dotación y el ausentismo se siguen calculando contando filas del Excel de ausentismo, como hasta ahora. Subí un plantel (Legajo, Fecha de Alta, Fecha de Baja y, si querés, UN/Sector/Gerencia/Departamento/Empresa) para pasar al cálculo por días activos.</React.Fragment>}
+        </p>
+        {stage==="idle" && (
+          <div style={{display:"flex", gap:10, flexWrap:"wrap"}}>
+            <PlantelUploadForm onFile={onFile} label={plantelActive ? "Actualizar plantel" : "Subir plantel"} loading={loading} />
+            <span className="hint">Acepta .xlsx o .csv. Se reconocen encabezados como "Legajo", "Fecha de Alta"/"Fecha cálculo vacaciones"/"Fecha de Ingreso", "Fecha de Baja"/"Fecha de egreso", "Unidad de Negocio", "Sector", etc.</span>
+          </div>
+        )}
+        {syncStatus && <p className="hint">Guardando en el servidor… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}</p>}
+        {error && <div className="warn-banner">{error}</div>}
+      </div>
+
+      {stage==="mapping" && (
+        <div className="card table-card">
+          <h3>Confirmá las columnas — {fileName}</h3>
+          <p className="caption">Elegí qué columna del archivo corresponde a cada campo. Legajo y Fecha de Alta son obligatorios.</p>
+          <div className="toggle-grid">
+            {PLANTEL_FIELD_ORDER.map(f => (
+              <div key={f} className="field">
+                <label>{PLANTEL_FIELD_LABELS[f]}{PLANTEL_REQUIRED_FIELDS.includes(f) ? " *" : ""}</label>
+                <select value={mapping[f]==null?-1:mapping[f]} onChange={e=>setMapping(m=>({...m, [f]: parseInt(e.target.value,10)}))}>
+                  <option value={-1}>— No usar —</option>
+                  {header.map((h,i)=>(<option key={i} value={i}>{String(h||"(columna "+(i+1)+")")}</option>))}
+                </select>
+              </div>
+            ))}
+          </div>
+          {missingRequired.length>0 && <div className="warn-banner">Faltan mapear campos obligatorios: {missingRequired.map(f=>PLANTEL_FIELD_LABELS[f]).join(", ")}.</div>}
+          <div style={{display:"flex", gap:10}}>
+            <button className="btn" disabled={missingRequired.length>0} onClick={()=>setStage("preview")}>Continuar</button>
+            <button className="btn secondary" onClick={cancelar}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {stage==="preview" && preview && (
+        <div className="card table-card">
+          <h3>Resumen de la carga — {fileName}</h3>
+          <div className="kpi-grid">
+            <KpiTile label="Registros encontrados" value={preview.totalEncontrados} />
+            <KpiTile label="Registros nuevos" value={preview.nuevos} />
+            <KpiTile label="Registros modificados" value={preview.modificados} />
+            <KpiTile label="Registros con errores" value={preview.errores.length} />
+          </div>
+          {preview.descartados>0 && <p className="hint">Se descartaron <b>{fmt(preview.descartados)}</b> legajo(s) con baja anterior al <b>{fmtDateFromTs(preview.cutoffTs)}</b> (primer mes con datos de ausentismo): no aportan días a la dotación ni a los jornales, así que no se cargan ni ocupan espacio en la base.</p>}
+          {preview.noIncluidos>0 && <p className="hint">Hay <b>{fmt(preview.noIncluidos)}</b> legajo(s) del plantel actual que no aparecen en este archivo — se conservan sin cambios (no se borran automáticamente).</p>}
+          {preview.errores.length>0 && (
+            <React.Fragment>
+              <button type="button" className="btn secondary small" onClick={()=>setErrAudit(true)}>Ver detalle de errores</button>
+              {errAudit && (
+                <AuditModal
+                  title="Filas con errores"
+                  rows={preview.errores}
+                  onClose={()=>setErrAudit(false)}
+                  cols={["Fila","Legajo","Problema"]}
+                  rowToArr={r=>[r.row, r.legajo, r.problem]}
+                />
+              )}
+            </React.Fragment>
+          )}
+          <div style={{display:"flex", gap:10, marginTop:6}}>
+            <button className="btn" onClick={confirmar}>Confirmar carga</button>
+            <button className="btn secondary" onClick={cancelar}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {!soloCarga && plantelActive && globalPlantelStats && (
+        <div className="card table-card">
+          <h3>Control de consistencia</h3>
+          <p className="caption">Alcance actual (mismos filtros que Resumen) · Período: {diasPeriodoLabel}</p>
+          <div className="overflow-x">
+            <table>
+              <thead><tr><SortTh k="name" label="Indicador" sort={indSort.sort} toggle={indSort.toggle} /><SortTh k="v" label="Valor" className="num" sort={indSort.sort} toggle={indSort.toggle} /></tr></thead>
+              <tbody>
+                {indSort.sorted.map(r=>(<tr key={r.name}><td>{r.name}</td><td className="num">{fmt(r.v)}</td></tr>))}
+                <tr className="total-row"><td>Desvío</td><td className="num">{fmtPct(globalPlantelStats.pct,2)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {plantelHistorial.length>0 && (
+        <div className="card table-card">
+          <h3>Historial de cargas (esta sesión)</h3>
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="fecha" label="Fecha y hora" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="archivo" label="Archivo" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="encontrados" label="Encontrados" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="nuevos" label="Nuevos" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="modificados" label="Modificados" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+                <SortTh k="errores" label="Errores" className="num" sort={histSort.sort} toggle={histSort.toggle} />
+              </tr></thead>
+              <tbody>
+                {histSort.sorted.map((h,i)=>(
+                  <tr key={i}>
+                    <td>{h.fecha.toLocaleString("es-AR")}</td>
+                    <td>{h.archivo}</td>
+                    <td className="num">{fmt(h.encontrados)}</td>
+                    <td className="num">{fmt(h.nuevos)}</td>
+                    <td className="num">{fmt(h.modificados)}</td>
+                    <td className="num">{fmt(h.errores)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {!soloCarga && <DbUsageCard usage={dbUsage} error={dbUsageError} checking={dbChecking} onCheck={onCheckDb} rowsPerMonth={dbRowsPerMonth} />}
+    </div>
+  );
+}
+
+/* ===================== tabs ===================== */
+/* ---- Resumen: cuadro por agrupador (como el cuadro mensual de RRHH) ----
+   Por unidad: base de jornadas y dotación (del plantel, igual que «Cumplimiento del objetivo»), ausencias pagas (ENF, ART, LIC VS) y no pagas
+   (NO JUST, JUST, SUSP) según el «Agrupador cuadro presidencia» de cada día, totales y vacaciones (agrupador de presentismo = V). % = cantidad ÷ base
+   de jornadas. Cuenta TODAS las ausencias del período y de los filtros de arriba (no aplica los motivos excluidos del cálculo del objetivo).
+   Si aparece un agrupador que no es ninguno de esos, va a una columna «Otros» (solo se muestra si hay). Cada cantidad abre el detalle. */
+const CUADRO_AP = ["ENF","ART","LIC VS"];
+const CUADRO_ANP = ["NO JUST","JUST","SUSP"];
+const cuadroPres = r => String(r.presidencia||"").trim().toUpperCase();
+function CuadroAgrupadorCard({rankingUnits, scopeUnitsMap, plantelActive, dotacionTotal, jornalesTotal, scopeEmpleados, openAudit, auditDotacion}){
+  const fila = (name, rows, base, dot) => {
+    const c = {}; let vac = 0; const otrosAP = new Set(), otrosANP = new Set();
+    rows.forEach(r=>{
+      if(r.cat==="V"){ vac++; return; }
+      if(r.cat!=="AP" && r.cat!=="ANP") return;
+      const p = cuadroPres(r), grupo = r.cat==="AP" ? CUADRO_AP : CUADRO_ANP;
+      let k = p;
+      if(!grupo.includes(p)){ k = r.cat==="AP" ? "__OAP" : "__OANP"; (r.cat==="AP" ? otrosAP : otrosANP).add(p||"(vacío)"); }
+      c[k] = (c[k]||0)+1;
+    });
+    const ap = CUADRO_AP.reduce((t,k)=>t+(c[k]||0),0)+(c.__OAP||0);
+    const anp = CUADRO_ANP.reduce((t,k)=>t+(c[k]||0),0)+(c.__OANP||0);
+    return {name, rows, base, dot, c, ap, anp, tot:ap+anp, vac, otrosAP, otrosANP};
+  };
+  const filas = useMemo(()=> rankingUnits.map(u=>fila(u.name, scopeUnitsMap.get(u.name)||[], plantelActive ? u.jornalesDotacion : u.base, plantelActive ? u.dotacionEquivalente : u.dotacion)), [rankingUnits, scopeUnitsMap, plantelActive]);
+  const total = useMemo(()=> fila("Total", filas.flatMap(f=>f.rows), plantelActive ? jornalesTotal : filas.reduce((t,f)=>t+(f.base||0),0), plantelActive ? dotacionTotal : scopeEmpleados), [filas, plantelActive, jornalesTotal, dotacionTotal, scopeEmpleados]);
+  const verOAP = (total.c.__OAP||0)>0, verOANP = (total.c.__OANP||0)>0;
+  // qué filas cuenta cada columna (para abrir el detalle)
+  const PRED = {
+    "__OAP": r=>r.cat==="AP" && !CUADRO_AP.includes(cuadroPres(r)), "__OANP": r=>r.cat==="ANP" && !CUADRO_ANP.includes(cuadroPres(r)),
+    "__AP": r=>r.cat==="AP", "__ANP": r=>r.cat==="ANP", "__TOT": r=>isCountedCat(r.cat), "__VAC": r=>r.cat==="V"
+  };
+  const predDe = k => PRED[k] || (r=>(CUADRO_AP.includes(k) ? r.cat==="AP" : r.cat==="ANP") && cuadroPres(r)===k);
+  const NOMBRE = {"__OAP":"Otros pagos", "__OANP":"Otros no pagos", "__AP":"Total ausentes pagos", "__ANP":"Total ausentes no pagos", "__TOT":"Total ausentes", "__VAC":"Vacaciones"};
+  const pct = (n, base) => base>0 ? fmtPct(n/base*100, 1) : "—";
+  const par = (f, k, n, fuerte) => [
+    <td key={k} className="num" style={fuerte ? {fontWeight:700} : undefined}>{n ? <CellLink onClick={()=>openAudit((NOMBRE[k]||k)+" — "+f.name, f.rows.filter(predDe(k)))}>{fmt(n)}</CellLink> : <span className="hint">0</span>}</td>,
+    <td key={k+"%"} className="num hint" style={fuerte ? {fontWeight:700, color:"var(--ink)"} : undefined}>{pct(n, f.base)}</td>
+  ];
+  const colsAP = [...CUADRO_AP, ...(verOAP ? ["__OAP"] : [])], colsANP = [...CUADRO_ANP, ...(verOANP ? ["__OANP"] : [])];
+  const banda = (color) => ({background:"color-mix(in srgb, "+color+" 16%, transparent)", textAlign:"center", letterSpacing:".06em"});
+  const renderFila = (f, esTotal) => (
+    <tr key={f.name} className={esTotal ? "total-row" : undefined}>
+      <td style={{whiteSpace:"nowrap"}}>{f.name}</td>
+      <td className="num">{!esTotal && f.base ? <CellLink onClick={()=>auditDotacion({name:f.name})}>{fmt(f.base)}</CellLink> : fmt(f.base)}</td>
+      <td className="num">{!esTotal && f.dot ? <CellLink onClick={()=>auditDotacion({name:f.name})}>{fmt(f.dot)}</CellLink> : fmt(f.dot)}</td>
+      {colsAP.map(k=>par(f, k, f.c[k]||0))}
+      {par(f, "__AP", f.ap, true)}
+      {colsANP.map(k=>par(f, k, f.c[k]||0))}
+      {par(f, "__ANP", f.anp, true)}
+      {par(f, "__TOT", f.tot, true)}
+      {par(f, "__VAC", f.vac)}
+    </tr>
+  );
+  return (
+    <div className="card table-card">
+      <h3>Cuadro de ausentismo por agrupador</h3>
+      <div className="caption">Ausencias pagas y no pagas según el «Agrupador cuadro presidencia», y vacaciones, por unidad. El % es sobre la base de jornadas{plantelActive ? " (jornales de dotación del plantel)" : ""}. Cuenta todas las ausencias del período y los filtros elegidos arriba (no descuenta los motivos excluidos del objetivo). Hacé clic en una cantidad para ver y descargar el detalle.
+        {(verOAP || verOANP) && <React.Fragment> «Otros» = agrupadores distintos: {[...total.otrosAP, ...total.otrosANP].join(", ")}.</React.Fragment>}</div>
+      <div className="overflow-x">
+        <table>
+          <thead>
+            <tr>
+              <th rowSpan="2" style={{verticalAlign:"bottom"}}>Unidad</th>
+              <th colSpan="2" style={banda("var(--cat-p)")}>PRESENTES</th>
+              <th colSpan={colsAP.length*2+2} style={banda("var(--cat-ap)")}>AUSENTES PAGOS</th>
+              <th colSpan={colsANP.length*2+2} style={banda("var(--cat-anp)")}>AUSENTES NO PAGOS</th>
+              <th colSpan="2" style={banda("var(--critical)")}>TOTAL AUSENTES</th>
+              <th colSpan="2" style={banda("var(--cat-v)")}>VACACIONES</th>
+            </tr>
+            <tr>
+              <th className="num">Base jornadas</th><th className="num">Dotación</th>
+              {colsAP.map(k=>[<th key={k} className="num">{NOMBRE[k]||k}</th>, <th key={k+"%"} className="num">%</th>])}
+              <th className="num">Total</th><th className="num">%</th>
+              {colsANP.map(k=>[<th key={k} className="num">{NOMBRE[k]||k}</th>, <th key={k+"%"} className="num">%</th>])}
+              <th className="num">Total</th><th className="num">%</th>
+              <th className="num">Total</th><th className="num">%</th>
+              <th className="num">Vacaciones</th><th className="num">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filas.map(f=>renderFila(f, false))}
+            {renderFila(total, true)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+function ResumenTab({rankingUnits, objetivo, scopeUnitsMap, excludedMotivos, setExcludedMotivos, motivoUniverse, scopeEmpleados, scopeAgg, plantelActive, scopePlantel, scopeMonthKeys, dotacionTotal, jornalesTotal, cutoffTs, verFiltros}){
+  const [audit, setAudit] = useState(null);
+  const unitSort = useTableSort(rankingUnits, {
+    name:{get:u=>u.name, type:"text"},
+    dot:{get:u=>plantelActive ? u.dotacionEquivalente : u.dotacion, type:"num"},
+    jor:{get:u=>plantelActive ? u.jornalesDotacion : 0, type:"num"},
+    aus:{get:u=>u.ausencias, type:"num"},
+    pct:{get:u=>u.pct, type:"num"},
+    est:{get:u=>u.pct, type:"num"}
+  });
+  function openAudit(title, rows, cols, rowToArr){ setAudit({title, rows, cols, rowToArr}); }
+  function auditAusencias(u){ openAudit('Ausencias contabilizadas — '+u.name, (scopeUnitsMap.get(u.name)||[]).filter(r=>isCountedCat(r.cat) && !excludedMotivos.has(motivoKeyOf(r)))); }
+  function auditDotacion(u){
+    if(plantelActive){
+      const roster = (scopePlantel||[]).filter(p => (p.unidad||"(Sin unidad)")===u.name).map(p => {
+        let dias = 0;
+        scopeMonthKeys.forEach(mk => { const {year,month} = monthKeyParts(mk); dias += activeDaysInMonth(p.altaTs, p.bajaTs, year, month, cutoffTs); });
+        return {...p, _diasActivos: dias};
+      });
+      openAudit('Dotación (plantel) — '+u.name, roster, AUDIT_COLS_PLANTEL, auditPlantelRowArr);
+      return;
+    }
+    const rows = scopeUnitsMap.get(u.name)||[];
+    const seen = new Set(); const roster=[];
+    rows.forEach(r=>{ const k=(r.legajo||"").toUpperCase(); if(k && !seen.has(k)){ seen.add(k); roster.push(r); } });
+    openAudit('Dotación (legajos únicos) — '+u.name, roster);
+  }
+  const allScopeRows = useMemo(()=> Array.from(scopeUnitsMap.values()).flat(), [scopeUnitsMap]);
+  function auditMotivo(m){
+    openAudit('Ausencias — '+m.label, allScopeRows.filter(r=>isCountedCat(r.cat) && motivoKeyOf(r)===m.key));
+  }
+  const peor = rankingUnits.length ? rankingUnits.reduce((a,b)=> b.pct>a.pct ? b : a) : null;
+  let objetivoNote = null;
+  if(peor){
+    if(peor.pct>objetivo){
+      const denomPeor = plantelActive ? peor.jornalesDotacion : peor.base;
+      const ausenciasObjetivo = Math.floor(denomPeor*objetivo/100);
+      const bajar = Math.max(0, peor.ausencias-ausenciasObjetivo);
+      objetivoNote = <React.Fragment>
+        <b>{peor.name}</b> es la unidad más alejada del objetivo: hoy está en <b>{fmtPct(peor.pct,1)}</b> ({fmt(peor.ausencias)} ausencias ÷ {fmt(denomPeor)} {plantelActive ? "jornales de dotación" : "filas activas"} × 100).
+        Manteniendo la dotación y el resto de filas igual, necesitaría bajar a <b>{fmt(ausenciasObjetivo)}</b> ausencias (<b>-{fmt(bajar)}</b>) para llegar al objetivo de {fmtPct(objetivo,1)}.
+      </React.Fragment>;
+    } else {
+      objetivoNote = <React.Fragment>Todas las unidades están dentro del objetivo de {fmtPct(objetivo,1)} con los filtros actuales.</React.Fragment>;
+    }
+  }
+  return (
+    <div className="tabpanel">
+      <div className="card chart-card">
+        <h3>Ranking de unidades de negocio</h3>
+        <p className="desc">Ausentismo (AP+ANP ÷ {plantelActive ? "jornales de dotación del plantel" : "filas activas"}) por unidad, en orden fijo. La línea punteada marca el objetivo.</p>
+        <RankingChart units={rankingUnits} objetivo={objetivo} />
+      </div>
+      <div className="card table-card">
+        <h3>Cumplimiento del objetivo</h3>
+        <div className="caption">Hacé clic en Dotación, Jornales o Ausencias para ver y copiar el detalle de esas filas.</div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <SortTh k="name" label="Unidad" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="dot" label={plantelActive ? "Dotación equiv." : "Dotación"} className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="jor" label="Jornales" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="aus" label="Ausencias" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="pct" label="Ausentismo" className="num" sort={unitSort.sort} toggle={unitSort.toggle} />
+              <SortTh k="est" label="Estado" sort={unitSort.sort} toggle={unitSort.toggle} />
+            </tr></thead>
+            <tbody>
+              {unitSort.sorted.map(u=>(
+                <tr key={u.name}>
+                  <td>{u.name}</td>
+                  <td className="num"><CellLink onClick={()=>auditDotacion(u)}>{fmt(plantelActive ? u.dotacionEquivalente : u.dotacion)}</CellLink></td>
+                  <td className="num"><CellLink onClick={()=>auditDotacion(u)}>{fmt(plantelActive ? u.jornalesDotacion : 0)}</CellLink></td>
+                  <td className="num"><CellLink onClick={()=>auditAusencias(u)}>{fmt(u.ausencias)}</CellLink></td>
+                  <td className="num">{fmtPct(u.pct,1)}</td>
+                  <td><SemChip pct={u.pct} objetivo={objetivo} /></td>
+                </tr>
+              ))}
+              <tr className="total-row">
+                <td>Total</td>
+                <td className="num">{fmt(plantelActive ? dotacionTotal : scopeEmpleados)}</td>
+                <td className="num">{fmt(plantelActive ? jornalesTotal : 0)}</td>
+                <td className="num">{fmt(scopeAgg.ausencias)}</td>
+                <td className="num">{fmtPct(scopeAgg.pct,1)}</td>
+                <td><SemChip pct={scopeAgg.pct} objetivo={objetivo} /></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        {objetivoNote && <p className="caption" style={{marginTop:4}}>{objetivoNote}</p>}
+      </div>
+      <CuadroAgrupadorCard rankingUnits={rankingUnits} scopeUnitsMap={scopeUnitsMap} plantelActive={plantelActive} dotacionTotal={dotacionTotal} jornalesTotal={jornalesTotal}
+        scopeEmpleados={scopeEmpleados} openAudit={openAudit} auditDotacion={auditDotacion} />
+      {verFiltros && <MotivoChecklist motivoUniverse={motivoUniverse} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />}
+      {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} cols={audit.cols} rowToArr={audit.rowToArr} />}
+    </div>
+  );
+}
+function ResumenGerenciaTab({parsed, plantel, objetivo, mesFilter, empresaIncluded, excludedMotivos, setExcludedMotivos, scopeMonthKeys, verFiltros}){
+  const gerencias = parsed.gerencias || [];
+  const [gerenciaSel, setGerenciaSel] = useState(gerencias[0] || "");
+  useEffect(()=>{ if((!gerenciaSel || !gerencias.includes(gerenciaSel)) && gerencias.length) setGerenciaSel(gerencias[0]); }, [gerencias.join("|")]);
+  const [audit, setAudit] = useState(null);
+
+  const baseRecords = useMemo(()=>{
+    if(!gerenciaSel) return [];
+    return parsed.records.filter(r=> r.valid
+      && r.gerencia===gerenciaSel
+      && (!mesFilter || (r.monthKey && mesFilter.has(r.monthKey)))
+      && (!empresaIncluded || !r.empresa || empresaIncluded.has(r.empresa)));
+  }, [parsed, gerenciaSel, mesFilter, empresaIncluded]);
+
+  const motivoUniverseLocal = useMemo(() => {
+    if(!parsed.hasMotivo) return [];
+    const counts = new Map();
+    baseRecords.forEach(r => {
+      if(!isCountedCat(r.cat)) return;
+      const k = motivoKeyOf(r);
+      counts.set(k, (counts.get(k)||0)+1);
+    });
+    return parsed.motivoUniverse.map(m => ({...m, count: counts.get(m.key)||0}));
+  }, [parsed, baseRecords]);
+  function auditMotivo(m){
+    openAudit('Ausencias — '+m.label, baseRecords.filter(r=>isCountedCat(r.cat) && motivoKeyOf(r)===m.key));
+  }
+
+  const deptUnitsMap = useMemo(()=> buildGroupMap(baseRecords, "departamento"), [baseRecords]);
+
+  const plantelDept = useMemo(()=>{
+    if(!plantel || !plantel.length || !gerenciaSel) return [];
+    return plantel.filter(p=> p.gerencia===gerenciaSel && (!empresaIncluded || !p.empresa || empresaIncluded.has(p.empresa)));
+  }, [plantel, gerenciaSel, empresaIncluded]);
+  const plantelActive = plantelDept.length>0;
+
+  const deptRanking = useMemo(()=>{
+    const base = Array.from(deptUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
+    if(plantelActive){
+      base.forEach(u=>{
+        const employees = plantelDept.filter(p=> (p.departamento||"(Sin departamento)")===u.name);
+        const st = plantelScopeStats(employees, scopeMonthKeys, parsed.maxTs);
+        u.jornalesDotacion = st.jornalesDotacion;
+        u.dotacionEquivalente = st.dotacionEquivalente;
+        u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
+      });
+    }
+    return base.sort((a,b)=>b.pct-a.pct);
+  }, [deptUnitsMap, excludedMotivos, plantelActive, plantelDept, scopeMonthKeys, parsed.maxTs]);
+
+  const totalDotacion = plantelActive ? deptRanking.reduce((a,u)=>a+(u.dotacionEquivalente||0),0) : new Set(baseRecords.map(r=>r.legajo.toUpperCase())).size;
+  const totalJornales = plantelActive ? deptRanking.reduce((a,u)=>a+(u.jornalesDotacion||0),0) : 0;
+  const totalAusencias = deptRanking.reduce((a,u)=>a+u.ausencias,0);
+  const totalBase = deptRanking.reduce((a,u)=>a+u.base,0);
+  const totalPct = plantelActive ? (totalJornales>0 ? totalAusencias/totalJornales*100 : 0) : (totalBase>0 ? totalAusencias/totalBase*100 : 0);
+
+  const deptSort = useTableSort(deptRanking, {
+    name:{get:u=>u.name, type:"text"},
+    dot:{get:u=>plantelActive ? u.dotacionEquivalente : u.dotacion, type:"num"},
+    jor:{get:u=>plantelActive ? u.jornalesDotacion : 0, type:"num"},
+    aus:{get:u=>u.ausencias, type:"num"},
+    pct:{get:u=>u.pct, type:"num"},
+    est:{get:u=>u.pct, type:"num"}
+  });
+
+  function openAudit(title, rows){ setAudit({title, rows}); }
+
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field">
+          <label>Gerencia</label>
+          <select value={gerenciaSel} onChange={e=>setGerenciaSel(e.target.value)}>
+            {gerencias.map(g=>(<option key={g} value={g}>{g}</option>))}
+          </select>
+        </div>
+      </div>
+      {!gerencias.length && <div className="hint">No hay gerencias detectadas en el archivo.</div>}
+      {gerenciaSel && (
+        <React.Fragment>
+          <div className="card chart-card">
+            <h3>Ranking de departamentos — {gerenciaSel}</h3>
+            <p className="desc">Ausentismo (AP+ANP ÷ {plantelActive ? "jornales de dotación del plantel" : "filas activas"}) por departamento, dentro de {gerenciaSel}. La línea punteada marca el objetivo.</p>
+            <RankingChart units={deptRanking} objetivo={objetivo} />
+          </div>
+          <div className="card table-card">
+            <h3>Cumplimiento del objetivo — {gerenciaSel}</h3>
+            <div className="caption">Hacé clic en Dotación o Ausencias para ver y copiar el detalle de esas filas.</div>
+            <div className="overflow-x">
+              <table>
+                <thead><tr>
+                  <SortTh k="name" label="Departamento" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="dot" label={plantelActive ? "Dotación equiv." : "Dotación"} className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="jor" label="Jornales" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="aus" label="Ausencias" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="pct" label="Ausentismo" className="num" sort={deptSort.sort} toggle={deptSort.toggle} />
+                  <SortTh k="est" label="Estado" sort={deptSort.sort} toggle={deptSort.toggle} />
+                </tr></thead>
+                <tbody>
+                  {!deptRanking.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin datos para esta gerencia con los filtros actuales.</td></tr>}
+                  {deptSort.sorted.map(u=>(
+                    <tr key={u.name}>
+                      <td>{u.name}</td>
+                      <td className="num"><CellLink onClick={()=>openAudit('Dotación — '+u.name, deptUnitsMap.get(u.name)||[])}>{fmt(plantelActive ? u.dotacionEquivalente : u.dotacion)}</CellLink></td>
+                      <td className="num">{fmt(plantelActive ? u.jornalesDotacion : 0)}</td>
+                      <td className="num"><CellLink onClick={()=>openAudit('Ausencias — '+u.name, (deptUnitsMap.get(u.name)||[]).filter(r=>isCountedCat(r.cat) && !excludedMotivos.has(motivoKeyOf(r))))}>{fmt(u.ausencias)}</CellLink></td>
+                      <td className="num">{fmtPct(u.pct,1)}</td>
+                      <td><SemChip pct={u.pct} objetivo={objetivo} /></td>
+                    </tr>
+                  ))}
+                  {deptRanking.length>0 && (
+                    <tr className="total-row">
+                      <td>Total</td>
+                      <td className="num">{fmt(totalDotacion)}</td>
+                      <td className="num">{fmt(totalJornales)}</td>
+                      <td className="num">{fmt(totalAusencias)}</td>
+                      <td className="num">{fmtPct(totalPct,1)}</td>
+                      <td><SemChip pct={totalPct} objetivo={objetivo} /></td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </React.Fragment>
+      )}
+      {verFiltros && <MotivoChecklist motivoUniverse={motivoUniverseLocal} excluded={excludedMotivos} onChange={setExcludedMotivos} onAudit={auditMotivo} />}
+      {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} />}
+    </div>
+  );
+}
+/* ===================== Cuadro Diario ===================== */
+const CUADRO_COLS = [
+  {key:"presProp",  label:"Presentes Propios",       cat:"P"},
+  {key:"presContr", label:"Presentes Contratados",   cat:"P"},
+  {key:"ap",        label:"Ausentes (Pagos)",        cat:"AP"},
+  {key:"anp",       label:"Ausentes (No Pagos)",     cat:"ANP"},
+  {key:"ce",        label:"Sin Tareas (No Pagos)",   cat:"CE"},
+  {key:"vac",       label:"Vacaciones",              cat:"V"},
+  {key:"total",     label:"Total Activos"},
+  {key:"sub",       label:"Sub-Cont"}
+];
+const CUADRO_ACTIVOS = ["presProp","presContr","ap","anp","ce","vac"];
+const CUADRO_SORT_COLS = {__unit:{get:row=>row.label, type:"text"}};
+CUADRO_COLS.forEach(c=>{ CUADRO_SORT_COLS[c.key] = {get:row=>row.recs[c.key].length, type:"num"}; });
+const CUADRO_AUDIT_COLS = ["Legajo","Nombre","Empresa","Tipo contratación","Estado","Id Motivo","Motivo"];
+function cuadroAuditRow(r){ return [r.legajo, r.nombre, r.empresa, r.tipoContrat||"", r.estado, r.idMotivo, r.motivo]; }
+function dateKeyToLabel(dk){ const p = (dk||"").split("-"); return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : (dk||""); }
+
+function CuadroDiarioTab({parsed, soloUnidades}){
+  // Sin filtros globales (mes, gerencia, empresa, motivos): el cuadro es la foto de UN día completo.
+  const base = useMemo(()=> parsed.records.filter(r=>r.valid && r.cat!=="BAJA"), [parsed]);
+  const dateKeys = useMemo(()=> Array.from(new Set(base.map(r=>r.dateKey))).sort().reverse(), [base]);
+  const [fechaSel, setFechaSel] = useKeptState("cd.fecha", null);
+  const fecha = dateKeys.includes(fechaSel) ? fechaSel : (dateKeys[0] || "");
+  const [audit, setAudit] = useState(null);
+  const [copied, setCopied] = useState("idle");
+
+  const dayRecords = useMemo(()=> base.filter(r=>r.dateKey===fecha), [base, fecha]);
+
+  const model = useMemo(()=>{
+    const servicioMap = new Map(Object.keys(EMPRESA_SERVICIO).map(k=>[normTxt(k), EMPRESA_SERVICIO[k]]));
+    const cells = new Map(); // unidad -> {col: [registros]}
+    const unmapped = new Set();
+    let sinTipo = 0;
+    const cellOf = (unit, col) => {
+      if(!cells.has(unit)) cells.set(unit, {});
+      const o = cells.get(unit);
+      if(!o[col]) o[col] = [];
+      return o[col];
+    };
+    UNIT_ORDER.forEach(u=>cells.set(u, {}));
+    dayRecords.forEach(r=>{
+      if(!r.tipoContrat) sinTipo++;
+      const propio = normTxt(r.empresa)==="propios";
+      const eventual = normTxt(r.tipoContrat)==="eventual"; // vacío o cualquier otro valor se trata como Propios
+      if(propio){
+        const unit = r.unidad || "(Sin unidad)";
+        if(r.cat==="P") cellOf(unit, eventual ? "presContr" : "presProp").push(r);
+        else if(r.cat==="AP") cellOf(unit, "ap").push(r);
+        else if(r.cat==="ANP") cellOf(unit, "anp").push(r);
+        else if(r.cat==="CE") cellOf(unit, "ce").push(r);
+        else if(r.cat==="V") cellOf(unit, "vac").push(r);
+      } else if(r.cat==="P"){
+        const mapped = servicioMap.get(normTxt(r.empresa));
+        if(!mapped) unmapped.add(r.empresa || "(vacía)");
+        cellOf(mapped || r.unidad || "(Sin unidad)", "sub").push(r);
+      }
+    });
+    const extra = Array.from(cells.keys()).filter(u=>!UNIT_ORDER.includes(u)).sort();
+    const units = UNIT_ORDER.concat(extra);
+    const rows = units.map(u=>{
+      const c = cells.get(u) || {};
+      const get = k => c[k] || [];
+      const total = CUADRO_ACTIVOS.reduce((a,k)=>a.concat(get(k)), []);
+      return {unit:u, label:CUADRO_UNIT_LABEL[u]||u, recs:{presProp:get("presProp"), presContr:get("presContr"), ap:get("ap"), anp:get("anp"), ce:get("ce"), vac:get("vac"), total, sub:get("sub")}};
+    }).filter(row=>!soloUnidades || soloUnidades.has(row.unit));   // Visor: solo la(s) unidad(es) asignadas
+    const totalRecs = {};
+    CUADRO_COLS.forEach(col=>{ totalRecs[col.key] = rows.reduce((a,row)=>a.concat(row.recs[col.key]), []); });
+    // Total Plantel Contratados: todos los propios con tipo "Eventual" (P+AP+ANP+CE+V), cualquiera sea su estado del día
+    const contratados = totalRecs.total.filter(r=>normTxt(r.tipoContrat)==="eventual");
+    return {rows, totalRecs, contratados, unmapped:Array.from(unmapped), sinTipo};
+  }, [dayRecords, soloUnidades]);
+
+  const rowSort = useTableSort(model.rows, CUADRO_SORT_COLS);
+
+  const fechaLabel = dateKeyToLabel(fecha);
+  function openAudit(colLabel, unitLabel, recs){ setAudit({title: colLabel+" · "+unitLabel+" · "+fechaLabel, rows:recs}); }
+  function numCell(recs, colLabel, unitLabel){
+    return recs.length ? <CellLink onClick={()=>openAudit(colLabel, unitLabel, recs)}>{fmt(recs.length)}</CellLink> : "-";
+  }
+
+  async function copyTable(){
+    const lines = [["Unidad"].concat(CUADRO_COLS.map(c=>c.label)).join("\t")];
+    model.rows.forEach(row=> lines.push([row.label].concat(CUADRO_COLS.map(c=>row.recs[c.key].length)).join("\t")));
+    lines.push(["Total"].concat(CUADRO_COLS.map(c=>model.totalRecs[c.key].length)).join("\t"));
+    const text = lines.join("\n");
+    try{
+      await navigator.clipboard.writeText(text);
+      setCopied("ok");
+    }catch(e){
+      try{
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position="fixed"; ta.style.opacity="0";
+        document.body.appendChild(ta); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied("ok");
+      }catch(e2){ setCopied("err"); }
+    }
+    setTimeout(()=>setCopied("idle"), 2500);
+  }
+
+  const totalActivos = model.totalRecs.total.length;
+  const totalSub = model.totalRecs.sub.length;
+
+  return (
+    <div className="tabpanel">
+      <div className="print-header">
+        <h2>Cuadro Diario</h2>
+        <p className="sub">Fecha: {fechaLabel || "—"}</p>
+      </div>
+      <div className="card table-card">
+        <h3>Cuadro Diario</h3>
+        <div className="caption">Foto de un día completo, sin filtros globales. Hacé clic en un número para ver y copiar los registros que lo componen.</div>
+        <div className="filters-bar no-print">
+          <div className="field">
+            <label>Fecha</label>
+            <select value={fecha} onChange={e=>setFechaSel(e.target.value)}>
+              {dateKeys.map(dk=>(<option key={dk} value={dk}>{dateKeyToLabel(dk)}</option>))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Registros del día</label>
+            <span style={{fontWeight:700,fontSize:15,padding:"6px 0"}}>{fmt(dayRecords.length)}</span>
+          </div>
+          <button type="button" className="btn small" onClick={copyTable} disabled={!dayRecords.length}>
+            {copied==="ok" ? "Copiado ✓" : copied==="err" ? "No se pudo copiar" : "Copiar tabla"}
+          </button>
+        </div>
+
+        {!dayRecords.length && <div className="warn-banner">Sin datos para la fecha</div>}
+        {dayRecords.length>0 && model.sinTipo>0 && (
+          <div className="warn-banner">{fmt(model.sinTipo)} registro{model.sinTipo===1?"":"s"} de esta fecha sin "Agrup. tipo contratación": se tratan como Propios. Volvé a subir el archivo anual para completar el dato.</div>
+        )}
+        {model.unmapped.length>0 && (
+          <div className="warn-banner">Empresa sin mapear: {model.unmapped.join(", ")}</div>
+        )}
+
+        <div className="overflow-x">
+          <table>
+            <thead>
+              <tr>
+                <SortTh k="__unit" label="Unidad de negocio" sort={rowSort.sort} toggle={rowSort.toggle} />
+                {CUADRO_COLS.map(c=>(
+                  <SortTh key={c.key} k={c.key} label={c.label} className="num" sort={rowSort.sort} toggle={rowSort.toggle}
+                    style={c.cat ? {color:CAT_COLOR[c.cat], borderBottom:"3px solid "+CAT_COLOR[c.cat]} : undefined} />
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rowSort.sorted.map(row=>(
+                <tr key={row.unit}>
+                  <td>{row.label}</td>
+                  {CUADRO_COLS.map(c=>(<td key={c.key} className="num">{numCell(row.recs[c.key], c.label, row.label)}</td>))}
+                </tr>
+              ))}
+              <tr className="total-row">
+                <td>Total</td>
+                {CUADRO_COLS.map(c=>(<td key={c.key} className="num">{numCell(model.totalRecs[c.key], c.label, "Total")}</td>))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="kpi-grid">
+          <KpiTile label="Total Plantel Propios" value={totalActivos} />
+          <KpiTile label="Total Plantel Contratados" value={model.contratados.length} />
+          <KpiTile label="Total Sub-Contratados" value={totalSub} />
+          <KpiTile label="Total General del día" value={totalActivos + totalSub} month />
+        </div>
+      </div>
+      {audit && <AuditModal title={audit.title} rows={audit.rows} onClose={()=>setAudit(null)} cols={CUADRO_AUDIT_COLS} rowToArr={cuadroAuditRow} />}
+    </div>
+  );
+}
+function EvolucionTab({evoMonths, evoSeries, objetivo}){
+  return (
+    <div className="tabpanel">
+      <div className="card chart-card">
+        <h3>Evolución mensual del ausentismo</h3>
+        <p className="desc">Una línea por unidad de negocio, contando filas reales mes a mes (no depende del filtro de Mes). La línea punteada marca el objetivo.</p>
+        <EvolutionChart months={evoMonths} series={evoSeries} objetivo={objetivo} />
+        <div className="legend">
+          {evoSeries.map(s=>(<div key={s.name} className="item"><span className="line" style={{background:s.color}}></span>{s.name}</div>))}
+        </div>
+      </div>
+    </div>
+  );
+}
+function TiposTab({compositionData, apAnpData, motivoEntries, hasMotivo, soloApAnpYMotivo}){
+  return (
+    <div className="tabpanel">
+      {!soloApAnpYMotivo && (
+        <div className="card chart-card">
+          <h3>Composición de ausencias por unidad</h3>
+          <p className="desc">Ausencia (contabilizada: AP+ANP no excluidas por motivo) vs. Ausencia (excluida: CE+BAJA + motivos sin tildar abajo en Resumen) — no incluye Presente/Franco/Vacaciones.</p>
+          <CompositionChart units={compositionData} />
+        </div>
+      )}
+      <div className="card chart-card">
+        <h3>AP vs ANP por unidad</h3>
+        <p className="desc">Ausente pago vs. ausente no pago, entre las ausencias contabilizadas (no excluidas por motivo) de cada unidad.</p>
+        <CompositionChart units={apAnpData} cats={AP_ANP_CATS} />
+      </div>
+      {hasMotivo && (
+        <div className="card chart-card">
+          <h3>Motivo de las ausencias contabilizadas</h3>
+          <p className="desc">Distribución de motivos entre las filas AP/ANP que sí cuentan para el cálculo, con los filtros actuales.</p>
+          <MotivoChart entries={motivoEntries} />
+        </div>
+      )}
+    </div>
+  );
+}
+// Cuadro de filtro SÍ/NO, compacto en columnas (2-3 según el ancho), con el mismo título y la misma "Selección rápida" que el resto.
+// items: {key, label, ap?, anp?}. defaultKeys (opcional): selección que activa el botón "Por defecto".
+function ToggleList({title, items, included, onChange, columns, defaultKeys}){
+  const [open, setOpen] = useKeptState("fc.open|"+title, false); // retraído hasta que haga falta filtrar
+  if(!items.length) return null;
+  function toggle(key){
+    const next = new Set(included);
+    if(next.has(key)) next.delete(key); else next.add(key);
+    onChange(next);
+  }
+  const hasCats = items.some(it=>it.ap!=null || it.anp!=null);
+  const n = columns || 3;
+  return (
+    <div className="card motivo-settings">
+      <FilterCardHead title={title} open={open} onToggle={()=>setOpen(o=>!o)} summary={items.filter(i=>included.has(i.key)).length+" de "+items.length+" incluidos"} />
+      {open && (
+        <React.Fragment>
+          <QuickSelectBar all={items.map(i=>i.key)}
+            apKeys={hasCats ? items.filter(isApItem).map(i=>i.key) : null}
+            anpKeys={hasCats ? items.filter(isAnpItem).map(i=>i.key) : null}
+            defaultKeys={defaultKeys} selected={included} onChange={onChange} />
+          <div className="toggle-list-rows toggle-list-cols" style={{columnCount:n, columnGap:28, maxHeight:"none", overflowY:"visible", borderTop:"1px solid var(--border)"}}>
+            {items.map(it=>(
+              <div key={it.key} className="toggle-row" style={{padding:"5px 4px"}} onClick={()=>toggle(it.key)}>
+                <span>{it.label}</span>
+                <span className={"toggle-pill "+(included.has(it.key)?"yes":"no")}>{included.has(it.key)?"SÍ":"NO"}</span>
+              </div>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+/* ===================== Comité de ausentismo (dentro de Ranking) =====================
+   Por empleado y en una ventana de meses (por defecto los últimos 12 cargados): días ausentes AP, ANP y ENF, en qué meses faltó,
+   y detección de MICROAUSENTISMO: empleados que faltan en casi todos los meses con episodios cortos y repetidos. En un ranking por
+   días no aparecen, porque otros empleados suman más días en un solo período; acá se los detecta por la repetición mes a mes y se
+   muestra el patrón de motivo / razón de sus episodios. Una "ausencia" es una fila AP/ANP cuyo motivo cuenta para el cálculo
+   (mismos motivos tildados/destildados en Resumen). Un "episodio" es una racha de días ausentes seguidos (con fines de semana y
+   feriados en el medio). "ENF" = días con Agrupador cuadro presidencia "ENF". */
+function analizarComite(records, monthKeys, excludedMotivos){
+  const mset = new Set(monthKeys);
+  const exMot = excludedMotivos || new Set();
+  const by = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.legajo || !isCountedCat(r.cat) || !mset.has(r.monthKey) || exMot.has(motivoKeyOf(r))) return;
+    const k = r.legajo.toUpperCase();
+    if(!by.has(k)) by.set(k, []);
+    by.get(k).push(r);
+  });
+  const out = [];
+  by.forEach((rowsIn, k)=>{
+    const rows = rowsIn.slice().sort((a,b)=>a.ts-b.ts);
+    const dias = []; // un registro por día (si hubiera dos filas el mismo día, cuenta una)
+    rows.forEach(r=>{ if(!dias.length || dias[dias.length-1].ts!==r.ts) dias.push(r); });
+    const episodios = [];
+    dias.forEach(r=>{
+      const ep = episodios[episodios.length-1];
+      if(ep && gapIsBridgeable(ep.finTs, r.ts)){ ep.finTs = r.ts; ep.rows.push(r); }
+      else episodios.push({inicioTs:r.ts, finTs:r.ts, rows:[r]});
+    });
+    const porMes = {};
+    let ap=0, anp=0, enf=0;
+    dias.forEach(r=>{
+      const m = porMes[r.monthKey] || (porMes[r.monthKey] = {dias:0, inicios:0});
+      m.dias++;
+      if(r.cat==="AP") ap++; else anp++;
+      if(r.presidencia==="ENF") enf++;
+    });
+    const motivoCnt = new Map(), razonCnt = new Map();
+    episodios.forEach(ep=>{
+      ep.dias = ep.rows.length;
+      const base = ep.rows.find(r=>motivoKeyOf(r)!=="CA") || ep.rows[0];
+      ep.motivo = motivoLabelOf(base);
+      ep.motivoKey = motivoKeyOf(base);
+      const rz = (ep.rows.find(r=>r.razon) || {}).razon || "";
+      ep.razon = rz;
+      ep.presidencia = base.presidencia || "";
+      const mk = ep.rows[0].monthKey;
+      porMes[mk].inicios++;
+      motivoCnt.set(ep.motivo, (motivoCnt.get(ep.motivo)||0)+1);
+      if(rz){ const nk = normTxt(rz); const cur = razonCnt.get(nk) || {texto:rz, n:0}; cur.n++; razonCnt.set(nk, cur); }
+    });
+    const topMotivo = Array.from(motivoCnt.entries()).sort((a,b)=>b[1]-a[1])[0] || ["", 0];
+    const razonesArr = Array.from(razonCnt.values()).sort((a,b)=>b.n-a.n);
+    const conRazon = episodios.filter(ep=>ep.razon).length;
+    const last = dias[dias.length-1];
+    out.push({
+      key:k, legajo:last.legajo, nombre:last.nombre||("Legajo "+last.legajo), unidad:last.unidad||"", departamento:last.departamento||"", sector:last.sector||"",
+      ap, anp, enf, total:dias.length, episodios, nEpisodios:episodios.length, porMes,
+      mesesConFaltas: Object.keys(porMes).length,
+      mesesConInicio: Object.values(porMes).filter(m=>m.inicios>0).length,
+      topMotivo:{label:topMotivo[0], n:topMotivo[1]},
+      topRazon: razonesArr[0] ? {texto:razonesArr[0].texto, n:razonesArr[0].n} : null,
+      conRazon
+    });
+  });
+  return out;
+}
+function patronMotivoTexto(e){
+  const t = e.topMotivo;
+  const mismo = e.nEpisodios>=3 && t.n/e.nEpisodios >= 0.7;
+  let txt = t.label+" — "+t.n+" de "+e.nEpisodios+" episodio"+(e.nEpisodios===1?"":"s");
+  if(e.topRazon) txt += " · Razón más repetida: «"+e.topRazon.texto+"» ("+e.topRazon.n+" de "+e.conRazon+" con razón)";
+  return {txt, mismo};
+}
+
+function ComiteAusentismo({comiteRecords, monthKeys, excludedMotivos, plantel}){
+  const [ventana, setVentana] = useKeptState("cm.ventana", 12);
+  const [minSel, setMinSel] = useKeptState("cm.min", null);       // null = automático (2/3 de los meses de la ventana)
+  const [soloVig, setSoloVig] = useKeptState("cm.vigentes", true);
+  const [verTodos, setVerTodos] = useKeptState("cm.todos", false);
+  const [abierto, setAbierto] = useState(null);
+  const [search, setSearch] = useState("");
+  const hasPlantel = !!(plantel && plantel.length);
+  const plantelBy = useMemo(()=> new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p])), [plantel]);
+  const monthsWin = useMemo(()=> monthKeys.slice(-Math.min(ventana, monthKeys.length)), [monthKeys, ventana]);
+  const N = monthsWin.length;
+  const minAuto = Math.max(1, Math.ceil(N*2/3));
+  const minMeses = Math.min(Math.max(1, N), Math.max(1, minSel!=null ? minSel : minAuto));
+
+  const todos = useMemo(()=>{
+    let list = analizarComite(comiteRecords, monthsWin, excludedMotivos).map(e=>{
+      const p = plantelBy.get(e.key);
+      return {...e, estado:(p&&p.estado)||"", unidad:(p&&p.unidad)||e.unidad,
+        deptSector:[(p&&p.departamento)||e.departamento, (p&&p.sector)||e.sector].filter(Boolean).join(" - ")};
+    });
+    if(hasPlantel && soloVig) list = list.filter(e=>e.estado==="Vigente");
+    // puesto en el ranking por días (para ver que el microausentismo no se detecta con ese ranking)
+    const porDias = list.slice().sort((a,b)=>b.total-a.total || a.legajo.localeCompare(b.legajo));
+    const pos = new Map(porDias.map((e,i)=>[e.key, i+1]));
+    return list.map(e=>({...e, puesto:pos.get(e.key), micro: e.mesesConInicio>=minMeses}));
+  }, [comiteRecords, monthsWin, excludedMotivos, plantelBy, hasPlantel, soloVig, minMeses]);
+
+  const micro = useMemo(()=> todos.filter(e=>e.micro), [todos]);
+  const q = normTxt(search);
+  const base = (verTodos ? todos : micro).filter(e=>!q || normTxt(e.legajo).includes(q) || normTxt(e.nombre).includes(q));
+  const sortC = useTableSort(base, {
+    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"}, deptSector:{get:e=>e.deptSector||"", type:"text"},
+    ap:{get:e=>e.ap, type:"num"}, anp:{get:e=>e.anp, type:"num"}, enf:{get:e=>e.enf, type:"num"}, total:{get:e=>e.total, type:"num"},
+    eps:{get:e=>e.nEpisodios, type:"num"}, meses:{get:e=>e.mesesConInicio, type:"num"}, puesto:{get:e=>e.puesto, type:"num"}, patron:{get:e=>e.topMotivo.label, type:"text"}
+  }, {key:"meses", dir:"desc"});
+  const sum = (arr, f) => arr.reduce((a,e)=>a+f(e), 0);
+
+  function imprimir(){
+    const e = escHtml;
+    const filas = sortC.sorted.map(x=>{
+      const pt = patronMotivoTexto(x);
+      const meses = monthsWin.filter(mk=>x.porMes[mk]).map(mk=>monthLabel(mk)+" ("+x.porMes[mk].dias+")").join(", ");
+      return "<tr><td class='id'>"+e(x.legajo)+"</td><td class='id'>"+e(x.nombre)+"</td><td>"+e(x.unidad||"—")+"</td><td>"+e(x.deptSector||"—")+"</td><td class='n'>"+x.ap+"</td><td class='n'>"+x.anp+"</td><td class='n'>"+x.enf+"</td><td class='n'>"+x.total+"</td><td class='n'>"+x.nEpisodios+"</td><td class='n'>"+x.mesesConInicio+" de "+N+"</td><td>"+e(meses)+"</td><td>"+(pt.mismo ? "<b>Mismo motivo.</b> " : "")+e(pt.txt)+"</td></tr>";
+    }).join("");
+    const css = `
+      @page{size:A4 landscape;margin:10mm;}
+      *{box-sizing:border-box;} body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#000;margin:0;}
+      h2{margin:0 0 4px;font-size:19px;color:#0c2e80;} p{margin:0 0 8px;font-size:11.5px;color:#333;}
+      table{width:100%;border-collapse:collapse;font-size:10px;}
+      thead{display:table-header-group;}
+      th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:#555;padding:3px 4px;border:1px solid #9aa4b5;background:#eef3fb;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      td{padding:3px 4px;border:1px solid #9aa4b5;vertical-align:top;} tr{break-inside:avoid;}
+      td.id{font-weight:700;font-size:11px;} td.n{text-align:right;}
+    `;
+    const rango = N ? monthLabel(monthsWin[0])+" a "+monthLabel(monthsWin[N-1]) : "—";
+    const html = "<h2>Comité de ausentismo — "+(verTodos ? "Empleados con ausencias" : "Microausentismo")+"</h2>"+
+      "<p>Período analizado: últimos "+N+" meses cargados ("+e(rango)+"). Criterio de microausentismo: episodios de ausencia iniciados en al menos "+minMeses+" de los "+N+" meses. "+sortC.sorted.length+" empleado(s) — "+e(new Date().toLocaleDateString("es-AR"))+".</p>"+
+      "<table><thead><tr><th>Legajo</th><th>Empleado</th><th>Unidad</th><th>Departamento - Sector</th><th>Días AP</th><th>Días ANP</th><th>Días ENF</th><th>Total días</th><th>Episodios</th><th>Meses con faltas</th><th>Meses (días)</th><th>Motivo / razón de los episodios</th></tr></thead><tbody>"+filas+"</tbody></table>";
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Comité de ausentismo</title><style>'+css+'</style></head><body>'+html+'</body></html>');
+    win.document.close(); win.focus(); setTimeout(()=>{ win.print(); }, 400);
+  }
+
+  if(!N) return <div className="card table-card"><p className="desc">Todavía no hay datos de ausentismo cargados.</p></div>;
+  const kpiBox = (label, value, hint) => (<div className="card kpi-tile"><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div>{hint && <div className="hint">{hint}</div>}</div>);
+  return (
+    <React.Fragment>
+      <div className="card table-card">
+        <h3>Comité de ausentismo</h3>
+        <p className="caption">Análisis por empleado de los últimos meses cargados: días ausentes AP, ANP y ENF, en qué meses faltó y detección de <b>microausentismo</b> (empleados que faltan casi todos los meses con episodios cortos y repetidos, y por eso no aparecen arriba en el ranking por días). Se aplican los filtros de arriba (Gerencia, Departamento, Sector y Empresa) menos el de Mes, y los motivos que cuentan en Resumen.</p>
+        <div className="filter-row">
+          <label className="hint" style={{display:"flex", alignItems:"center", gap:6}}>Período
+            <select value={ventana} onChange={e=>{ setVentana(parseInt(e.target.value,10)); setMinSel(null); }}>
+              {[3,6,9,12].map(n=>(<option key={n} value={n}>Últimos {n} meses</option>))}
+            </select>
+          </label>
+          <label className="hint" style={{display:"flex", alignItems:"center", gap:6}} title="Cantidad mínima de meses en los que el empleado empezó un episodio de ausencia para considerarlo microausentismo">Microausentismo: faltas en al menos
+            <input type="number" min={1} max={N} value={minMeses} onChange={e=>{ const v=parseInt(e.target.value,10); setMinSel(isNaN(v)?null:Math.min(N,Math.max(1,v))); }} style={{width:64}} /> de {N} meses
+          </label>
+          {minSel!=null && <button type="button" className="btn secondary small" onClick={()=>setMinSel(null)}>Automático ({minAuto})</button>}
+          {hasPlantel && (
+            <label className="motivo-check" style={{cursor:"pointer"}}>
+              <input type="checkbox" checked={soloVig} onChange={e=>setSoloVig(e.target.checked)} /> Solo empleados vigentes
+            </label>
+          )}
+          <label className="motivo-check" style={{cursor:"pointer"}}>
+            <input type="checkbox" checked={verTodos} onChange={e=>setVerTodos(e.target.checked)} /> Ver todos los empleados con ausencias
+          </label>
+          <input type="text" placeholder="Buscar legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:220}} />
+          <button type="button" className="btn secondary print-btn" onClick={imprimir} disabled={!sortC.sorted.length}>Imprimir</button>
+        </div>
+        <div className="kpi-grid">
+          {kpiBox("Con ausencias en el período", fmt(todos.length), N+" meses: "+monthLabel(monthsWin[0])+" a "+monthLabel(monthsWin[N-1]))}
+          {kpiBox("Con microausentismo", fmt(micro.length), todos.length ? fmtPct(micro.length/todos.length*100,1)+" de los que faltaron" : "")}
+          {kpiBox("Días AP / ANP (microausentismo)", fmt(sum(micro,e=>e.ap))+" / "+fmt(sum(micro,e=>e.anp)), "ENF: "+fmt(sum(micro,e=>e.enf))+" días")}
+          {kpiBox("Días AP / ANP (todos)", fmt(sum(todos,e=>e.ap))+" / "+fmt(sum(todos,e=>e.anp)), "ENF: "+fmt(sum(todos,e=>e.enf))+" días")}
+        </div>
+        <div className="caption" style={{display:"flex", gap:14, flexWrap:"wrap", alignItems:"center"}}>
+          <span>Meses con faltas:</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"var(--accent)"}}></span> empezó un episodio ese mes</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"color-mix(in srgb, var(--accent) 35%, var(--surface))"}}></span> solo continuó una ausencia anterior</span>
+          <span style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:11, height:16, borderRadius:3, background:"var(--border)"}}></span> sin faltas</span>
+        </div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <SortTh k="legajo" label="Legajo" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="nombre" label="Empleado" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="unidad" label="Unidad" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="deptSector" label="Departamento - Sector" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="ap" label="Días AP" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="anp" label="Días ANP" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="enf" label="Días ENF" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="total" label="Total días" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="eps" label="Episodios" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="meses" label="Meses con episodios" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <th>Meses</th>
+              <SortTh k="puesto" label="Puesto en ranking por días" className="num" sort={sortC.sort} toggle={sortC.toggle} />
+              <SortTh k="patron" label="Motivo / razón" sort={sortC.sort} toggle={sortC.toggle} />
+              <th></th>
+            </tr></thead>
+            <tbody>
+              {!sortC.sorted.length && <tr><td colSpan="14" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>{verTodos ? "Sin empleados con ausencias con estos filtros." : "No se detectó microausentismo con este criterio (probá bajando la cantidad mínima de meses)."}</td></tr>}
+              {sortC.sorted.map(e=>{
+                const pt = patronMotivoTexto(e);
+                const abre = abierto===e.key;
+                return (
+                  <React.Fragment key={e.key}>
+                    <tr>
+                      <td style={{fontWeight:700}}>{e.legajo}</td>
+                      <td style={{fontWeight:700}}>{e.nombre}</td>
+                      <td>{e.unidad||"—"}</td>
+                      <td>{e.deptSector||"—"}</td>
+                      <td className="num">{fmt(e.ap)}</td><td className="num">{fmt(e.anp)}</td><td className="num">{fmt(e.enf)}</td><td className="num">{fmt(e.total)}</td>
+                      <td className="num">{fmt(e.nEpisodios)}</td>
+                      <td className="num" style={{whiteSpace:"nowrap"}}>{e.mesesConInicio} de {N}{e.micro && <span className="schip bad" style={{marginLeft:6, fontSize:10.5, padding:"2px 7px"}}>Micro</span>}</td>
+                      <td>
+                        <span style={{display:"inline-flex", gap:2}}>
+                          {monthsWin.map(mk=>{ const d = e.porMes[mk];
+                            const bg = d && d.inicios ? "var(--accent)" : d ? "color-mix(in srgb, var(--accent) 35%, var(--surface))" : "var(--border)";
+                            return <span key={mk} title={monthLabel(mk)+": "+(d ? d.dias+" día(s) ausente(s), "+d.inicios+" episodio(s) iniciado(s)" : "sin faltas")} style={{width:11, height:16, borderRadius:3, background:bg}}></span>; })}
+                        </span>
+                      </td>
+                      <td className="num">{e.puesto}</td>
+                      <td style={{minWidth:260}}>{pt.mismo && <span className="schip warn" style={{marginRight:6, fontSize:10.5, padding:"2px 7px"}}>Mismo motivo</span>}{pt.txt}</td>
+                      <td><button type="button" className="btn secondary small" onClick={()=>setAbierto(abre ? null : e.key)}>{abre ? "Cerrar" : "Ver episodios"}</button></td>
+                    </tr>
+                    {abre && (
+                      <tr><td colSpan="14" style={{background:"var(--plane)"}}>
+                        <div className="hint" style={{fontWeight:700, marginBottom:4}}>Episodios de {e.nombre} — {e.nEpisodios} en {e.mesesConFaltas} mes(es)</div>
+                        <table style={{width:"100%"}}>
+                          <thead><tr><th>Inicio</th><th>Fin</th><th className="num">Días</th><th>Motivo</th><th>Razón</th><th>Agrupador</th></tr></thead>
+                          <tbody>
+                            {e.episodios.map((ep,i)=>(<tr key={i}><td>{fmtDateFromTs(ep.inicioTs)}</td><td>{fmtDateFromTs(ep.finTs)}</td><td className="num">{ep.dias}</td><td>{ep.motivo}</td><td>{ep.razon||"—"}</td><td>{ep.presidencia||"—"}</td></tr>))}
+                          </tbody>
+                        </table>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+function RankingTab({scopeUnitsMap, hasUnidad, idMotivoUniverse, presidenciaUniverse, presidenciaCats, idIncluded, setIdIncluded, presIncluded, setPresIncluded, plantel, ocultarFiltrosMotivo, soloRanking, comiteRecords, monthKeys, excludedMotivos}){
+  const [vistaGuardada, setVista] = useKeptState("rk.vista", "ranking"); // "ranking" | "comite"
+  // soloRanking (Visor): solo el Ranking de empleados (con el filtro Id Motivo); sin Comité de ausentismo ni filtro de Agrupador presidencia
+  const vista = soloRanking ? "ranking" : vistaGuardada;
+  const [unitFilter, setUnitFilter] = useState("__all");
+  const [soloVigentes, setSoloVigentes] = useState(true);
+  const unitNames = useMemo(()=> Array.from(scopeUnitsMap.keys()).sort(), [scopeUnitsMap]);
+  const hasPlantel = plantel && plantel.length>0;
+  const plantelByLegajo = useMemo(()=> new Map((plantel||[]).map(p=>[(p.legajo||"").toUpperCase(), p])), [plantel]);
+  const employees = useMemo(()=>{
+    const byLegajo = new Map();
+    scopeUnitsMap.forEach((rows, name)=>{
+      if(unitFilter!=="__all" && name!==unitFilter) return;
+      rows.forEach(r=>{
+        if(!r.legajo || !r.idMotivo) return;
+        const idKey = r.idMotivo.toUpperCase();
+        if(!idIncluded.has(idKey)) return;
+        if(r.presidencia && !presIncluded.has(r.presidencia)) return;
+        const k = name+"::"+r.legajo;
+        if(!byLegajo.has(k)){
+          const p = plantelByLegajo.get((r.legajo||"").toUpperCase());
+          // Departamento - Sector: se toma del plantel (dato vigente) y, si el legajo no está, de las filas de ausentismo
+          const deptSector = [(p&&p.departamento)||r.departamento||"", (p&&p.sector)||r.sector||""].filter(Boolean).join(" - ");
+          byLegajo.set(k, {legajo:r.legajo, nombre:r.nombre||("Legajo "+r.legajo), unidad:name, deptSector, sindicato:r.sindicato||"", estado:(p&&p.estado)||"", count:0});
+        }
+        byLegajo.get(k).count++;
+      });
+    });
+    let list = Array.from(byLegajo.values());
+    if(hasPlantel && soloVigentes) list = list.filter(e=>e.estado==="Vigente");
+    return list.sort((a,b)=>b.count-a.count).slice(0,20);
+  }, [scopeUnitsMap, unitFilter, idIncluded, presIncluded, plantelByLegajo, hasPlantel, soloVigentes]);
+  const empSort = useTableSort(employees, {
+    legajo:{get:e=>e.legajo, type:"text"}, nombre:{get:e=>e.nombre, type:"text"}, unidad:{get:e=>e.unidad, type:"text"}, deptSector:{get:e=>e.deptSector, type:"text"},
+    sindicato:{get:e=>e.sindicato, type:"text"}, estado:{get:e=>e.estado, type:"text"}, count:{get:e=>e.count, type:"num"}
+  });
+
+  return (
+    <div className="tabpanel">
+      {!soloRanking && <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+        <button type="button" className={"btn"+(vista==="ranking" ? "" : " secondary")} onClick={()=>setVista("ranking")}>Ranking de empleados</button>
+        <button type="button" className={"btn"+(vista==="comite" ? "" : " secondary")} onClick={()=>setVista("comite")}>Comité de ausentismo</button>
+      </div>}
+      {vista==="comite" && <ComiteAusentismo comiteRecords={comiteRecords||[]} monthKeys={monthKeys||[]} excludedMotivos={excludedMotivos} plantel={plantel} />}
+      {vista==="ranking" && !ocultarFiltrosMotivo && <div className="toggle-grid" style={{gridTemplateColumns:"1fr"}}>
+        <ToggleList title="Id Motivo a incluir" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={idIncluded} onChange={setIdIncluded}
+          defaultKeys={idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key)} />
+        {!soloRanking && <ToggleList title="Agrupador cuadro presidencia a incluir" items={presidenciaUniverse.map(v=>({key:v,label:v,ap:(presidenciaCats[v]||{}).ap||0,anp:(presidenciaCats[v]||{}).anp||0}))} included={presIncluded} onChange={setPresIncluded}
+          defaultKeys={presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v))} />}
+      </div>}
+      {vista==="ranking" && <div className="card table-card">
+        <h3>Ranking de empleados</h3>
+        <p className="caption">Suma filas cuyo Id Motivo y Agrupador cuadro presidencia estén tildados arriba — independiente del resto de filtros de ausentismo.</p>
+        <div className="filter-row">
+          {hasUnidad && (
+            <select value={unitFilter} onChange={e=>setUnitFilter(e.target.value)}>
+              <option value="__all">Todas las unidades</option>
+              {unitNames.map(u=>(<option key={u} value={u}>{u}</option>))}
+            </select>
+          )}
+          {hasPlantel && (
+            <label className="motivo-check" style={{cursor:"pointer"}}>
+              <input type="checkbox" checked={soloVigentes} onChange={e=>setSoloVigentes(e.target.checked)} />
+              Solo empleados vigentes
+            </label>
+          )}
+          {!hasPlantel && <span className="hint">Subí el Plantel para ver el Estado y filtrar por vigentes.</span>}
+        </div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <SortTh k="legajo" label="Legajo" sort={empSort.sort} toggle={empSort.toggle} />
+              <SortTh k="nombre" label="Empleado" sort={empSort.sort} toggle={empSort.toggle} />
+              {hasUnidad && <SortTh k="unidad" label="Unidad" sort={empSort.sort} toggle={empSort.toggle} />}
+              <SortTh k="deptSector" label="Departamento - Sector" sort={empSort.sort} toggle={empSort.toggle} />
+              <SortTh k="sindicato" label="Sindicato" sort={empSort.sort} toggle={empSort.toggle} />
+              {hasPlantel && <SortTh k="estado" label="Estado" sort={empSort.sort} toggle={empSort.toggle} />}
+              <SortTh k="count" label="Filas incluidas" className="num" sort={empSort.sort} toggle={empSort.toggle} />
+            </tr></thead>
+            <tbody>
+              {!employees.length && <tr><td colSpan="7" style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin filas con estos filtros.</td></tr>}
+              {empSort.sorted.map(e=>(
+                <tr key={e.unidad+"::"+e.legajo}>
+                  <td>{e.legajo}</td>
+                  <td>{e.nombre}</td>
+                  {hasUnidad && <td>{e.unidad}</td>}
+                  <td>{e.deptSector || "—"}</td>
+                  <td>{e.sindicato||"—"}</td>
+                  {hasPlantel && <td>{e.estado||"—"}</td>}
+                  <td className="num">{fmt(e.count)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+/* ===================== detalle empleados ===================== */
+function SearchSelect({options, value, onChange, placeholder}){
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const ref = useRef(null);
+  useEffect(()=>{
+    function onDoc(e){ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("click", onDoc);
+    return ()=>document.removeEventListener("click", onDoc);
+  }, []);
+  const selectedOpt = options.find(o=>o.value===value);
+  const filtered = search ? options.filter(o=>o.label.toLowerCase().includes(search.toLowerCase())) : options;
+  return (
+    <div className="msel" ref={ref}>
+      <button type="button" className="msel-toggle" style={{width:280}} onClick={()=>setOpen(o=>!o)}>{selectedOpt ? selectedOpt.label : (placeholder||"Elegir…")}</button>
+      {open && (
+        <div className="msel-menu" style={{width:320}}>
+          <input className="msel-search" autoFocus placeholder="Buscar por legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} />
+          <div className="msel-options">
+            {filtered.slice(0,300).map(o=>(
+              <div key={o.value} className="msel-opt" style={{cursor:"pointer"}} onClick={()=>{ onChange(o.value); setOpen(false); setSearch(""); }}>
+                <span>{o.label}</span>
+              </div>
+            ))}
+            {!filtered.length && <div className="hint" style={{padding:"6px 4px"}}>Sin resultados.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+function EmployeeBarChart({items}){
+  const chartW = 520, chartH=220, padB=30, padT=26, gap=20;
+  const maxVal = Math.max(1, ...items.map(i=>i.value));
+  const barW = (chartW - gap*(items.length+1)) / items.length;
+  return (
+    <svg className="chart" style={{maxWidth:chartW}} viewBox={"0 0 "+chartW+" "+chartH}>
+      {items.map((it,i)=>{
+        const x = gap + i*(barW+gap);
+        const h = (chartH-padT-padB) * (it.value/maxVal);
+        const y = chartH-padB-h;
+        return (
+          <g key={it.label}>
+            <rect x={x} y={y} width={barW} height={Math.max(h,1)} rx="4" fill={it.color} />
+            <text x={x+barW/2} y={y-8} fontSize="13" fontWeight="700" textAnchor="middle" fill="var(--ink)">{fmt(it.value)}</text>
+            <text x={x+barW/2} y={chartH-10} fontSize="11" textAnchor="middle" fill="var(--muted)">{it.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+// Selección "Por defecto" del filtro Id Motivo de Detalle Empleados (la vigente al 15/10/2026).
+const DETALLE_DEFAULT_MOTIVOS = new Set(["AT","CA","CAE","CJ","DS","EFS","EN","ET","EX","FA","JRP","LSS","MA","MT","MU","NAC","SA"]);
+// Estilos del calendario anual del Detalle de empleados. Van dentro de la propia tarjeta para que valgan igual en pantalla y en la hoja impresa.
+const ANUAL_GRID_CSS = `
+.ygrid-wrap{overflow-x:auto;}
+.ygrid{width:100%;min-width:820px;border-collapse:collapse;table-layout:fixed;font-size:11px;}
+.ygrid th,.ygrid td{border:1px solid #777 !important;padding:0 !important;text-align:center;height:26px;background:#fff;color:#000;font-weight:600;overflow:hidden;}
+.ygrid thead th{height:24px;font-size:11px;letter-spacing:0;text-transform:none;background:#e9e9e9;color:#000;}
+.ygrid th.ymes{width:92px;text-align:left;padding-left:6px !important;font-size:11px;background:#e9e9e9;}
+.ygrid td.g-off,.ygrid-leg i.g-off{background:#d3d3d3;}
+.ygrid td.g-ap,.ygrid-leg i.g-ap{background:#ffff00;}
+.ygrid td.g-anp,.ygrid-leg i.g-anp{background:#ffb300;}
+.ygrid td.g-none{background:repeating-linear-gradient(45deg,#f4f4f4,#f4f4f4 3px,#cfcfcf 3px,#cfcfcf 4px);}
+.ygrid-leg{display:flex;gap:22px;flex-wrap:wrap;margin-top:12px;font-size:12px;}
+.ygrid-leg span{display:inline-flex;align-items:center;gap:6px;}
+.ygrid-leg i{display:inline-block;width:20px;height:14px;border:1px solid #777;}
+`;
+function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones, soloFicha}){
+  // soloFicha (Visor): solo la ficha del empleado, el calendario anual y el detalle (sin gráfico, sin historial de Crónicos ni nada de Medicina Laboral)
+  const employeeOptions = useMemo(()=>{
+    const map = new Map();
+    parsed.records.forEach(r=>{
+      if(!r.legajo) return;
+      const key = r.legajo.toUpperCase();
+      if(!map.has(key)) map.set(key, {legajo:r.legajo, nombre:r.nombre||""});
+    });
+    return Array.from(map.values())
+      .map(e=>({value:e.legajo, nombre:(e.nombre||"").toUpperCase(), label:e.legajo+" "+(e.nombre||"").toUpperCase()}))
+      .sort((a,b)=> a.nombre.localeCompare(b.nombre, "es") || a.value.localeCompare(b.value, "es"));
+  }, [parsed]);
+
+  const availableYearsAll = useMemo(()=>{
+    const ys = new Set();
+    parsed.records.forEach(r=>{ if(r.valid) ys.add(r.anio); });
+    return Array.from(ys).sort((a,b)=>a-b);
+  }, [parsed]);
+
+  const [legajoSel, setLegajoSel] = useKeptState("de.legajo", () => employeeOptions[0] ? employeeOptions[0].value : "");
+  const [periodoVal, setPeriodoVal] = useKeptState("de.periodo", "todos");
+  const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
+  const [conCronicos, setConCronicos] = useKeptState("de.conCronicos", false);
+  const [agrupar, setAgrupar] = useKeptState("de.agrupar", true);   // días seguidos con el mismo motivo -> un renglón con inicio y fin
+  const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
+  const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
+  // El filtro arranca en "Por defecto" (DETALLE_DEFAULT_MOTIVOS)
+  const [idMotivoElegido, setIdMotivoIncluded] = useKeptState("de.idMotivo|"+motivosSig, () => new Set(parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)));
+  // motivosPorDefecto (Servicio médico): el filtro no se muestra y se usan siempre los Id Motivo "Por defecto"
+  const idMotivoIncluded = useMemo(
+    ()=> motivosPorDefecto ? new Set(parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)) : idMotivoElegido,
+    [motivosPorDefecto, parsed, idMotivoElegido]);
+
+  // si lo guardado ya no existe en los datos actuales (otro archivo, otro año), vuelve al primero disponible
+  useEffect(()=>{
+    if(employeeOptions.length && !employeeOptions.some(o=>o.value===legajoSel)) setLegajoSel(employeeOptions[0].value);
+  }, [employeeOptions, legajoSel]);
+  useEffect(()=>{
+    if(availableYearsAll.length && !availableYearsAll.includes(anioSel)) setAnioSel(availableYearsAll[availableYearsAll.length-1]);
+  }, [availableYearsAll, anioSel]);
+
+  const periodoMonths = periodoVal==="personalizado" ? Array.from(customMonths) : ((PERIODO_OPTIONS.find(p=>p.value===periodoVal)||{}).months || []);
+  const periodoLabel = useMemo(()=>{
+    const base = periodoVal==="personalizado"
+      ? (customMonths.size ? Array.from(customMonths).sort((a,b)=>a-b).map(m=>MESES[m-1]).join(", ") : "Sin meses")
+      : ((PERIODO_OPTIONS.find(p=>p.value===periodoVal)||{}).label || "");
+    return base + (anioSel ? " " + anioSel : "");
+  }, [periodoVal, customMonths, anioSel]);
+
+  const ficha = useMemo(()=> parsed.records.find(r=>r.legajo===legajoSel) || null, [parsed, legajoSel]);
+  const plantelFicha = useMemo(()=>{
+    if(!legajoSel) return null;
+    return (plantel||[]).find(p => (p.legajo||"").toUpperCase()===legajoSel.toUpperCase()) || null;
+  }, [plantel, legajoSel]);
+  // La ficha toma los datos vigentes del plantel (si el campo está vacío en el plantel, queda vacío: no se mezcla con datos viejos).
+  // Solo si el legajo no está en el plantel cae a lo que figura en las filas de ausentismo.
+  function fichaDato(campo){
+    if(plantelFicha) return plantelFicha[campo]||"";
+    return ficha ? (ficha[campo]||"") : "";
+  }
+
+  const scopeE = useMemo(()=>{
+    if(!legajoSel || anioSel==null) return [];
+    const monthsSet = new Set(periodoMonths);
+    return parsed.records.filter(r=> r.valid && r.legajo===legajoSel && r.anio===anioSel && monthsSet.has(r.mes));
+  }, [parsed, legajoSel, anioSel, periodoVal, customMonths]);
+
+  // Calendario anual: todas las ausencias AP/ANP del legajo en el año elegido (no depende del período ni del filtro de Id Motivo).
+  // Clave "mes-día" -> {code, cat, label}; además marca como no laborable ("off-mes-día") los días que el archivo trae como feriado (Id Motivo FER).
+  const anualMap = useMemo(()=>{
+    const map = new Map();
+    if(!legajoSel || anioSel==null) return map;
+    parsed.records.forEach(r=>{
+      if(!r.valid || r.legajo!==legajoSel || r.anio!==anioSel) return;
+      const k = r.mes+"-"+r.dia;
+      if(r.cat==="AP" || r.cat==="ANP"){
+        if(!map.has(k)) map.set(k, {code:(r.idMotivo||"").toUpperCase(), cat:r.cat, label:(r.motivo||r.idMotivo||"")+(r.razon ? " — "+r.razon : "")});
+      } else if((r.idMotivo||"").toUpperCase()==="FER") map.set("off-"+k, true);
+    });
+    return map;
+  }, [parsed, legajoSel, anioSel]);
+
+  const cardVals = useMemo(()=>{
+    let presentes=0, vac=0, ap=0, anp=0, sanciones=0;
+    scopeE.forEach(r=>{
+      if(r.presidencia==="SUSP") sanciones++;
+      if(r.cat==="P") presentes++;
+      else if(r.cat==="V") vac++;
+      else if(r.cat==="AP") ap++;
+      else if(r.cat==="ANP" && r.presidencia!=="SUSP") anp++;
+    });
+    return {presentes, vac, ap, anp, sanciones};
+  }, [scopeE]);
+
+  const ausenciaRows = useMemo(()=>{
+    // el detalle muestra todos los días del período cuyo Id Motivo está tildado en el filtro (ausencias, vacaciones, etc.),
+    // sin importar el "Estado" de la fila: antes solo salían las de estado "A" y las vacaciones tildadas no aparecían.
+    return scopeE.filter(r=> r.idMotivo && idMotivoIncluded.has(r.idMotivo.toUpperCase()))
+      .slice().sort((a,b)=> a.ts-b.ts);
+  }, [scopeE, idMotivoIncluded]);
+
+  function tipoOf(r){
+    if(r.presidencia==="SUSP") return "Sanción";
+    switch(r.agrup){
+      case "V": return "Vacaciones";
+      case "AP": return "Ausente Pago";
+      case "ANP": return "Ausente No Pago";
+      case "CE": return "Cesante";
+      case "BAJA": return "Baja";
+      default: return r.agrup || "(vacío)";
+    }
+  }
+  const ausSort = useTableSort(ausenciaRows, {
+    fecha:{get:r=>r.ts, type:"num"}, estado:{get:r=>r.estado, type:"text"}, idMotivo:{get:r=>r.idMotivo, type:"text"},
+    agrup:{get:r=>r.agrup||"(vacío)", type:"text"}, presidencia:{get:r=>r.presidencia||"", type:"text"},
+    tipo:{get:r=>tipoOf(r), type:"text"}, motivo:{get:r=>r.motivo, type:"text"}, razon:{get:r=>r.razon, type:"text"}
+  });
+
+  // Sanciones del empleado (solo para quien las ve: Administrador y RRHH): cada día del detalle indica si se emitió la sanción por esa ausencia.
+  const [sancionesLeg, setSancionesLeg] = useState([]);
+  useEffect(()=>{
+    let vivo = true;
+    setSancionesLeg([]);
+    if(!puedeVerSanciones || !legajoSel) return;
+    (async ()=>{
+      try{
+        const {data, error} = await supabaseClient.from(SANCIONES_TABLE).select("*").eq("legajo", legajoSel);
+        if(error) throw error;
+        if(vivo) setSancionesLeg((data||[]).map(sancionRowToObj));
+      }catch(e){ /* sin la tabla o sin permiso: la columna queda en blanco */ }
+    })();
+    return ()=>{ vivo = false; };
+  }, [puedeVerSanciones, legajoSel]);
+  const sancionesConDias = useMemo(()=> sancionesLeg.map(s=>({s, dias:diasDeSancion(s)})), [sancionesLeg]);
+  // Sanciones por lote del empleado (menú «Sanciones por lote»): se muestran junto a las del menú Sanciones. Sin la tabla, no se muestra nada.
+  const [loteLeg, setLoteLeg] = useState([]);
+  useEffect(()=>{
+    let vivo = true;
+    setLoteLeg([]);
+    if(!puedeVerSanciones || !legajoSel) return;
+    (async ()=>{
+      try{
+        const {data, error} = await supabaseClient.from(SL_T.items).select("*").eq("legajo", legajoSel);
+        if(error) throw error;
+        if(vivo) setLoteLeg(data||[]);   // incluidas y también las omitidas (con el motivo que cargó el usuario)
+      }catch(e){ /* sin la migración de Sanciones por lote: la columna sigue como antes */ }
+    })();
+    return ()=>{ vivo = false; };
+  }, [puedeVerSanciones, legajoSel]);
+  // Celda "Sanción" de un día o de un período (desde/hasta en AAAA-MM-DD): una línea por cada sanción que alcanza esos días.
+  function sancionCelda(desdeISO, hastaISO){
+    const hit = sancionesConDias.filter(x=>x.dias.some(d=>d>=desdeISO && d<=hastaISO)).map(x=>x.s);
+    const hitLote = loteLeg.filter(it=>(it.fechas||[]).some(d=>d>=desdeISO && d<=hastaISO));
+    if(!hit.length && !hitLote.length) return <span className="hint">—</span>;
+    const color = {emitida:"var(--good)", definida:"var(--accent)", marcada:"var(--warning)"};
+    const lineasLote = hitLote.map(it=> !it.incluir ? (
+      <div key={it.id} style={{color:"var(--warning)", fontWeight:600, fontSize:12}} title="Menú Sanciones por lote: se decidió no sancionar">
+        ✎ No sancionada: {it.motivo_omision || "sin motivo cargado"}
+      </div>
+    ) : (
+      <div key={it.id} style={{color: it.enviado_ts ? "var(--good)" : "var(--accent)", fontWeight:700}} title="Menú Sanciones por lote">
+        {it.enviado_ts ? "✔ Sancionada (lote): "+(it.sancion||"sanción")+(it.sancion==="Suspensión" ? " "+(Number(it.dias)||1)+" d" : "")+(it.n_interno ? " · N° "+it.n_interno : "")+" · enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")
+          : "En lote de sanción: "+(it.sancion||"")+" (sin enviar)"}
+      </div>
+    ));
+    return lineasLote.concat(hit.map(s=>(
+      <div key={s.id} style={{color:color[s.estado]||"inherit", fontWeight:700}} title={(SANCION_MOTIVOS[s.motivoSancion]||SANCION_MOTIVOS.ausencias).label}>
+        {s.estado==="emitida" ? "✔ Emitida: "+(s.medida||"sanción")+(s.emitidaTs ? " ("+new Date(s.emitidaTs).toLocaleDateString("es-AR")+")" : "")
+          : s.estado==="definida" ? "Definida: "+s.medida+" (sin emitir)" : "Marcada para sanción (sin definir)"}
+      </div>
+    )));
+  }
+
+  // Períodos: días consecutivos con el mismo Id Motivo se juntan en un solo renglón (desde / hasta / días). Los fines de semana y feriados
+  // entre dos días no cortan el período; cualquier día hábil sin ese motivo sí.
+  const ausGrupos = useMemo(()=>{
+    const out = [];
+    ausenciaRows.forEach(r=>{
+      const key = [r.idMotivo, r.agrup, r.presidencia, tipoOf(r)].join("|");
+      const g = out[out.length-1];
+      if(g && g.key===key && (r.ts===g.hastaTs || gapIsBridgeable(g.hastaTs, r.ts))){
+        if(r.ts!==g.hastaTs) g.dias++;
+        g.hastaTs = r.ts;
+        if(r.razon && !g.razones.includes(r.razon)) g.razones.push(r.razon);
+        if(r.estado && !g.estados.includes(r.estado)) g.estados.push(r.estado);
+      } else {
+        out.push({key, desdeTs:r.ts, hastaTs:r.ts, dias:1, row:r, razones:r.razon?[r.razon]:[], estados:r.estado?[r.estado]:[]});
+      }
+    });
+    return out;
+  }, [ausenciaRows]);
+  const grpSort = useTableSort(ausGrupos, {
+    desde:{get:g=>g.desdeTs, type:"num"}, hasta:{get:g=>g.hastaTs, type:"num"}, dias:{get:g=>g.dias, type:"num"},
+    estado:{get:g=>g.estados.join(" / "), type:"text"}, idMotivo:{get:g=>g.row.idMotivo, type:"text"},
+    agrup:{get:g=>g.row.agrup||"(vacío)", type:"text"}, presidencia:{get:g=>g.row.presidencia||"", type:"text"},
+    tipo:{get:g=>tipoOf(g.row), type:"text"}, motivo:{get:g=>g.row.motivo, type:"text"}, razon:{get:g=>g.razones.join(" / "), type:"text"}
+  });
+
+  // Historial de Crónicos del empleado (últimos 12 meses): lee los casos guardados en Supabase y arma el bloque para la impresión.
+  // Incluye observaciones/evolución y acciones registradas en ese lapso (las anteriores no se imprimen).
+  async function historialCronicosHtml(){
+    const e = escHtml;
+    const desdeTs = Date.now() - 365*86400000;
+    const {data, error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("legajo", legajoSel);
+    if(error) throw error;
+    const motLabel = new Map(parsed.idMotivoUniverse.map(m=>[String(m.key).toUpperCase(), m.label]));
+    motLabel.set("MANUAL", "Citación manual a Medicina Laboral");
+    const pref = sanitizeIdSeg(legajoSel)+"-";
+    // los casos provisorios (empleado citado a mano antes de figurar en Crónicos) van al final: lo ya copiado al caso real no se repite
+    const vistas = new Set();
+    const casos = (data||[]).slice().sort((a,b)=> (esCasoManualId(a.id)?1:0)-(esCasoManualId(b.id)?1:0)).map(row=>{
+      const m = casoRowToManual(row);
+      const movs = [
+        ...m.observaciones.map(o=>({...o, tipoMov:"Observación"})),
+        ...m.acciones.map(o=>({...o, tipoMov:"Acción"}))
+      ].filter(o=>o.ts>=desdeTs && !(o.id && vistas.has(o.id))).sort((a,b)=>a.ts-b.ts);
+      movs.forEach(o=>{ if(o.id) vistas.add(o.id); });
+      let mk = String(row.id||"");
+      if(mk.startsWith(pref)) mk = mk.slice(pref.length);
+      mk = mk.replace(/-[^-]*$/, "");
+      return {row, m, movs, motivo: motLabel.get(mk.toUpperCase()) || mk || "—"};
+    }).filter(c=>c.movs.length).sort((a,b)=> b.row.anio-a.row.anio || b.movs[b.movs.length-1].ts-a.movs[a.movs.length-1].ts);
+    const titulo = "<h3>Historial de Crónicos — últimos 12 meses</h3><p class='desc'>Registrado desde el "+fmtDateFromTs(Math.floor(desdeTs/86400000)*86400000)+" hasta hoy.</p>";
+    if(!casos.length) return "<div class='card table-card cron-hist print-page-break'>"+titulo+"<p class='desc'>Sin registros en Crónicos para este empleado en los últimos 12 meses.</p></div>";
+    return "<div class='card table-card cron-hist print-page-break'>"+titulo+casos.map(c=>{
+      const datos = [["Tipo", c.m.tipo], ["Opinión médica", c.m.opinionMedica], ["Táctico empleado", c.m.tactoEmpleado], ["Posible alta", c.m.posibleAlta]].filter(x=>x[1])
+        .map(x=>"<div><span class='lbl'>"+e(x[0])+"</span><span class='val' style='font-weight:400'>"+e(x[1])+"</span></div>").join("");
+      return "<div class='cron-caso' style='margin-top:12px'><h4 style='margin:0 0 6px;font-size:13px;color:var(--accent,#0c2e80)'>"+e(c.motivo)+" · "+e(c.row.anio)+"</h4>"+
+        (datos ? "<div class='ficha-grid' style='margin-bottom:8px'>"+datos+"</div>" : "")+
+        "<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Registró</th></tr></thead><tbody>"+
+        c.movs.map(o=>"<tr><td style='white-space:nowrap;vertical-align:top'>"+e(new Date(o.ts).toLocaleString("es-AR"))+"</td><td style='vertical-align:top'>"+e(o.tipoMov)+etiquetaOrigen(o)+"</td><td style='white-space:pre-wrap'>"+e(o.texto)+"</td><td style='vertical-align:top'>"+e(o.autor||"—")+"</td></tr>").join("")+
+        "</tbody></table></div>";
+    }).join("")+"</div>";
+  }
+
+  // Historial de Crónicos EN PANTALLA: con la casilla tildada se lee del servidor al elegir el empleado (o al tocar "Actualizar") y se
+  // muestra al final de la hoja; ese mismo bloque (`de-print-block`) es el que sale en la impresión, sin volver a leerlo.
+  const [cronHist, setCronHist] = useState({key:"", estado:"idle", html:"", error:""});
+  const [cronHistReload, setCronHistReload] = useState(0);
+  const cronHistKey = (conCronicos && !soloFicha && legajoSel) ? String(legajoSel)+"|"+cronHistReload : "";
+  useEffect(()=>{
+    if(!cronHistKey){ setCronHist(h=> h.estado==="idle" ? h : {key:"", estado:"idle", html:"", error:""}); return; }
+    let vivo = true;
+    setCronHist({key:cronHistKey, estado:"cargando", html:"", error:""});
+    historialCronicosHtml().then(
+      h=>{ if(vivo) setCronHist({key:cronHistKey, estado:"ok", html:h, error:""}); },
+      err=>{ if(vivo) setCronHist({key:cronHistKey, estado:"error", html:"", error:(err && err.message) || "error"}); }
+    );
+    return ()=>{ vivo = false; };
+  }, [cronHistKey]);   // eslint-disable-line
+  const cronHistListo = !!cronHistKey && cronHist.key===cronHistKey && cronHist.estado==="ok";
+
+  async function handlePrint(){
+    const blocks = Array.from(document.querySelectorAll(".de-print-block"));
+    if(!blocks.length) return;
+    let html = blocks.map(el=>el.outerHTML).join("\n");
+    const yaIncluido = blocks.some(el=>el.querySelector(".cron-hist"));   // el historial ya está en pantalla: va en la hoja tal cual
+    const printCss = `
+      *{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .cron-caso{margin-top:12px;}
+      .cron-caso h4{margin:0 0 6px;font-size:13px;color:#0c2e80;}
+      @page{size:landscape;}
+      *{box-sizing:border-box;}
+      body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff;color:#000;margin:24px;}
+      .print-header{margin-bottom:16px;}
+      .print-header h2{margin:0 0 4px;font-size:19px;}
+      .print-header .sub{margin:0;font-size:12.5px;color:#444;}
+      .card{border:1px solid #ccc;border-radius:10px;padding:16px 18px;margin-bottom:16px;break-inside:avoid;}
+      .card h3{margin:0 0 8px;font-size:14.5px;}
+      .desc,.caption{color:#555;font-size:12px;margin:0 0 8px;}
+      .print-row{break-inside:avoid;}
+      .print-page-break{page-break-before:always;break-before:page;}
+      .ficha-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px 16px;}
+      .lbl{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:700;}
+      .val{display:block;font-size:14px;font-weight:600;margin-top:2px;color:#000;}
+      table{width:100%;border-collapse:collapse;font-size:12.5px;}
+      thead th{text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#666;padding:0 6px 8px;border-bottom:1px solid #ccc;}
+      tbody td{padding:6px 6px;border-bottom:1px solid #e5e5e5;}
+      svg{width:100%;height:auto;display:block;}
+      .chart-card svg{max-width:640px;margin:4px auto 0;}
+    `;
+    // la ventana se abre ya (con el clic) para que el navegador no la bloquee; el historial se lee del servidor mientras tanto
+    const win = window.open("", "_blank");
+    if(!win){
+      alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo.");
+      return;
+    }
+    if(conCronicos && !soloFicha && !yaIncluido){
+      win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title></head><body style="font-family:Arial,sans-serif;margin:24px">Preparando el historial de Crónicos…</body></html>');
+      try{
+        html += "\n" + await historialCronicosHtml();
+      }catch(err){
+        win.close();
+        alert("No se pudo leer el historial de Crónicos ("+((err && err.message) || "error")+"). Probá de nuevo; si el problema sigue, imprimí sin esa opción.");
+        return;
+      }
+      win.document.open();
+    }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title><style>'+printCss+'</style></head><body>'+html+'</body></html>');
+    win.document.close();
+    win.focus();
+    setTimeout(()=>{ win.print(); }, 300);
+  }
+
+  if(!employeeOptions.length) return <div className="tabpanel"><div className="card chart-card"><p className="desc">Sin legajos en la base.</p></div></div>;
+
+  return (
+    <div className="tabpanel">
+      <div className="print-header de-print-block">
+        <h2>Detalle Empleados</h2>
+        <p className="sub">Período: {periodoLabel}</p>
+      </div>
+
+      <div className="card controls no-print">
+        <div className="field">
+          <label>Empleado</label>
+          <SearchSelect options={employeeOptions} value={legajoSel} onChange={setLegajoSel} placeholder="Buscar legajo o nombre…" />
+        </div>
+        <div className="field">
+          <label>Período</label>
+          <select value={periodoVal} onChange={e=>setPeriodoVal(e.target.value)}>
+            {PERIODO_OPTIONS.map(p=>(<option key={p.value} value={p.value}>{p.label}</option>))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Año</label>
+          <select value={anioSel||""} onChange={e=>setAnioSel(parseInt(e.target.value,10))}>
+            {availableYearsAll.map(y=>(<option key={y} value={y}>{y}</option>))}
+          </select>
+        </div>
+        <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Si un motivo se repite en días seguidos, el detalle muestra una sola línea con fecha de inicio y de fin (en pantalla y al imprimir)">
+          <input type="checkbox" checked={agrupar} onChange={e=>setAgrupar(e.target.checked)} />
+          Agrupar días consecutivos (inicio y fin)
+        </label>
+        {!soloFicha && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Muestra al final de la hoja (en pantalla y al imprimir) lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
+          <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
+          Incluir historial de Crónicos (últimos 12 meses)
+        </label>}
+        <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
+      </div>
+
+      {periodoVal==="personalizado" && (
+        <div className="card motivo-settings no-print">
+          <h3>Meses (personalizado)</h3>
+          <div className="motivo-checklist">
+            {MESES.map((m,i)=>(
+              <label key={i} className="motivo-check">
+                <input type="checkbox" checked={customMonths.has(i+1)} onChange={()=>{
+                  const next = new Set(customMonths);
+                  if(next.has(i+1)) next.delete(i+1); else next.add(i+1);
+                  setCustomMonths(next);
+                }} />
+                {m}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="print-row de-print-block">
+        {ficha && (
+          <div className="card table-card">
+            <h3>Ficha del empleado</h3>
+            <div className="ficha-grid">
+              <div><span className="lbl">Legajo</span><span className="val">{ficha.legajo}</span></div>
+              <div><span className="lbl">Nombre</span><span className="val">{fichaDato("nombre") || "—"}</span></div>
+              <div><span className="lbl">Unidad de Negocio</span><span className="val">{fichaDato("unidad") || "—"}</span></div>
+              <div><span className="lbl">Sector</span><span className="val">{fichaDato("sector") || "—"}</span></div>
+              <div><span className="lbl">Puesto</span><span className="val">{fichaDato("puesto") || "—"}</span></div>
+              <div><span className="lbl">Jefe directo</span><span className="val">{fichaDato("jefe") || "—"}</span></div>
+              <div><span className="lbl">Sindicato</span><span className="val">{(plantelFicha && plantelFicha.sindicato) || (ficha && ficha.sindicato) || "—"}</span></div>
+              <div><span className="lbl">Celular</span><span className="val">{(plantelFicha && plantelFicha.celular) || "—"}</span></div>
+              <div><span className="lbl">Domicilio</span><span className="val">{(plantelFicha && plantelFicha.domicilio) || "—"}</span></div>
+              <div><span className="lbl">Fecha de Ingreso</span><span className="val">{plantelFicha && plantelFicha.altaTs!=null ? fmtDateFromTs(plantelFicha.altaTs) : "—"}</span></div>
+              <div><span className="lbl">Estado</span><span className="val">{(plantelFicha && plantelFicha.estado) || "—"}</span></div>
+              <div><span className="lbl">Fecha de Baja</span><span className="val">{plantelFicha && plantelFicha.bajaTs!=null ? <span style={{color:"var(--critical)", fontWeight:700}}>{fmtDateFromTs(plantelFicha.bajaTs)}</span> : "—"}</span></div>
+              <div><span className="lbl">Edad</span><span className="val">{plantelFicha && plantelFicha.nacimientoTs!=null ? calcEdad(plantelFicha.nacimientoTs)+" años" : "—"}</span></div>
+            </div>
+          </div>
+        )}
+
+        {!soloFicha && <div className="card chart-card">
+          <h3>Días por categoría</h3>
+          <p className="desc">Cantidad de filas del período elegido — no depende del filtro de Id Motivo de abajo.</p>
+          <EmployeeBarChart items={[
+            {label:"Presentes", value:cardVals.presentes, color:"#3CC84A"},
+            {label:"Vacaciones", value:cardVals.vac, color:"#2FB38A"},
+            {label:"Ausente Pago", value:cardVals.ap, color:"#F5A62B"},
+            {label:"Ausente No Pago", value:cardVals.anp, color:"#F0605D"},
+            {label:"Sanciones", value:cardVals.sanciones, color:"#E8508C"}
+          ]} />
+        </div>}
+      </div>
+
+      {!motivosPorDefecto && <div className="no-print">
+        <ToggleList title="Filtro Id Motivo (solo para el detalle de abajo)"
+          items={parsed.idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))}
+          included={idMotivoIncluded} onChange={setIdMotivoIncluded}
+          defaultKeys={parsed.idMotivoUniverse.filter(m=>DETALLE_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />
+      </div>}
+
+      {anioSel!=null && (
+        <div className="card table-card de-print-block print-page-break">
+          <style>{ANUAL_GRID_CSS}</style>
+          <h3>Calendario anual de ausencias {anioSel}{ficha && (ficha.nombre||legajoSel) ? " — "+(fichaDato("nombre")||ficha.nombre||"")+" (Legajo "+legajoSel+")" : ""}</h3>
+          <p className="desc">Cada casillero es un día, con el código (Id Motivo) de la ausencia. Muestra todas las ausencias AP y ANP del año elegido, sin importar el período ni el filtro de Id Motivo.</p>
+          <div className="ygrid-wrap"><table className="ygrid">
+            <thead><tr>
+              <th className="ymes">{anioSel}</th>
+              {Array.from({length:31}, (_,i)=>(<th key={i}>{i+1}</th>))}
+            </tr></thead>
+            <tbody>
+              {MESES.map((mn,mi)=>{
+                const dim = daysInMonth(mi+1, anioSel);
+                return (
+                  <tr key={mi}>
+                    <th className="ymes">{mn.toUpperCase()}</th>
+                    {Array.from({length:31}, (_,di)=>{
+                      const d = di+1;
+                      if(d>dim) return <td key={di} className="g-none"></td>;
+                      const ab = anualMap.get(mi+1+"-"+d);
+                      if(ab) return <td key={di} className={ab.cat==="AP" ? "g-ap" : "g-anp"} title={fmtDate(d,mi+1,anioSel)+": "+ab.label}>{ab.code}</td>;
+                      const ts = Date.UTC(anioSel, mi, d);
+                      return <td key={di} className={anualMap.get("off-"+(mi+1)+"-"+d) || isNonWorkingGapDay(ts) ? "g-off" : ""}></td>;
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table></div>
+          <div className="ygrid-leg">
+            <span><i className="g-anp"></i>ANP (ausente no pago)</span>
+            <span><i className="g-ap"></i>AP (ausente pago)</span>
+            <span><i className="g-off"></i>Sábado, domingo y feriado</span>
+          </div>
+        </div>
+      )}
+
+      <div className="card table-card de-print-block print-page-break">
+        <h3>{ausenciaRows.length ? ("DETALLE (" + fmt(ausenciaRows.length) + " días" + (agrupar ? " en " + fmt(ausGrupos.length) + (ausGrupos.length===1 ? " período" : " períodos") : "") + ")") : "Sin días con los Id Motivo seleccionados en el período"}</h3>
+        {ausenciaRows.length>0 && agrupar && (
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="desde" label="Desde" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="hasta" label="Hasta" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="dias" label="Días" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="estado" label="Estado" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="idMotivo" label="Id Motivo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="agrup" label="Agrup. presentismo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="presidencia" label="Agrup. presidencia" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="tipo" label="Tipo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="motivo" label="Motivo" sort={grpSort.sort} toggle={grpSort.toggle} />
+                <SortTh k="razon" label="Razón" sort={grpSort.sort} toggle={grpSort.toggle} />
+                {puedeVerSanciones && <th>Sanción</th>}
+              </tr></thead>
+              <tbody>
+                {grpSort.sorted.map((g,i)=>(
+                  <tr key={i}>
+                    <td>{fmtDateFromTs(g.desdeTs)}</td>
+                    <td>{g.hastaTs===g.desdeTs ? "—" : fmtDateFromTs(g.hastaTs)}</td>
+                    <td>{g.dias}</td>
+                    <td>{g.estados.join(" / ")}</td>
+                    <td>{g.row.idMotivo}</td>
+                    <td>{g.row.agrup || "(vacío)"}</td>
+                    <td>{g.row.presidencia || "—"}</td>
+                    <td>{tipoOf(g.row)}</td>
+                    <td>{g.row.motivo}</td>
+                    <td>{g.razones.join(" / ")}</td>
+                    {puedeVerSanciones && <td>{sancionCelda(tsToISODate(g.desdeTs), tsToISODate(g.hastaTs))}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {ausenciaRows.length>0 && !agrupar && (
+          <div className="overflow-x">
+            <table>
+              <thead><tr>
+                <SortTh k="fecha" label="Fecha" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="estado" label="Estado" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="idMotivo" label="Id Motivo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="agrup" label="Agrup. presentismo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="presidencia" label="Agrup. presidencia" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="tipo" label="Tipo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="motivo" label="Motivo" sort={ausSort.sort} toggle={ausSort.toggle} />
+                <SortTh k="razon" label="Razón" sort={ausSort.sort} toggle={ausSort.toggle} />
+                {puedeVerSanciones && <th>Sanción</th>}
+              </tr></thead>
+              <tbody>
+                {ausSort.sorted.map((r,i)=>(
+                  <tr key={i}>
+                    <td>{fmtDate(r.dia,r.mes,r.anio)}</td>
+                    <td>{r.estado}</td>
+                    <td>{r.idMotivo}</td>
+                    <td>{r.agrup || "(vacío)"}</td>
+                    <td>{r.presidencia || "—"}</td>
+                    <td>{tipoOf(r)}</td>
+                    <td>{r.motivo}</td>
+                    <td>{r.razon}</td>
+                    {puedeVerSanciones && <td>{sancionCelda(tsToISODate(r.ts), tsToISODate(r.ts))}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {conCronicos && !soloFicha && (
+        cronHistListo ? (
+          <div>
+            <div className="no-print" style={{display:"flex", justifyContent:"flex-end", marginBottom:6}}>
+              <button type="button" className="btn secondary small" onClick={()=>setCronHistReload(n=>n+1)} title="Vuelve a leer el historial de Crónicos (para ver lo que cargaron otros usuarios)">Actualizar historial</button>
+            </div>
+            <div className="de-print-block cron-hist-wrap" dangerouslySetInnerHTML={{__html: cronHist.html}} />
+          </div>
+        ) : (
+          <div className="card table-card no-print">
+            <h3>Historial de Crónicos — últimos 12 meses</h3>
+            {cronHist.estado==="error" && cronHist.key===cronHistKey ? (
+              <p className="desc">No se pudo leer el historial de Crónicos ({cronHist.error}). <button type="button" className="cell-link" onClick={()=>setCronHistReload(n=>n+1)}>Reintentar</button></p>
+            ) : (
+              <p className="desc">Leyendo el historial de Crónicos…</p>
+            )}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ===================== barra de scroll horizontal arriba de una tabla ancha ===================== */
+function TopScrollSync({targetRef}){
+  const topRef = useRef(null);
+  const [width, setWidth] = useState(0);
+  useEffect(()=>{
+    const el = targetRef.current;
+    if(!el) return;
+    function sync(){ setWidth(el.scrollWidth); }
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    const mo = new MutationObserver(sync);
+    mo.observe(el, {childList:true, subtree:true});
+    function onBottomScroll(){ if(topRef.current) topRef.current.scrollLeft = el.scrollLeft; }
+    el.addEventListener("scroll", onBottomScroll);
+    return ()=>{ ro.disconnect(); mo.disconnect(); el.removeEventListener("scroll", onBottomScroll); };
+  }, [targetRef]);
+  function onTopScroll(e){ if(targetRef.current) targetRef.current.scrollLeft = e.target.scrollLeft; }
+  if(width<=0) return null;
+  return (
+    <div ref={topRef} onScroll={onTopScroll} className="top-scrollbar">
+      <div style={{width, height:1}}></div>
+    </div>
+  );
+}
+
+/* ===================== encabezado fijo de una tabla ancha =====================
+   Al bajar por la página, cuando los títulos de la tabla salen de la pantalla aparece una copia fija justo debajo del menú
+   (y de la barra de desplazamiento horizontal), con las mismas columnas, que acompaña el desplazamiento lateral y sigue siendo
+   clickeable para ordenar. Los datos son lo único que se mueve. */
+function StickyTableHead({targetRef, columns, sortKey, sortDir, onSort}){
+  const innerRef = useRef(null);
+  const [widths, setWidths] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [active, setActive] = useState(false);
+  useEffect(()=>{
+    const box = targetRef.current;
+    if(!box) return;
+    const table = box.querySelector("table");
+    if(!table || !table.tHead) return;
+    function measure(){
+      const cells = Array.from(table.tHead.rows[0].cells);
+      setWidths(cells.map(c=>c.getBoundingClientRect().width));
+      setTotal(table.getBoundingClientRect().width);
+    }
+    function check(){
+      const tabsH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tabs-h")) || 0;
+      const stick = tabsH + 16;
+      const head = table.tHead.getBoundingClientRect();
+      const tbl = table.getBoundingClientRect();
+      setActive(head.top < stick && tbl.bottom > stick + head.height);
+    }
+    function syncX(){ if(innerRef.current) innerRef.current.scrollLeft = box.scrollLeft; }
+    measure(); check();
+    const ro = new ResizeObserver(()=>{ measure(); check(); });
+    ro.observe(table);
+    const mo = new MutationObserver(()=>{ measure(); check(); });
+    mo.observe(table, {childList:true, subtree:true});
+    window.addEventListener("scroll", check, {passive:true});
+    window.addEventListener("resize", check);
+    box.addEventListener("scroll", syncX);
+    return ()=>{ ro.disconnect(); mo.disconnect(); window.removeEventListener("scroll", check); window.removeEventListener("resize", check); box.removeEventListener("scroll", syncX); };
+  }, [targetRef]);
+  useEffect(()=>{ if(active && innerRef.current && targetRef.current) innerRef.current.scrollLeft = targetRef.current.scrollLeft; }, [active, total]);
+  if(!widths.length) return null;
+  return (
+    <div className="sticky-head-proxy no-print">
+      {active && (
+        <div className="shp-inner" ref={innerRef}>
+          <table style={{width:total}}>
+            <colgroup>{widths.map((w,i)=>(<col key={i} style={{width:w}} />))}</colgroup>
+            <thead><tr>
+              {columns.map(col=>(
+                <th key={col.key} {...cronicoThProps(col)} onClick={()=>onSort(col.key)}>
+                  {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
+                </th>
+              ))}
+            </tr></thead>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===================== crónicos (tab) ===================== */
+const CRONICOS_CASOS_TABLE = "cronicos_casos";
+const CRONICOS_CONFIG_TABLE = "cronicos_config";
+
+/* ---- fechas del campo "Posible alta": siempre DD/MM/AAAA, se corrige lo que se escriba mal ---- */
+const MESES_TXT = {ene:1,feb:2,mar:3,abr:4,may:5,jun:6,jul:7,ago:8,sep:9,set:9,oct:10,nov:11,dic:12};
+// Devuelve {ok:true, value:"DD/MM/AAAA" | ""} o {ok:false}. Acepta 15102026, 15/10/26, 15-10-2026, 15.10, 1510, 2026-10-15, "15 oct 2026", etc.
+function normalizarFechaDMA(raw, hoy){
+  const s = String(raw==null ? "" : raw).trim().toLowerCase();
+  if(!s) return {ok:true, value:""};
+  hoy = hoy || new Date();
+  const yearNow = hoy.getFullYear();
+  const fullYear = t => t.length===2 ? 2000 + (+t) : +t;
+  let d, m, y, mt;
+  if((mt = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/))){ y=+mt[1]; m=+mt[2]; d=+mt[3]; }
+  else if((mt = s.match(/^(\d{1,2})\s*[\/\-.\s]\s*(\d{1,2})(?:\s*[\/\-.\s]\s*(\d{2}|\d{4}))?$/))){ d=+mt[1]; m=+mt[2]; y = mt[3] ? fullYear(mt[3]) : yearNow; }
+  else if((mt = s.match(/^(\d{1,2})\s*(?:de\s+)?([a-záéíóú]{3,})\.?\s*(?:de\s+|del\s+)?(\d{2}|\d{4})?$/))){
+    const key = mt[2].normalize("NFD").replace(/[̀-ͯ]/g,"").slice(0,3);
+    if(!MESES_TXT[key]) return {ok:false};
+    d=+mt[1]; m=MESES_TXT[key]; y = mt[3] ? fullYear(mt[3]) : yearNow;
+  }
+  else if(/^\d{8}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=+s.slice(4); }
+  else if(/^\d{6}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=2000+(+s.slice(4)); }
+  else if(/^\d{4}$/.test(s)){ d=+s.slice(0,2); m=+s.slice(2,4); y=yearNow; }
+  else if(/^[\d\/\-.\s]+$/.test(s) && [4,6,8].includes(s.replace(/\D/g,"").length)){   // barras mal puestas (ej. 27/102026): se toman los números
+    const dg = s.replace(/\D/g,"");
+    d=+dg.slice(0,2); m=+dg.slice(2,4); y = dg.length===8 ? +dg.slice(4) : (dg.length===6 ? 2000+(+dg.slice(4)) : yearNow);
+  }
+  else return {ok:false};
+  if(!(m>=1 && m<=12) || !(y>=1900 && y<=2100) || !(d>=1 && d<=daysInMonth(m,y))) return {ok:false};
+  return {ok:true, value: pad2(d)+"/"+pad2(m)+"/"+y};
+}
+// Mientras se escribe va poniendo las barras: 15102026 -> 15/10/2026, y también si ya hay una barra y se sigue escribiendo (27/10 + 2026 -> 27/10/2026).
+// Si la persona pone la barra a mano después de un solo dígito (5/3/2026) se respeta lo escrito: lo termina de entender normalizarFechaDMA.
+function formatDigitsDMA(v){
+  const s = String(v==null ? "" : v);
+  const partes = s.split(/[\/\-. ]+/);
+  if(partes.length>1 && partes.slice(0,-1).some(x=>x.length===1)) return s;
+  const d = s.replace(/\D/g, "").slice(0, 8);
+  if(!d) return s;
+  if(d.length<=2) return d;
+  if(d.length<=4) return d.slice(0,2)+"/"+d.slice(2);
+  return d.slice(0,2)+"/"+d.slice(2,4)+"/"+d.slice(4);
+}
+// Campo de fecha DD/MM/AAAA al escribir: solo deja números y separadores, va poniendo las barras (2710 -> 27/10) y, si se frena
+// un instante con día y mes (27/10), completa el año actual y lo deja seleccionado para que se pueda pisar escribiendo otro.
+function fechaDMAOnInput(el){
+  clearTimeout(el._autoYear);
+  const limpio = el.value.replace(/[^\d\/\-. ]/g, "");
+  const f = formatDigitsDMA(limpio);
+  if(f!==el.value) el.value = f;
+  if(/^\d{2}\/\d{2}$/.test(f) && normalizarFechaDMA(f).ok){
+    el._autoYear = setTimeout(()=>{
+      if(document.activeElement!==el || el.value!==f) return;
+      el.value = f+"/"+new Date().getFullYear();
+      try{ el.setSelectionRange(6, 10); }catch(_){}
+    }, 800);
+  }
+}
+function dmaToTs(v){
+  const mt = String(v||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return mt ? Date.UTC(+mt[3], +mt[2]-1, +mt[1]) : 0;
+}
+function newObsId(){ return "o"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+// `w` = ancho en px de la columna (los textos largos toman el resto); `fz` = columna fija al desplazar hacia la derecha (Legajo y Nombre).
+const CRONICO_FZ_W = 64;   // ancho de la columna fija Legajo (el Nombre queda pegado a su derecha: .fz2 en index.html usa el mismo valor)
+const CRONICO_COLUMNS = [
+  {key:"legajo", label:"Legajo", get:c=>c.legajo||"", sortType:"text", w:CRONICO_FZ_W, fz:1},
+  {key:"nombre", label:"Nombre", get:c=>c.nombre||"", sortType:"text", w:140, fz:2, max:true},
+  {key:"telefono", label:"Teléfono de contacto", get:c=>c.telefonoContacto||"", sortType:"text", w:132},
+  {key:"grupo", label:"Grupo", get:c=>c.grupo||"", sortType:"text", w:90, max:true, extra:true},
+  {key:"sindicato", label:"Sindicato", get:c=>c.sindicato||"", sortType:"text", w:90},
+  {key:"gerencia", label:"Gerencia", get:c=>c.gerencia||"", sortType:"text", w:110},
+  {key:"codpla", label:"Codpla", get:c=>c.codpla||"", sortType:"text", w:60, extra:true},
+  // Orden del Tipo: RES PTO, CRONICO, ACTUAL, PROC BAJA (y después los demás). Es también el orden inicial de la tabla,
+  // con los días de mayor a menor dentro de cada tipo.
+  {key:"tipo", label:"Tipo", get:c=>{ const i = CRONICO_TIPO_ORDEN.indexOf(c.tipo||""); return i===-1 ? CRONICO_TIPO_ORDEN.length : i; }, sortType:"num", firstDir:"asc", w:78},
+  {key:"inicio", label:"Inicio", get:c=>c.inicioTs||0, sortType:"num", w:122},
+  {key:"dias", label:"Días", get:c=>cronicoDias(c.inicioTs), sortType:"num", align:"num", w:46},
+  {key:"motivo", label:"Motivo - Razón", get:c=>c.motivoLabel||"", sortType:"text", w:170, max:true},
+  {key:"fechaIngreso", label:"Fecha Ingreso", get:c=>c.fechaIngresoTs==null?-1:c.fechaIngresoTs, sortType:"num", w:84},
+  {key:"notificar", label:"Notificar Res. Puesto", get:c=>c.notificar||"", sortType:"text", w:122, extra:true},
+  {key:"opinionMedica", label:"Opinión médica", get:c=>c.opinionMedica||"", sortType:"text", w:140},
+  {key:"tactoEmpleado", label:"Táctico empleado", get:c=>c.tactoEmpleado||"", sortType:"text", w:140},
+  {key:"posibleAlta", label:"Posible alta", get:c=>dmaToTs(c.posibleAlta), sortType:"num", w:104},
+  {key:"observaciones", label:"Observación / Evolución", get:c=>c.observaciones.length, sortType:"num", w:220},
+  {key:"acciones", label:"Acción", get:c=>c.acciones.length, sortType:"num", w:200},
+  // al final, las tildes: Medicina Laboral y Sanción
+  {key:"citado", label:"Medicina Laboral", get:c=>c.cita ? (c.cita.atendido ? 2 : 1) : 0, sortType:"num", w:128},
+  // solo para quien puede marcar sanciones (RRHH y Administrador): 1 marcada, 2 definida, 3 emitida
+  {key:"sancion", label:"Sanción", get:c=>c.sancionReg ? ({marcada:1, definida:2, emitida:3}[c.sancionReg.estado]||1) : 0, sortType:"num", w:140}
+];
+// Columnas que se pueden retraer / expandir juntas (como agrupar columnas en Excel): las marcadas `extra: true` (Grupo, Codpla, Notificar Res. Puesto).
+// "Motivo - Razón" se muestra sin el código y la raya del Id Motivo ("CAE — Con aviso Enfermedad - ..." -> "Con aviso Enfermedad - ...").
+function motivoSinCodigo(label){ return String(label||"").replace(/^\S+\s+[—–]\s+/, ""); }
+// atributos de un encabezado (th) de Crónicos: ancho, orden por clic y, en Legajo/Nombre, la fijación lateral
+function cronicoThProps(col){
+  const cls = [col.align==="num" ? "num" : "", col.fz ? "fz fz"+col.fz : ""].filter(Boolean).join(" ") || undefined;
+  return {className: cls, style:{cursor:"pointer", userSelect:"none", width:col.w, minWidth:col.w, ...(col.fz===1 || col.max ? {maxWidth:col.w} : {})}};
+}
+// Códigos de ausencia por motivos de salud: su "Razón" del ausentismo se carga sola como primera información del historial del caso.
+// (Se pueden agregar más códigos acá.)
+const CRONICOS_CODIGOS_SALUD = new Set(["AT","ET","EN","CAE"]);
+// Listas de movimientos de un caso (observaciones y acciones): las viejas no tenían id, se les da uno estable para poder editarlas o borrarlas.
+function conIds(arr, pref){ return Array.isArray(arr) ? arr.map(o=> o && o.id ? o : {...o, id:pref+(o&&o.ts)}) : []; }
+function casoRowToManual(row){
+  let acciones = conIds(row.acciones, "a");
+  // antes la acción era un único texto (columna `accion`): si todavía no se pasó a la lista, se muestra como primera acción
+  if(!acciones.length && row.accion) acciones = [{id:"alegacy", ts: row.updated_at ? new Date(row.updated_at).getTime() : 0, texto: row.accion, autor:""}];
+  return {
+    tipo: row.tipo||"", notificar: row.notificar||"", opinionMedica: row.opinion_medica||"",
+    tactoEmpleado: row.tacto_empleado||"", posibleAlta: row.posible_alta||"",
+    inicioManualTs: row.inicio_manual ? isoDateToTs(row.inicio_manual) : null,
+    observaciones: conIds(row.observaciones, "o"),
+    acciones,
+    razonSembrada: !!row.razon_sembrada,
+    telefonoContacto: row.telefono_contacto||"",
+    legajo: row.legajo||"", anio: row.anio||0
+  };
+}
+// Teléfono de contacto de un caso: el que se cargó en Crónicos y, si no hay, el celular del plantel.
+// Devuelve {tel, editado, plantel} (editado = hay uno cargado a mano que reemplaza al del plantel).
+function telefonoContactoDe(manualCaso, celularPlantel){
+  const own = String((manualCaso||{}).telefonoContacto||"").trim();
+  return {tel: own || celularPlantel || "", editado: !!own, plantel: celularPlantel||""};
+}
+/* ---- Medicina Laboral: citaciones (tabla `medicina_laboral`, migración supabase-migracion-medicina-laboral.sql) ----
+   Una citación = un empleado/caso citado para un día. La puede crear RRHH/Administrador desde Crónicos (origen "rrhh") o la Dra.
+   desde Medicina Laboral (origen "medicina", p. ej. un control para otro día). Se "atiende" (visto por la Dra.) y se puede anular. */
+const MEDICINA_TABLE = "medicina_laboral";
+// Tipos de control a los que se cita: Consulta Médica Planta (la ve la Dra. en planta) o Control Laboral Cons. Ext. (se deriva a un centro médico externo)
+const TIPOS_CONTROL = {planta:{label:"Consulta Médica Planta", corto:"Planta"}, externa:{label:"Control Laboral Cons. Ext.", corto:"Cons. Ext."}};
+const tipoControlLabel = k => (TIPOS_CONTROL[k]||{}).label || "";
+// Modalidad del control médico: presencial (viene a Medicina Laboral) o telefónica (la Dra. se comunica por teléfono con el empleado)
+const MODALIDADES = {presencial:{label:"Presencial", corto:"Presencial"}, telefonica:{label:"Telefónica (comunicación por teléfono)", corto:"📞 Telefónico"}};
+const modalidadCorto = k => (MODALIDADES[k]||{}).corto || "";
+// Agenda de la Dra.: turnos cada 15 minutos (AGENDA_PASO). El rango se cambia acá (el último turno empieza AGENDA_PASO minutos antes de AGENDA_FIN).
+const AGENDA_PASO = 15;
+const AGENDA_INICIO = "07:00", AGENDA_FIN = "18:00";
+const AGENDA_SLOTS = (()=>{
+  const [h0, m0] = AGENDA_INICIO.split(":").map(Number), [h1, m1] = AGENDA_FIN.split(":").map(Number), out = [];
+  for(let m=h0*60+m0; m<h1*60+m1; m+=AGENDA_PASO) out.push(pad2(Math.floor(m/60))+":"+pad2(m%60));
+  return out;
+})();
+// semanas (de lunes a domingo) de un mes: lista de filas de 7 con la fecha ISO de cada día o null; y mes anterior/siguiente ("AAAA-MM")
+function semanasDelMes(y, m){
+  const dias = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const offset = (new Date(Date.UTC(y, m-1, 1)).getUTCDay() + 6) % 7;
+  const celdas = [];
+  for(let i=0;i<offset;i++) celdas.push(null);
+  for(let d=1; d<=dias; d++) celdas.push(y+"-"+pad2(m)+"-"+pad2(d));
+  while(celdas.length%7) celdas.push(null);
+  const out = [];
+  for(let i=0;i<celdas.length;i+=7) out.push(celdas.slice(i, i+7));
+  return out;
+}
+function mesDesplazado(y, m, delta){ const d = new Date(Date.UTC(y, m-1+delta, 1)); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1); }
+// hora -> citaciones vigentes de ese día (para mostrar cuántos hay ya en cada turno)
+function agendaOcupacion(citas, fecha){
+  const m = new Map();
+  Array.from((citas||new Map()).values()).forEach(c=>{ if(c.fecha===fecha && !c.anulada && c.hora){ if(!m.has(c.hora)) m.set(c.hora, []); m.get(c.hora).push(c); } });
+  return m;
+}
+function SelectHora({value, onChange, ocupacion, disabled}){
+  const extra = value && !AGENDA_SLOTS.includes(value) ? [value] : [];
+  return (
+    <select value={value||""} onChange={e=>onChange(e.target.value)} disabled={disabled} title="Turno de la agenda (cada 15 minutos)">
+      <option value="">Sin horario</option>
+      {AGENDA_SLOTS.concat(extra).map(h=>{ const n = ocupacion && ocupacion.get(h) ? ocupacion.get(h).length : 0; return (<option key={h} value={h}>{h}{n ? " — "+n+" citado"+(n>1 ? "s" : "") : ""}</option>); })}
+    </select>
+  );
+}
+function SelectModalidad({value, onChange, disabled}){
+  return (
+    <select value={value||"presencial"} onChange={e=>onChange(e.target.value)} disabled={disabled} title="Cómo se hace el control médico">
+      {Object.keys(MODALIDADES).map(k=>(<option key={k} value={k}>{MODALIDADES[k].label}</option>))}
+    </select>
+  );
+}
+// Centro médico al que se envía a control (solo para "Control Laboral Cons. Ext."); la lista es DERIV_CENTROS (editable en el código)
+function SelectCentro({value, onChange, disabled}){
+  const extra = value && !DERIV_CENTROS.includes(value) ? [value] : [];
+  return (
+    <select value={value||""} onChange={e=>onChange(e.target.value)} disabled={disabled} title="Centro médico al que se envía a control">
+      <option value="">Centro médico: sin definir</option>
+      {DERIV_CENTROS.concat(extra).map(c=>(<option key={c} value={c}>{c}</option>))}
+    </select>
+  );
+}
+// Un Control Laboral Cons. Ext. queda "resuelto" (deja de figurar como Pendiente) cuando ya se cargó el resultado de la clínica (después de citar)
+// y se marcó el resultado del control (justificada / injustificada). `observaciones` = movimientos del caso (se buscan los de origen "derivacion").
+function controlExtResuelto(cita, observaciones){
+  return !!cita && cita.tipoControl==="externa" && !!cita.resultado &&
+    (observaciones||[]).some(o=>o.origen==="derivacion" && !!o.devolucion && (o.ts||0)>=(cita.citadoTs||0));
+}
+function citaRowToObj(r){
+  return {id:r.id, casoId:r.caso_id, legajo:r.legajo, nombre:r.nombre||"", unidad:r.unidad||"", motivo:r.motivo||"", anio:r.anio||0,
+    fecha:r.fecha, origen:r.origen||"rrhh", citadoPor:r.citado_por||"", citadoTs:Number(r.citado_ts)||0, nota:r.nota_cita||"",
+    atendido:!!r.atendido, atendidoPor:r.atendido_por||"", atendidoTs:Number(r.atendido_ts)||0, anulada:!!r.anulada,
+    // resultado del control médico (art. 210 LCT): "" | "justificada" | "injustificada". undefined = la columna todavía no existe en Supabase.
+    resultado: r.resultado===undefined ? undefined : (r.resultado||""),
+    // tipo de control: "planta" (Consulta Médica Planta) | "externa" (Control Laboral Cons. Ext.) | "" (sin definir). undefined = la columna todavía no existe.
+    tipoControl: r.tipo_control===undefined ? undefined : (r.tipo_control||""),
+    // agenda: hora del turno ("HH:MM", cada 30 min) y modalidad del control ("presencial" | "telefonica"). agendaCols = las columnas ya existen en Supabase.
+    hora: r.hora||"", modalidad: r.modalidad||"", agendaCols: r.hora!==undefined,
+    // centro médico al que se deriva el Control Laboral Cons. Ext. (uno de DERIV_CENTROS, o vacío = sin definir). centroCol = la columna ya existe en Supabase.
+    centro: r.centro||"", centroCol: r.centro!==undefined};
+}
+function citaObjToRow(o){
+  return {id:o.id, caso_id:o.casoId, legajo:o.legajo, nombre:o.nombre||"", unidad:o.unidad||"", motivo:o.motivo||"", anio:o.anio||0,
+    fecha:o.fecha, origen:o.origen||"rrhh", citado_por:o.citadoPor||"", citado_ts:o.citadoTs||null, nota_cita:o.nota||"",
+    atendido:!!o.atendido, atendido_por:o.atendidoPor||"", atendido_ts:o.atendidoTs||null, anulada:!!o.anulada, updated_at:new Date().toISOString(),
+    // solo se envía si se conoce (así las citaciones siguen guardándose aunque todavía no se haya corrido supabase-migracion-medicina-sanciones.sql)
+    ...(o.resultado!==undefined ? {resultado:o.resultado||""} : {}),
+    // solo se envía si se conoce (antes de correr supabase-migracion-roles-rrhh.sql la columna no existe)
+    ...(o.tipoControl ? {tipo_control:o.tipoControl} : {}),
+    // hora y modalidad solo se envían si hay algo para guardar o si las columnas ya existen (antes de supabase-migracion-agenda.sql no se mandan)
+    ...((o.hora || o.modalidad || o.agendaCols) ? {hora:o.hora||"", modalidad:o.modalidad||""} : {}),
+    // el centro solo se envía si hay uno elegido o si la columna ya existe (antes de supabase-migracion-citacion-centro.sql no se manda)
+    ...((o.centro || o.centroCol) ? {centro:o.centro||""} : {})};
+}
+// Eliminar una citación (solo el Administrador: lo hace cumplir una política de Supabase). Si el servidor no la elimina, avisa.
+async function deleteCita(id){
+  const {data, error} = await supabaseClient.from(MEDICINA_TABLE).delete().eq("id", id).select();
+  if(error) throw error;
+  if(!data || !data.length) throw new Error("el servidor no la eliminó (solo puede el Administrador; si lo sos, falta correr supabase-migracion-medicina-sanciones.sql en Supabase)");
+}
+/* ---- Sanciones por ausencias injustificadas (tabla `medicina_sanciones`, migraciones supabase-migracion-medicina-sanciones.sql y supabase-migracion-sanciones-menu.sql) ----
+   Circuito: 1) RRHH (o el Administrador) marca con una tilde, en Crónicos, al empleado al que corresponde una sanción ("marcada");
+   2) el Administrador, en el menú Sanciones, define el tipo (de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento
+   o Suspensión, con sus días) y revisa las fechas de las ausencias ("definida"); 3) se emite la nota en PDF ("emitida"). */
+const SANCIONES_TABLE = "medicina_sanciones";
+const SANCION_TIPOS = ["Llamado de atención","Apercibimiento","Severo Apercibimiento","Suspensión"];
+// Motivo de la sanción: define qué nota se imprime. "ausencias" = ausencias injustificadas (notas de Firpo / Gimenez);
+// "control" = al control médico del art. 210 de la LCT se lo encontró en condiciones de prestar tareas (nota con el texto del control médico).
+const SANCION_MOTIVOS = {
+  ausencias:{label:"Ausencias injustificadas", corto:"Ausencias injustificadas"},
+  control:{label:"Encontrarse en condiciones laborales al momento del control médico (art. 210 LCT)", corto:"En condiciones laborales en el control médico"}
+};
+function sancionId(casoId){ return "SAN|"+casoId; }
+// Días (AAAA-MM-DD) por los que se sanciona: la lista de fechas; en las notas viejas, la fecha escrita ("26/10/2026" o "del 19/10/2026 al 20/10/2026").
+function diasDeSancion(s){
+  if(Array.isArray(s.fechas) && s.fechas.length) return s.fechas;
+  const txt = String(s.fechaAusencia||"");
+  const rango = txt.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}).*?(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+  if(rango){
+    const a = parseFechasTexto(rango[1]), b = parseFechasTexto(rango[2]);
+    if(a.ok && b.ok && a.isos[0] && b.isos[0] && a.isos[0]<=b.isos[0]){
+      const out = []; for(let ts=isoDateToTs(a.isos[0]), fin=isoDateToTs(b.isos[0]); ts<=fin && out.length<400; ts+=86400000) out.push(tsToISODate(ts));
+      return out;
+    }
+  }
+  const un = parseFechasTexto(txt);
+  return un.ok ? un.isos : [];
+}
+function sancionRowToObj(r){
+  // las notas emitidas con la primera versión (id = citación, con fecha de control) eran de "control médico"
+  const motivoSancion = r.motivo_sancion || ((!String(r.id||"").startsWith("SAN|") && r.fecha_control) ? "control" : "ausencias");
+  return {id:r.id, casoId:r.caso_id||"", legajo:r.legajo||"", nombre:r.nombre||"", sector:r.sector||"", unidad:r.unidad||"", motivo:r.motivo||"",
+    motivoSancion, fechaControl:r.fecha_control||"",
+    estado:r.estado||"emitida", medida:r.medida||"", fechas:Array.isArray(r.fechas) ? r.fechas : [], fechaAusencia:r.fecha_ausencia||"",
+    diasSuspension:Number(r.dias_suspension)||0, suspDesde:r.susp_desde||"", suspHasta:r.susp_hasta||"", suspRetoma:r.susp_retoma||"",
+    nInterno:r.n_interno||"", lugar:r.lugar||"", fechaEmision:r.fecha_emision||"",
+    marcadaPor:r.marcada_por||"", marcadaTs:Number(r.marcada_ts)||0, definidaPor:r.definida_por||"", definidaTs:Number(r.definida_ts)||0,
+    emitidaPor:r.emitida_por||"", emitidaTs:Number(r.emitida_ts)||0};
+}
+function sancionObjToRow(o){
+  return {id:o.id, caso_id:o.casoId||"", legajo:o.legajo, nombre:o.nombre||"", sector:o.sector||"", unidad:o.unidad||"", motivo:o.motivo||"",
+    motivo_sancion:o.motivoSancion||"ausencias", fecha_control:o.fechaControl||null,
+    estado:o.estado||"marcada", medida:o.medida||"", fechas:o.fechas||[], fecha_ausencia:o.fechaAusencia||"",
+    dias_suspension:o.diasSuspension||0, susp_desde:o.suspDesde||null, susp_hasta:o.suspHasta||null, susp_retoma:o.suspRetoma||null,
+    n_interno:o.nInterno||"", lugar:o.lugar||"", fecha_emision:o.fechaEmision||null,
+    marcada_por:o.marcadaPor||"", marcada_ts:o.marcadaTs||null, definida_por:o.definidaPor||"", definida_ts:o.definidaTs||null,
+    emitida_por:o.emitidaPor||"", emitida_ts:o.emitidaTs||null, updated_at:new Date().toISOString()};
+}
+async function loadSanciones(){
+  const {data, error} = await supabaseClient.from(SANCIONES_TABLE).select("*");
+  if(error) throw error;
+  return new Map((data||[]).map(r=>{ const o = sancionRowToObj(r); return [o.id, o]; }));
+}
+async function saveSancion(obj){
+  const {error} = await supabaseClient.from(SANCIONES_TABLE).upsert(sancionObjToRow(obj));
+  if(error) throw error;
+  return obj;
+}
+async function deleteSancion(id){
+  const {data, error} = await supabaseClient.from(SANCIONES_TABLE).delete().eq("id", id).select();
+  if(error) throw error;
+  if(!data || !data.length) throw new Error("el servidor no la eliminó (RRHH solo puede quitar las marcadas; el Administrador, cualquiera)");
+}
+
+// descarga de un archivo de texto generado en pantalla (CSV)
+function descargarArchivo(nombre, contenido, mime){
+  const blob = new Blob([contenido], {type: mime||"text/plain"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+const MESES_LARGO = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+// "2026-10-26" -> "26 de octubre de 2026"
+function fechaLarga(iso){
+  const mt = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return mt ? (+mt[3])+" de "+MESES_LARGO[+mt[2]-1]+" de "+mt[1] : String(iso||"");
+}
+// "2026-10-26" -> "26/10/2026"
+function isoToDMY(iso){
+  const mt = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return mt ? mt[3]+"/"+mt[2]+"/"+mt[1] : "";
+}
+// lista de fechas ISO -> "06/10/2026", "06/10/2026 y 08/10/2026" o "06/10/2026, 07/10/2026 y 09/10/2026" (de menor a mayor)
+function fechasTexto(isos){
+  const a = Array.from(new Set((isos||[]).filter(Boolean))).sort().map(isoToDMY);
+  if(a.length<=1) return a.join("");
+  return a.slice(0,-1).join(", ")+" y "+a[a.length-1];
+}
+// texto escrito ("06/10/2026, 07/10/2026 y 09/10/2026") -> {ok, isos} ordenadas de menor a mayor; si alguna fecha no se entiende, ok:false
+function parseFechasTexto(txt){
+  const tokens = String(txt||"").split(/[,;\s]+|\by\b/i).map(t=>t.trim()).filter(Boolean);
+  const isos = [];
+  for(const t of tokens){
+    const r = normalizarFechaDMA(t);
+    if(!r.ok || !r.value) return {ok:false, isos:[]};
+    const [d,m,y] = r.value.split("/");
+    isos.push(y+"-"+m+"-"+d);
+  }
+  return {ok:true, isos:Array.from(new Set(isos)).sort()};
+}
+const JORNADAS_TXT = ["","Una","Dos","Tres","Cuatro","Cinco","Seis","Siete","Ocho","Nueve","Diez","Once","Doce","Trece","Catorce","Quince","Dieciséis","Diecisiete","Dieciocho","Diecinueve","Veinte"];
+function jornadasTexto(n){ return n===1 ? "Una Jornada laboral" : (JORNADAS_TXT[n] || String(n))+" Jornadas laborales"; }
+// nombre con el que se guarda el PDF (el título de la hoja): "9931 GIMENEZ. JAVIER GUSTAVO - Suspensión"
+function sancionNombreArchivo(d){ return ((d.legajo||"")+" "+(d.nombre||"")+" - "+(d.medida||"Sanción")).replace(/[\\\/:*?"<>|]+/g,"").trim(); }
+// Una nota de sanción (una hoja A4). Según el motivo (d.motivoSancion):
+//  - "ausencias": ausencias injustificadas. Dos modelos: Llamado de atención / Apercibimiento / Severo Apercibimiento ("medida correctiva") y Suspensión.
+//  - "control": al control médico del art. 210 de la LCT se lo encontró en condiciones de prestar tareas (mismo texto del control, con la medida elegida).
+function sancionNotaPagina(d, logoUrl){
+  const e = escHtml;
+  const fechas = fechasTexto(d.fechas) || d.fechaAusencia || "…";
+  const blanco = "___/___/___";
+  const dmy = iso => iso ? isoToDMY(iso) : blanco;
+  const suspension = "suspenderlo por el término de "+e(jornadasTexto(Math.max(1, d.diasSuspension||1)))+" desde el día "+e(dmy(d.suspDesde))+" Hasta el día "+e(dmy(d.suspHasta))+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+e(dmy(d.suspRetoma))+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo.";
+  const cabecera = "<section class='nota'>"+
+    "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
+    "<div class='dest'><div class='senor'>Señor/a:</div><div class='nom'>"+e(d.nombre||"")+"</div>"+
+      "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>";
+  const pie = "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
+    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+  if(d.motivoSancion==="control"){
+    const unica = (d.fechas||[]).length<=1;
+    const decisionC = d.medida==="Suspensión"
+      ? "en concordancia con sus antecedentes y la gravedad de la falta cometida, "+suspension
+      : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicar la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
+    return cabecera+
+      "<p class='cuerpo ind'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, con motivo de "+(unica ? "su ausencia del día " : "sus ausencias de los días ")+"<b>"+e(fechas)+"</b>, se procedió a efectuar un control médico en los términos del artículo 210 de la LCT, practicado el día <b>"+e(fechaLarga(d.fechaControl)||"…")+"</b>. "+
+      "Del resultado de dicho control y de la evaluación de la documentación médica presentada, no se logró acreditar la dolencia invocada en los términos que justifiquen la ausencia, determinándose que usted se encontraba en condiciones de prestar tareas. "+
+      "Esta situación requiere que tome debida conciencia de las consecuencias que genera, ya que las ausencias que no se encuentran debidamente justificadas afectan la planificación y organización del trabajo, comprometen el cumplimiento de los plazos de diligenciamiento establecidos por nuestro cliente y pueden repercutir negativamente en la calidad del servicio, exponiendo a la empresa a reclamos y eventuales penalidades económicas por incumplimientos contractuales. "+
+      "Por tal motivo, se le exige actuar con responsabilidad y buena fe en el cumplimiento de sus obligaciones laborales, procurando reencauzar su gestión y evitar situaciones que afecten la operatividad y los compromisos asumidos por la empresa, se ha resuelto, "+decisionC+"</p>"+
+      "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+pie;
+  }
+  const decision = d.medida==="Suspensión"
+    ? suspension
+    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+e(d.medida||"Llamado de atención");
+  return cabecera+
+    "<p class='cuerpo ind'>Notificámosle que ante el incumplimiento a sus obligaciones laborales, al registrar Ausencias injustificadas, en fechas "+e(fechas)+", generando trastornos operativos de su pleno conocimiento, se ha resuelto,&nbsp; en concordancia con sus antecedentes y la gravedad de la falta cometida, "+decision+"</p>"+
+    "<p class='cuerpo'>La presente medida tiene por finalidad reencauzar su gestión&nbsp; y evitar en el futuro la reiteración de este tipo de hechos.</p>"+
+    "<p class='cuerpo'>Apercibimosle que ante la reiteración de este tipo de incumplimientos, se le aplicarán medidas disciplinarias más severas,</p>"+
+    "<p class='cuerpo'>Queda Usted debidamente notificado.</p>"+pie;
+}
+// Abre una ventana con una o varias notas (una hoja cada una), lista para imprimir o guardar como PDF ("Guardar como PDF" en la ventana de impresión).
+// El título de la hoja es el nombre con el que se guarda el archivo. La hoja se imprime sin márgenes del navegador (así no salen la fecha, el título,
+// "about:blank" ni el número de página): los márgenes los da la propia hoja.
+function abrirNotasSancion(titulo, notas){
+  const e = escHtml;
+  const logoUrl = new URL("logo-ema.png", location.href).href;
+  const css = `
+    @page{size:A4;margin:0;}
+    *{box-sizing:border-box;}
+    html,body{margin:0;padding:0;}
+    body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
+    .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;}
+    .nota:last-child{page-break-after:auto;}
+    .top{display:flex;justify-content:space-between;align-items:flex-start;}
+    .top img{width:60mm;height:auto;}
+    .lugar{margin-top:14mm;font-size:13px;}
+    .dest{margin-top:8mm;}
+    .senor{font-style:italic;font-size:15px;}
+    .nom{font-size:21px;line-height:1.25;margin:1mm 0 1mm;}
+    .dato{font-style:italic;font-size:15px;display:flex;}
+    .dato span{display:inline-block;width:24mm;}
+    .dato b{font-weight:700;}
+    hr{border:0;border-top:1.5px solid #000;margin:4mm 0 6mm;}
+    p.cuerpo{text-align:justify;margin:0 0 6mm;font-size:14px;line-height:1.5;}
+    p.ind{text-indent:38mm;}
+    .firmas{margin:16mm 0 0 55mm;font-size:14px;}
+    .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
+    .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
+    .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
+  `;
+  const win = window.open("", "_blank");
+  if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return false; }
+  win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+e(titulo)+'</title><style>'+css+'</style></head><body>'+notas.map(d=>sancionNotaPagina(d, logoUrl)).join("")+'</body></html>');
+  win.document.close(); win.focus();
+  setTimeout(()=>{ win.print(); }, 700);
+  return true;
+}
+function printSancionNota(d){ return abrirNotasSancion(sancionNombreArchivo(d), [d]); }
+async function loadCitas(){
+  const {data, error} = await supabaseClient.from(MEDICINA_TABLE).select("*");
+  if(error) throw error;
+  return new Map((data||[]).map(r=>{ const o = citaRowToObj(r); return [o.id, o]; }));
+}
+async function saveCita(obj){
+  const {error} = await supabaseClient.from(MEDICINA_TABLE).upsert(citaObjToRow(obj));
+  if(error) throw error;
+  return obj;
+}
+/* ---- citación de un empleado que todavía no figura en Crónicos ----
+   Si todavía no se actualizó la base de ausentes, se lo cita igual (por nombre o legajo). Su "caso" provisorio es <legajo>-MANUAL-<año>:
+   ahí se guardan las anotaciones de la Dra. Cuando el empleado aparece como caso de Crónicos, Medicina Laboral toma los datos médicos
+   del caso real y copia a ese caso lo que escribió la Dra. (ver MedicinaLaboralTab). */
+function manualCaseId(legajo, fechaISO){ return cronicoCaseId(legajo, "MANUAL", String(fechaISO||"").slice(0,4) || new Date().getFullYear()); }
+function esCasoManualId(id){ return /-MANUAL-\d+$/.test(String(id||"")); }
+// empleados que se pueden citar a mano: activos del plantel y, si no están en el plantel, los que figuran en las filas de ausentismo
+function employeeOptionsForCita(plantel, records){
+  const map = new Map(), enPlantel = new Set();
+  (plantel||[]).forEach(p=>{
+    const k = (p.legajo||"").toUpperCase(); if(!k) return;
+    enPlantel.add(k);
+    if(plantelVigente(p)) map.set(k, {legajo:p.legajo, nombre:p.nombre||"", unidad:p.unidad||""});
+  });
+  (records||[]).forEach(r=>{
+    if(!r.legajo) return;
+    const k = r.legajo.toUpperCase();
+    if(enPlantel.has(k) || map.has(k)) return;
+    map.set(k, {legajo:r.legajo, nombre:r.nombre||"", unidad:r.unidad||""});
+  });
+  return Array.from(map.values())
+    .map(e=>({value:e.legajo, legajo:e.legajo, nombre:(e.nombre||"").toUpperCase(), unidad:e.unidad, label:e.legajo+" "+(e.nombre||"").toUpperCase()}))
+    .sort((a,b)=> a.nombre.localeCompare(b.nombre,"es") || a.value.localeCompare(b.value,"es"));
+}
+function CitarEmpleadoBox({options, minFecha, defaultFecha, onCitar, citas}){
+  const [leg, setLeg] = useState("");
+  const [fecha, setFecha] = useState(defaultFecha||"");
+  const [nota, setNota] = useState("");
+  const [tipo, setTipo] = useState("planta");
+  const [hora, setHora] = useState("");
+  const [modalidad, setModalidad] = useState("presencial");
+  const [centro, setCentro] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(()=>{ if(!fecha && defaultFecha) setFecha(defaultFecha); }, [defaultFecha]);
+  const emp = options.find(o=>o.value===leg) || null;
+  async function go(){
+    if(!emp || !fecha){ setMsg("Elegí el empleado y la fecha de la citación."); return; }
+    if(minFecha && fecha<minFecha){ setMsg("La fecha no puede ser anterior al "+dateKeyToLabel(minFecha)+"."); return; }
+    setBusy(true); setMsg("Guardando...");
+    try{
+      const r = await onCitar(emp, fecha, nota.trim(), tipo, hora, modalidad, tipo==="externa" ? centro : "");
+      setMsg(r || "Citado.");
+      if(!r || !/^Ya /.test(r)){ setLeg(""); setNota(""); }
+    }catch(err){ setMsg("No se pudo citar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(false);
+  }
+  return (
+    <details className="card" style={{padding:"10px 14px"}}>
+      <summary style={{cursor:"pointer", fontWeight:700}}>Citar a un empleado que todavía no figura en Crónicos</summary>
+      <p className="desc" style={{margin:"8px 0"}}>Si todavía no se actualizaron los ausentes, buscalo por nombre o legajo y elegí la fecha: queda en los Citados de Medicina Laboral de ese día. Cuando se actualice la base, se toman sus datos médicos de Crónicos y lo que escriba la Dra. se suma a su caso.</p>
+      <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end"}}>
+        <div className="field"><label>Empleado</label><SearchSelect options={options} value={leg} onChange={setLeg} placeholder="Buscar legajo o nombre…" /></div>
+        <div className="field"><label>Fecha de la citación</label><input type="date" value={fecha} min={minFecha||undefined} onChange={e=>setFecha(e.target.value)} /></div>
+        <div className="field"><label>Tipo de control</label>
+          <select value={tipo} onChange={e=>setTipo(e.target.value)}>{Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}</select>
+        </div>
+        {tipo==="externa" && <div className="field"><label>Centro médico</label><SelectCentro value={centro} onChange={setCentro} /></div>}
+        <div className="field"><label>Horario (turno de 15 min)</label><SelectHora value={hora} onChange={setHora} ocupacion={agendaOcupacion(citas, fecha)} /></div>
+        <div className="field"><label>Modalidad</label><SelectModalidad value={modalidad} onChange={setModalidad} /></div>
+        <div className="field"><label>Motivo de la cita (opcional)</label><input type="text" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Ej.: control, certificado…" style={{minWidth:220}} /></div>
+        <button type="button" className="btn" onClick={go} disabled={busy || !emp || !fecha}>Citar</button>
+        {msg && <span className="hint">{msg}</span>}
+      </div>
+    </details>
+  );
+}
+// Guarda un cambio en un caso de Crónicos leyendo ANTES el caso tal como está en el servidor y aplicando solo ese cambio
+// (así nunca se pisa lo que guardó otro usuario). `patch` es un objeto, o una función (estadoActual) => objeto | null.
+// Devuelve el estado final guardado, o null si no había nada que cambiar. Lo usan Crónicos y Medicina Laboral.
+async function persistCronicoCase(caseObj, patch, localFallback){
+  const {data:row, error:selErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*").eq("id", caseObj.id).maybeSingle();
+  if(selErr) throw selErr;
+  const prev = row ? casoRowToManual(row) : (localFallback || {});
+  const base = {
+    notificar: caseObj.notificar||"", opinionMedica: caseObj.opinionMedica||"", tactoEmpleado: caseObj.tactoEmpleado||"",
+    posibleAlta: caseObj.posibleAlta||"",
+    inicioManualTs: caseObj.inicioManualTs!=null ? caseObj.inicioManualTs : null,
+    observaciones: [], acciones: [], razonSembrada: false, telefonoContacto: "",
+    ...prev
+  };
+  const p = typeof patch==="function" ? patch(base) : patch;
+  if(p===null) return null;
+  const m = {...base, ...p, tipo: caseObj.tipo || prev.tipo || ""};
+  const {error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).upsert({
+    id: caseObj.id, legajo: caseObj.legajo, anio: caseObj.anio,
+    tipo: m.tipo, notificar: m.notificar||"", opinion_medica: m.opinionMedica||"",
+    tacto_empleado: m.tactoEmpleado||"", posible_alta: m.posibleAlta||"",
+    // `accion` (texto único, versión anterior) se mantiene con la última acción para no romper pantallas que no se recargaron
+    accion: (m.acciones||[]).length ? m.acciones.slice().sort((a,b)=>a.ts-b.ts)[m.acciones.length-1].texto : "",
+    acciones: m.acciones||[], razon_sembrada: !!m.razonSembrada, telefono_contacto: m.telefonoContacto||"",
+    inicio_manual: m.inicioManualTs!=null ? tsToISODate(m.inicioManualTs) : null,
+    observaciones: m.observaciones||[], updated_at: new Date().toISOString()
+  });
+  if(error) throw error;
+  return m;
+}
+/* ---- Derivaciones a "Control Laboral Cons. Ext." (clínicas externas) ----
+   Se guardan como movimientos del caso (observaciones con origen "derivacion": centro, fechaDeriv, devolucion), así no hace falta ninguna
+   tabla nueva y figuran en el historial de Crónicos, en la historia clínica y en el detalle del empleado. `texto` se arma solo. */
+const DERIV_NOMBRE = "Control Laboral Cons. Ext.";
+const DERIV_CENTROS = ["PAL","CEMLA","CEMI","Fitz Roy","Lavoris Cba"];
+function derivTexto(centro, fechaISO, devolucion){
+  return "Derivado a "+DERIV_NOMBRE+" — "+centro+(fechaISO ? " ("+dateKeyToLabel(fechaISO)+")" : "")+"\nDevolución de la clínica: "+(devolucion || "pendiente");
+}
+// Lo que escribió la Dra. (origen "medicina") lo puede modificar o eliminar quien lo registró o el Administrador; las derivaciones se editan desde Medicina Laboral.
+function mismoUsuario(a, b){ return !!a && !!b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); }
+// opts: {admin} el Administrador puede modificar todo (también lo de la Dra.); {soloPropias} RRHH solo modifica lo que cargó él mismo.
+function entradaBloqueada(o, usuario, opts){
+  if(!o || (opts && opts.admin)) return false;
+  if(o.origen==="medicina") return !mismoUsuario(o.autor, usuario);
+  if(opts && opts.soloPropias) return !mismoUsuario(o.autor, usuario);
+  return false;
+}
+function etiquetaOrigen(o){ return o && o.origen==="medicina" ? " · Medicina Laboral" : (o && o.origen==="derivacion" ? " · "+DERIV_NOMBRE : ""); }
+// Historial de movimientos de un caso (observaciones o acciones, según `field`): ordenable, y cada uno se puede editar o eliminar
+// (se ve igual para todos los usuarios), salvo lo que escribió la Dra. (solo ella) y las derivaciones (se editan en Medicina Laboral).
+function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, onStartEdit, onSaveEdit, onDelete, disabled, readOnly, usuario, permisos}){
+  const {sorted, sort, toggle} = useTableSort(c[field], {
+    fecha:{get:o=>o.ts, type:"num"}, texto:{get:o=>o.texto, type:"text"}, autor:{get:o=>o.autor||"", type:"text"}
+  }, {key:"fecha", dir:"desc"});
+  return (
+    <table style={{width:"100%"}}>
+      <thead><tr>
+        <SortTh k="fecha" label="Fecha" sort={sort} toggle={toggle} />
+        <SortTh k="texto" label={labelCol||"Movimiento"} sort={sort} toggle={toggle} />
+        <SortTh k="autor" label="Registró" sort={sort} toggle={toggle} />
+        <th></th>
+      </tr></thead>
+      <tbody>
+        {sorted.map(o=>{
+          const editing = editingObs && editingObs.caseId===c.id && editingObs.field===field && editingObs.obsId===o.id;
+          return (
+            <tr key={o.id}>
+              <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>{new Date(o.ts).toLocaleString("es-AR")}</td>
+              <td style={{whiteSpace:"pre-wrap"}}>
+                {editing ? (
+                  <textarea value={editingObs.texto} autoFocus rows={2} style={{width:"100%"}}
+                    onChange={e=>setEditingObs({...editingObs, texto:e.target.value})}
+                    onKeyDown={e=>{ if(e.key==="Escape") setEditingObs(null); }} />
+                ) : o.texto}
+                {!editing && o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
+              </td>
+              <td style={{verticalAlign:"top"}}>{o.autor || "—"}{o.origen==="medicina" && <div className="hint" style={{color:"var(--accent)", fontWeight:700}}>Medicina Laboral{o.fechaVisita ? " · "+dateKeyToLabel(o.fechaVisita) : ""}</div>}{o.origen==="derivacion" && <div className="hint" style={{color:"var(--accent)", fontWeight:700}}>{DERIV_NOMBRE}{o.centro ? " · "+o.centro : ""}</div>}</td>
+              <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
+                {readOnly ? null : o.origen==="derivacion" ? (
+                  <span className="hint">Se edita en Medicina Laboral</span>
+                ) : entradaBloqueada(o, usuario, permisos) ? (
+                  <span className="hint" title={o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden modificarlo o eliminarlo" : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden modificarlo"}>{o.origen==="medicina" ? "Solo la autora o el Administrador" : "Lo cargó otro usuario"}</span>
+                ) : editing ? (
+                  <React.Fragment>
+                    <button type="button" className="btn small" onClick={()=>onSaveEdit(c)} disabled={disabled}>Guardar</button>{" "}
+                    <button type="button" className="btn secondary small" onClick={()=>setEditingObs(null)}>Cancelar</button>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <button type="button" className="btn secondary small" onClick={()=>onStartEdit(c,field,o)} disabled={disabled}>Editar</button>{" "}
+                    <button type="button" className="btn secondary small" onClick={()=>onDelete(c,field,o)} disabled={disabled}>Eliminar</button>
+                  </React.Fragment>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar, parcial, esAdmin}){
+  const [dbReady, setDbReady] = useState(false);
+  // Filtro de motivos: cada vez que se abre la app arranca en "Por defecto". Los cambios (ej. sumar VAC) son de esta pantalla:
+  // se conservan mientras se navega entre menús, pero no se guardan en el servidor ni cambian lo que ven los demás.
+  const [motivoIncluded, setMotivoIncluded] = useKeptState("cron.motivos", () => new Set(idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)));
+  const [casesManual, setCasesManual] = useState(new Map());
+  const manualRef = useRef(new Map());
+  const [expandedId, setExpandedId] = useState(null);       // caso con el historial de observaciones abierto
+  const [expandedAccId, setExpandedAccId] = useState(null);  // caso con el historial de acciones abierto
+  const [obsDrafts, setObsDrafts] = useState({});            // texto a medio escribir: clave "observaciones:<caso>" / "acciones:<caso>"
+  const seedingRef = useRef(new Set());                      // casos cuya "Razón" ya se intentó cargar en esta sesión
+  const [search, setSearch] = useKeptState("cron.search", "");
+  const [tipoFilter, setTipoFilter] = useKeptState("cron.tipo", "__all");
+  const [saludFilter, setSaludFilter] = useKeptState("cron.salud", "__all"); // "__all" | "__salud" (AT/ET/EN/CAE) | un código
+  const [unidadSel, setUnidadSel] = useKeptState("cron.unidad", null);       // null = todas las unidades; si no, Set con las elegidas
+  const [colsExtra, setColsExtra] = useKeptState("cron.colsExtra", false);     // columnas agrupables (Grupo, Codpla, Notificar Res. Puesto): false = retraídas
+  const [saveStatus, setSaveStatus] = useState("");
+  const [sortKey, setSortKey] = useKeptState("cron.sortKey", "tipo");
+  const [sortDir, setSortDir] = useKeptState("cron.sortDir", "asc");
+  const scrollRef = useRef(null);
+  const locked = !dbReady || !puedeEditar; // sin permiso de edición todo se ve, pero no se puede modificar
+  // RRHH (`parcial`) solo modifica: teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución (lo demás queda bloqueado)
+  const puedeGuardar = puedeEditar || !!parcial;
+  const lockedP = !dbReady || !puedeGuardar;
+  const permisosEntrada = {admin: !!esAdmin, soloPropias: !puedeEditar && !!parcial};
+  const [citaElegir, setCitaElegir] = useState(null);   // caso para el que se está eligiendo el tipo de control al citar
+  const aliveRef = useRef(true);
+  const saveQueueRef = useRef(new Map()); // id del caso -> cola de guardados (uno por vez, en orden)
+  const userRef = useRef("");              // email del usuario, para firmar los movimientos
+  const [editingObs, setEditingObs] = useState(null); // {caseId, field, obsId, texto}
+  const [citas, setCitas] = useState(new Map());       // citaciones a Medicina Laboral (id -> cita)
+  const [citaBusy, setCitaBusy] = useState(null);      // caso cuya citación se está guardando
+  const [sanciones, setSanciones] = useState(new Map()); // notas de sanción ya emitidas (id de la citación -> registro)
+  const [loteSan, setLoteSan] = useState(new Map());     // menú «Sanciones por lote»: legajo -> [{fecha, sancion, dias, enviado_ts}] (para no sancionar dos veces)
+  // La fecha de la citación se elige POR EMPLEADO (calendario del formulario de la columna Medicina Laboral). `citaFecha` = último día cargado:
+  // es la fecha mínima (no se cita para días anteriores) y la que se propone; la columna muestra la próxima citación vigente de cada empleado.
+  const citaFecha = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
+  const fechaCita = citaFecha;
+  const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
+  const [citaForm, setCitaForm] = useState({fecha:"", tipo:"planta", hora:"", modalidad:"presencial", centro:""});    // datos de la citación que se está armando (fecha vacía = el último día cargado)
+
+  // Lee de Supabase todos los casos (lo guardado por cualquier usuario) y las citaciones a Medicina Laboral.
+  async function loadFromServer(){
+    const {data:casos, error:casosErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*");
+    if(!aliveRef.current) return;
+    if(casosErr){ setSaveStatus("Error al leer Supabase: "+casosErr.message); return false; }
+    if(casos){
+      const m = new Map();
+      casos.forEach(row=> m.set(row.id, casoRowToManual(row)));
+      manualRef.current = m;
+      setCasesManual(m);
+    }
+    try{ const cm = await loadCitas(); if(aliveRef.current) setCitas(cm); }
+    catch(err){ /* si todavía no se creó la tabla de Medicina Laboral, Crónicos sigue funcionando sin la columna de citación */ }
+    if(puedeSancionar){
+      try{ const sm = await loadSanciones(); if(aliveRef.current) setSanciones(sm); }
+      catch(err){ /* si todavía no se corrió supabase-migracion-medicina-sanciones.sql, no hay sanciones emitidas que mostrar */ }
+      try{
+        const its = await slFetchAll(SL_T.items, "id");
+        const m = new Map();
+        its.forEach(it=>{ if(!it.incluir) return; const k = String(it.legajo||"").toUpperCase(); if(!m.has(k)) m.set(k, []); (it.fechas||[]).forEach(f=>m.get(k).push({fecha:f, sancion:it.sancion, dias:it.dias, enviado_ts:it.enviado_ts})); });
+        if(aliveRef.current) setLoteSan(m);
+      }catch(err){ /* sin la migración de Sanciones por lote: Crónicos sigue como antes */ }
+    }
+    return true;
+  }
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{
+        const {data} = await supabaseClient.auth.getSession();
+        userRef.current = (data && data.session && data.session.user && data.session.user.email) || "";
+      }catch(e){}
+      await loadFromServer();
+      if(aliveRef.current) setDbReady(true);
+    })();
+    return ()=>{ aliveRef.current = false; };
+  }, []);
+  async function refreshFromServer(){
+    setSaveStatus("Actualizando...");
+    const ok = await loadFromServer();
+    if(ok) setSaveStatus("Datos actualizados");
+  }
+
+  // motivosFijos (Servicio médico): se usan siempre los motivos "Por defecto", sin mostrar ni guardar el filtro
+  const motivoEfectivo = motivosFijos || motivoIncluded;
+  const cases = useMemo(()=> buildCronicoCases(parsed.records, plantel, motivoEfectivo), [parsed, plantel, motivoEfectivo]);
+
+  const plantelCelulares = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p.celular||""])), [plantel]);
+  const celularPlantelDe = legajo => plantelCelulares.get(String(legajo||"").toUpperCase()) || "";
+  // citaciones vigentes (no anuladas, de hoy en adelante) por legajo, ordenadas por fecha y horario: la columna muestra la próxima de cada empleado
+  const pendientesPorLegajo = useMemo(()=>{
+    const m = new Map();
+    citas.forEach(ct=>{
+      if(ct.anulada || !citaFecha || ct.fecha<citaFecha) return;
+      const k = String(ct.legajo).toUpperCase();
+      if(!m.has(k)) m.set(k, []);
+      m.get(k).push(ct);
+    });
+    m.forEach(arr=>arr.sort((a,b)=> a.fecha<b.fecha ? -1 : a.fecha>b.fecha ? 1 : String(a.hora||"99:99").localeCompare(String(b.hora||"99:99"))));
+    return m;
+  }, [citas, citaFecha]);
+
+  // ---- Sanciones por ausencia injustificada (control médico art. 210 LCT) ----
+  // Citaciones donde la Dra. marcó "ausencia injustificada"; la más reciente de cada legajo marca la fila de Crónicos con una tilde.
+  const injustificadas = useMemo(()=> !puedeSancionar ? [] : Array.from(citas.values()).filter(ct=>ct.resultado==="injustificada" && !ct.anulada)
+    .sort((a,b)=> a.fecha<b.fecha ? 1 : a.fecha>b.fecha ? -1 : 0), [citas, puedeSancionar]);
+  const injustificadaPorLegajo = useMemo(()=>{
+    const m = new Map();
+    injustificadas.forEach(ct=>{ const k = String(ct.legajo).toUpperCase(); if(!m.has(k)) m.set(k, ct); });
+    return m;
+  }, [injustificadas]);
+  const columnasVisibles = CRONICO_COLUMNS.filter(c=>(puedeSancionar || c.key!=="sancion") && (colsExtra || !c.extra));
+  const nCols = columnasVisibles.length;
+  // Marcar con una tilde a quien corresponde sancionar por ausencias injustificadas (RRHH y Administrador). Queda "marcada" y figura en el menú
+  // Sanciones, donde el Administrador define el tipo de sanción y emite la nota. Las fechas de las ausencias salen del caso (si son más de 10, solo la última;
+  // se revisan en el menú Sanciones).
+  const [sancionBusy, setSancionBusy] = useState(null);
+  // si alguna ausencia del caso ya está en el menú «Sanciones por lote», no se ofrece «Sancionar» (no se sanciona dos veces)
+  function loteDe(c){
+    const arr = loteSan.get(String(c.legajo||"").toUpperCase()); if(!arr || !arr.length) return null;
+    const dias = new Set((c.diasTs||[]).map(ts=>tsToISODate(ts)));
+    const hits = arr.filter(x=>dias.has(x.fecha)); if(!hits.length) return null;
+    return hits.sort((a,b)=>(b.enviado_ts||0)-(a.enviado_ts||0))[0];
+  }
+  async function marcarSancion(c){
+    if(!puedeSancionar || sanciones.has(sancionId(c.id)) || loteDe(c)) return;
+    setSancionBusy(c.id); setSaveStatus("Marcando para sanción…");
+    try{
+      const dias = (c.diasTs||[]).slice().sort((a,b)=>a-b);
+      const fechas = (dias.length<=10 ? dias : dias.slice(-1)).map(ts=>tsToISODate(ts));
+      const pl = (plantel||[]).find(p=>String(p.legajo||"").toUpperCase()===String(c.legajo).toUpperCase()) || {};
+      const dra = c.draInjustificada ? injustificadaPorLegajo.get(String(c.legajo).toUpperCase()) : null;
+      const obj = await saveSancion({id:sancionId(c.id), casoId:c.id, legajo:c.legajo, nombre:pl.nombre||c.nombre||"", sector:pl.sector||c.grupo||"", unidad:c.unidad||"",
+        motivo:c.motivoLabel||"", estado:"marcada", medida:"", fechas, diasSuspension:0, nInterno:"", lugar:"Florida", fechaEmision:"", marcadaPor:userRef.current, marcadaTs:Date.now(),
+        // si la Dra. no justificó la ausencia en el control médico, el motivo propuesto es el del control (art. 210); el Administrador lo puede cambiar al definir
+        motivoSancion: dra ? "control" : "ausencias", fechaControl: dra ? dra.fecha : ""});
+      setSanciones(p=>{ const n = new Map(p); n.set(obj.id, obj); return n; });
+      setSaveStatus("Marcado para sanción: ya figura en el menú Sanciones");
+    }catch(err){ setSaveStatus("No se pudo marcar: "+((err && err.message) ? err.message : String(err))+" (¿corriste supabase-migracion-sanciones-menu.sql?)"); }
+    setSancionBusy(null);
+  }
+  async function desmarcarSancion(c){
+    const reg = sanciones.get(sancionId(c.id));
+    if(!puedeSancionar || !reg || reg.estado!=="marcada") return;
+    setSancionBusy(c.id); setSaveStatus("Quitando la marca…");
+    try{ await deleteSancion(reg.id); setSanciones(p=>{ const n = new Map(p); n.delete(reg.id); return n; }); setSaveStatus("Marca de sanción quitada"); }
+    catch(err){ setSaveStatus("No se pudo quitar la marca: "+((err && err.message) ? err.message : String(err))); }
+    setSancionBusy(null);
+  }
+  const casesFull = useMemo(()=> cases.map(c=>{
+    const manual = casesManual.get(c.id) || {};
+    const inicioManualTs = manual.inicioManualTs!=null ? manual.inicioManualTs : null;
+    const withInicio = {...c, inicioAutoTs: c.inicioTs, inicioManualTs, inicioTs: inicioManualTs!=null ? inicioManualTs : c.inicioTs};
+    return {...withInicio,
+      tipo: cronicoTipoAuto(withInicio),
+      notificar: manual.notificar || "",
+      opinionMedica: manual.opinionMedica || "",
+      tactoEmpleado: manual.tactoEmpleado || "",
+      posibleAlta: manual.posibleAlta || "",
+      acciones: Array.isArray(manual.acciones) ? manual.acciones : [],
+      // texto de la última acción: para el listado impreso
+      accion: (Array.isArray(manual.acciones) && manual.acciones.length) ? manual.acciones.slice().sort((a,b)=>a.ts-b.ts)[manual.acciones.length-1].texto : "",
+      observaciones: Array.isArray(manual.observaciones) ? manual.observaciones : [],
+      razonSembrada: !!manual.razonSembrada,
+      // teléfono de contacto: el cargado acá o, si no hay, el celular del plantel
+      telefonoContacto: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).tel,
+      telefonoEditado: telefonoContactoDe(manual, celularPlantelDe(c.legajo)).editado,
+      telefonoPlantel: celularPlantelDe(c.legajo),
+      // próxima citación vigente de este caso (la pendiente más cercana; si no hay, la ya atendida), también si se cargó a mano antes de que el empleado figurara en Crónicos
+      cita: (()=>{
+        const mias = (pendientesPorLegajo.get(String(c.legajo).toUpperCase())||[]).filter(ct=>ct.casoId===c.id || ct.casoId===manualCaseId(c.legajo, ct.fecha));
+        return mias.find(ct=>!ct.atendido) || mias[0] || null;
+      })(),
+      // sanción: registro de este caso (marcada / definida / emitida) y si la Dra. consideró injustificada la ausencia en el control médico
+      sancionReg: sanciones.get(sancionId(c.id)) || null,
+      draInjustificada: (()=>{ const ct = injustificadaPorLegajo.get(String(c.legajo).toUpperCase()); return !!ct && ct.fecha>=tsToISODate(inicioManualTs!=null ? inicioManualTs : c.inicioTs); })()
+    };
+  }), [cases, casesManual, citas, pendientesPorLegajo, plantelCelulares, injustificadaPorLegajo, sanciones]);
+
+  // Citar un empleado que todavía no figura en Crónicos (se carga a mano por nombre o legajo)
+  async function citarManual(emp, fecha, nota, tipoControl, hora, modalidad, centro){
+    if(!puedeCitar) return "No tenés permiso para citar.";
+    const real = cases.find(c=>String(c.legajo).toUpperCase()===String(emp.legajo).toUpperCase()) || null;
+    const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
+    const id = casoId+"|"+fecha;
+    const ex = citas.get(id);
+    if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
+    const obj = await saveCita({id, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
+      motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
+      fecha, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl:tipoControl||"", hora:hora||"", modalidad: modalidad==="telefonica" ? "telefonica" : "", centro: tipoControl==="externa" ? (centro||"") : ""});
+    setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
+    return "Citado"+(tipoControl ? " ("+tipoControlLabel(tipoControl)+(tipoControl==="externa" && centro ? " · "+centro : "")+")" : "")+" para el "+dateKeyToLabel(fecha)+(real ? " (ya figura en Crónicos)." : ". Queda en Medicina Laboral.");
+  }
+
+  // Citar / anular la citación a Medicina Laboral desde la lista de Crónicos
+  // `fecha` = el día elegido para ESTE empleado (si no se elige otro, el de "Citar para el día")
+  async function citar(c, tipoControl, hora, modalidad, fecha, centro){
+    const f = fecha || fechaCita;
+    if(!puedeCitar || !f || !tipoControl) return;
+    if(citaFecha && f<citaFecha){ setSaveStatus("La fecha de la citación no puede ser anterior al "+dateKeyToLabel(citaFecha)+"."); return; }
+    // si ya tiene una citación vigente ese día no se pisa
+    const previa = [citas.get(c.id+"|"+f), citas.get(manualCaseId(c.legajo, f)+"|"+f)].find(x=>x && !x.anulada);
+    if(previa){ setSaveStatus((c.nombre||c.legajo)+" ya tiene una citación el "+dateKeyToLabel(f)+(previa.hora ? " a las "+previa.hora+" hs" : "")+"."); return; }
+    setCitaElegir(null);
+    setCitaBusy(c.id); setSaveStatus("Guardando...");
+    try{
+      const obj = await saveCita({id:c.id+"|"+f, casoId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio,
+        fecha:f, origen:"rrhh", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl, hora:hora||"", modalidad: modalidad==="telefonica" ? "telefonica" : "", centro: tipoControl==="externa" ? (centro||"") : ""});
+      setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
+      setSaveStatus("Citado a Medicina Laboral el "+dateKeyToLabel(f)+": "+tipoControlLabel(tipoControl)+(tipoControl==="externa" && centro ? " · "+centro : "")+(hora ? " a las "+hora+" hs" : "")+(modalidad==="telefonica" ? " (control telefónico)" : ""));
+    }catch(err){ setSaveStatus("No se pudo citar: "+(err && err.message ? err.message : String(err))); }
+    setCitaBusy(null);
+  }
+  async function anularCita(c){
+    if(!puedeCitar || !c.cita || c.cita.atendido) return;
+    setCitaBusy(c.id); setSaveStatus("Guardando...");
+    try{
+      const obj = await saveCita({...c.cita, anulada:true});
+      setCitas(prev=>{ const n = new Map(prev); n.set(obj.id, obj); return n; });
+      setSaveStatus("Citación anulada");
+    }catch(err){ setSaveStatus("No se pudo anular: "+(err && err.message ? err.message : String(err))); }
+    setCitaBusy(null);
+  }
+
+  const SIN_UNIDAD = "(Sin unidad)";
+  // opciones del filtro de Unidad de Negocio (con la cantidad de casos de cada una)
+  const unidadOptions = useMemo(()=>{
+    const counts = new Map();
+    casesFull.forEach(c=>{ const u = c.unidad || SIN_UNIDAD; counts.set(u, (counts.get(u)||0)+1); });
+    return Array.from(counts.keys()).sort((a,b)=> unitOrderIndex(a)-unitOrderIndex(b) || a.localeCompare(b, "es"))
+      .map(u=>({value:u, label:u+" ("+counts.get(u)+")"}));
+  }, [casesFull]);
+  const saludCount = useMemo(()=>{
+    const o = {}; casesFull.forEach(c=>{ o[c.codpla] = (o[c.codpla]||0)+1; });
+    return o;
+  }, [casesFull]);
+  const filtered = useMemo(()=>{
+    const q = normTxt(search);
+    return casesFull.filter(c=>{
+      if(tipoFilter!=="__all" && c.tipo!==tipoFilter) return false;
+      if(saludFilter==="__salud" && !CRONICOS_CODIGOS_SALUD.has(c.codpla)) return false;
+      if(saludFilter!=="__all" && saludFilter!=="__salud" && c.codpla!==saludFilter) return false;
+      if(unidadSel && !unidadSel.has(c.unidad || SIN_UNIDAD)) return false;
+      if(q && !(normTxt(c.legajo).includes(q) || normTxt(c.nombre).includes(q))) return false;
+      return true;
+    });
+  }, [casesFull, search, tipoFilter, saludFilter, unidadSel]);
+
+  const sorted = useMemo(()=>{
+    const col = CRONICO_COLUMNS.find(c=>c.key===sortKey) || CRONICO_COLUMNS.find(c=>c.key==="tipo");
+    const dir = sortDir==="asc" ? 1 : -1;
+    return filtered.slice().sort((a,b)=>{
+      const va = col.get(a), vb = col.get(b);
+      const r = col.sortType==="num" ? ((va||0)-(vb||0))*dir : String(va).localeCompare(String(vb), "es", {sensitivity:"base"}) * dir;
+      // a igualdad, siempre los días de mayor a menor
+      return r || (cronicoDias(b.inicioTs) - cronicoDias(a.inicioTs));
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  function handleSort(key){
+    if(sortKey===key){ setSortDir(d=> d==="asc"?"desc":"asc"); return; }
+    const col = CRONICO_COLUMNS.find(c=>c.key===key);
+    setSortKey(key);
+    setSortDir(col && col.firstDir ? col.firstDir : (col && col.sortType==="num" ? "desc" : "asc"));
+  }
+
+  // Cada guardado primero lee el caso tal como está AHORA en el servidor y le aplica solo este cambio.
+  // Así lo que otro usuario guardó (otro campo u otra observación) nunca se pisa ni se pierde, y dos guardados
+  // seguidos del mismo caso se hacen uno después del otro. `patch` es un objeto, o una función
+  // (estadoActual) => objeto cuando el cambio depende de lo que ya hay (agregar/editar/borrar observaciones).
+  function saveCase(caseObj, patch){
+    if(!puedeGuardar) return;
+    const run = async ()=>{
+      setSaveStatus("Guardando...");
+      let m;
+      try{ m = await persistCronicoCase(caseObj, patch, manualRef.current.get(caseObj.id)); }
+      catch(err){ setSaveStatus("Error al guardar: "+(err && err.message ? err.message : String(err))); return; }
+      if(m===null){ setSaveStatus(""); return; } // nada que cambiar (ej. la observación ya no existe)
+      if(!aliveRef.current) return;
+      const nextMap = new Map(manualRef.current);
+      nextMap.set(caseObj.id, m);
+      manualRef.current = nextMap;
+      setCasesManual(nextMap);
+      setSaveStatus("Guardado");
+    };
+    const queue = saveQueueRef.current;
+    const prevJob = queue.get(caseObj.id) || Promise.resolve();
+    const job = prevJob.then(run, run).catch(err=>{ setSaveStatus("Error al guardar: "+(err && err.message ? err.message : String(err))); });
+    queue.set(caseObj.id, job);
+  }
+
+  function commitField(caseObj, field, value){
+    saveCase(caseObj, {[field]: value});
+  }
+
+  // Posible alta: siempre una fecha DD/MM/AAAA. Lo que se escribe mal se corrige solo; si no se entiende, vuelve al valor anterior.
+  function commitPosibleAlta(caseObj, el){
+    const raw = el.value;
+    const anterior = caseObj.posibleAlta || "";
+    if(raw.trim()===anterior) return;
+    const r = normalizarFechaDMA(raw);
+    if(!r.ok){
+      el.value = anterior;
+      setSaveStatus("Posible alta: «"+raw.trim()+"» no es una fecha válida. Escribila como DD/MM/AAAA (se restauró el valor anterior).");
+      return;
+    }
+    el.value = r.value;
+    if(r.value!==anterior) commitField(caseObj, "posibleAlta", r.value);
+  }
+
+  // Observaciones ("observaciones") y acciones ("acciones") funcionan igual: lista de movimientos con fecha, autor, edición y borrado.
+  const NOMBRE_ENTRADA = {observaciones:"observación", acciones:"acción"};
+  function addEntry(caseObj, field){
+    const key = field+":"+caseObj.id;
+    const texto = (obsDrafts[key]||"").trim();
+    if(!texto) return;
+    const entry = {id:newObsId(), ts:Date.now(), texto, autor:userRef.current};
+    saveCase(caseObj, base=>({[field]:[...(base[field]||[]), entry]}));
+    setObsDrafts(prev=>({...prev, [key]:""}));
+  }
+  function startEditEntry(caseObj, field, o){
+    if(entradaBloqueada(o, userRef.current, permisosEntrada) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Los resultados del Control Laboral Cons. Ext. se editan desde Medicina Laboral." : o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden modificarlo." : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden modificarlo."); return; }
+    setEditingObs({caseId:caseObj.id, field, obsId:o.id, texto:o.texto});
+  }
+  function saveEditEntry(caseObj){
+    if(!editingObs) return;
+    const {obsId, field} = editingObs;
+    const orig = (caseObj[field]||[]).find(o=>o.id===obsId);
+    if(orig && (entradaBloqueada(orig, userRef.current, permisosEntrada) || orig.origen==="derivacion")){ setEditingObs(null); return; }
+    const texto = (editingObs.texto||"").trim();
+    if(!texto){ window.alert("La "+NOMBRE_ENTRADA[field]+" no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
+    const editor = userRef.current, ahora = Date.now();
+    saveCase(caseObj, base=>{
+      const lista = base[field]||[];
+      if(!lista.some(o=>o.id===obsId)) return null;
+      return {[field]: lista.map(o=> o.id===obsId ? {...o, texto, editadoTs:ahora, editadoPor:editor} : o)};
+    });
+    setEditingObs(null);
+  }
+  function deleteEntry(caseObj, field, o){
+    if(entradaBloqueada(o, userRef.current, permisosEntrada) || o.origen==="derivacion"){ window.alert(o.origen==="derivacion" ? "Los resultados del Control Laboral Cons. Ext. se eliminan desde Medicina Laboral." : o.origen==="medicina" ? "Lo registró la Dra.: solo ella o el Administrador pueden eliminarlo." : "Lo cargó otro usuario: solo quien lo cargó o el Administrador pueden eliminarlo."); return; }
+    if(!window.confirm("¿Eliminar esta "+NOMBRE_ENTRADA[field]+"?\n\n«"+o.texto+"»\n\nSe borra para todos los usuarios.")) return;
+    saveCase(caseObj, base=>{
+      const lista = base[field]||[];
+      if(!lista.some(x=>x.id===o.id)) return null;
+      return {[field]: lista.filter(x=>x.id!==o.id)};
+    });
+    if(editingObs && editingObs.obsId===o.id && editingObs.field===field) setEditingObs(null);
+  }
+
+  // Ausencias por motivos de salud (AT, ET, EN, CAE...): la "Razón" que viene en el ausentismo se carga sola, una única vez,
+  // como primera información del historial del caso (Observación / Evolución). Solo la hace quien puede editar.
+  useEffect(()=>{
+    if(!puedeEditar || !dbReady) return;
+    casesFull.forEach(c=>{
+      if(!c.razon || !CRONICOS_CODIGOS_SALUD.has(c.codpla)) return;
+      if(c.razonSembrada || c.observaciones.length) return;
+      if(seedingRef.current.has(c.id)) return;
+      seedingRef.current.add(c.id);
+      saveCase(c, base=>{
+        if(base.razonSembrada || (base.observaciones||[]).length) return null; // otro usuario ya la cargó o ya hay información
+        return {
+          observaciones:[{id:"orazon", ts:c.inicioAutoTs + 12*3600*1000, texto:c.razon, autor:"Razón registrada en el ausentismo", origen:"razon"}],
+          razonSembrada:true
+        };
+      });
+    });
+  }, [casesFull, dbReady, puedeEditar]);
+
+  function handlePrint(){
+    // Hoja horizontal. La Acción y la Última observación van en una línea propia debajo de cada caso, usando TODO el ancho de la hoja
+    // (antes quedaban en columnas angostas: el texto se partía en muchas líneas cortas y se gastaban más hojas).
+    const printCss = `
+      @page{size:A4 landscape;margin:10mm;}
+      *{box-sizing:border-box;}
+      body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff;color:#000;margin:0;}
+      h2{margin:0 0 4px;font-size:19px;}
+      p{margin:0 0 8px;font-size:12px;}
+      table{width:100%;border-collapse:collapse;font-size:10.5px;}
+      thead{display:table-header-group;}
+      thead th{text-align:left;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#666;padding:0 4px 5px;border-bottom:1px solid #999;}
+      /* cada caso es un recuadro completo (marco grueso azul) con sus datos en cuadrícula, y una separación entre un caso y el siguiente */
+      tbody.caso{break-inside:avoid;page-break-inside:avoid;}
+      tbody.caso td{padding:4px 5px;vertical-align:top;border:1px solid #9aa4b5;}
+      tbody.caso tr.dato td{background:#eef3fb;border-top:2.5px solid #0c2e80;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      tbody.caso td:first-child{border-left:2.5px solid #0c2e80;}
+      tbody.caso td:last-child{border-right:2.5px solid #0c2e80;}
+      tbody.caso tr:last-child td{border-bottom:2.5px solid #0c2e80;}
+      tbody.caso tr.dato td.id{font-weight:700;font-size:12.5px;color:#000;}
+      tbody.caso tr.nota td{padding:3px 5px 6px 5px;font-size:10.5px;line-height:1.4;}
+      tbody.sep td{height:10px;padding:0;border:0;}
+      .nota .linea{white-space:pre-wrap;margin:0 0 2px;}
+      .nota b{color:#0c2e80;}
+    `;
+    const e = escHtml;
+    const NCOLS = 15;
+    const rows = sorted.map(c=>{
+      // Lo cargado como resultado de un control en un centro externo (Control Laboral Cons. Ext.) va aparte, justo después de los datos del empleado;
+      // la "Última observación" es la última de lo demás (incluye lo que escribe la Dra.), así el resultado no sale repetido.
+      const porFecha = arr => arr.slice().sort((a,b)=>a.ts-b.ts);
+      const resultados = porFecha(c.observaciones.filter(o=>o.origen==="derivacion"));
+      const resultado = resultados.length ? resultados[resultados.length-1] : null;
+      const otras = porFecha(c.observaciones.filter(o=>o.origen!=="derivacion"));
+      const ultima = otras.length ? otras[otras.length-1] : null;
+      const notas = (resultado ? "<p class='linea'><b>Resultado médico — "+e(DERIV_NOMBRE)+" · "+e(resultado.centro||"—")+" ("+e(resultado.fechaDeriv ? dateKeyToLabel(resultado.fechaDeriv) : new Date(resultado.ts).toLocaleDateString("es-AR"))+"):</b> "+(resultado.devolucion ? e(resultado.devolucion) : "<i>resultado pendiente de carga</i>")+"</p>" : "")
+        + (c.accion ? "<p class='linea'><b>Acción:</b> "+e(c.accion)+"</p>" : "")
+        + (ultima ? "<p class='linea'><b>Última observación ("+e(new Date(ultima.ts).toLocaleDateString("es-AR"))+(ultima.origen==="medicina" ? " · Dra." : "")+"):</b> "+e(ultima.texto)+"</p>" : "");
+      return "<tbody class='caso'><tr class='dato'><td class='id'>"+e(c.legajo)+"</td><td class='id'>"+e(c.nombre||"—")+"</td><td class='id'>"+e(c.grupo||"—")+"</td><td>"+e(c.sindicato||"—")+"</td><td>"+e(c.gerencia||"—")+"</td><td>"+e(c.codpla||"—")+"</td><td>"+e(c.tipo||"—")+"</td><td>"+fmtDateFromTs(c.inicioTs)+"</td><td>"+cronicoDias(c.inicioTs)+"</td><td>"+e(c.motivoLabel||"—")+"</td><td>"+(c.fechaIngresoTs!=null?fmtDateFromTs(c.fechaIngresoTs):"—")+"</td><td>"+e(c.notificar||"—")+"</td><td>"+e(c.opinionMedica||"—")+"</td><td>"+e(c.tactoEmpleado||"—")+"</td><td>"+e(c.posibleAlta||"—")+"</td></tr>"
+        + (notas ? "<tr class='nota'><td colspan='"+NCOLS+"'>"+notas+"</td></tr>" : "")
+        + "</tbody><tbody class='sep'><tr><td colspan='"+NCOLS+"'></td></tr></tbody>";
+    }).join("");
+    // el total se informa separado: Servicios Eléctricos (SSEE, "Servicios Electricos" con o sin el "(o)" del plantel) y el resto de las unidades
+    const nSSEE = sorted.filter(c=>normTxt(unidadBase(c.unidad))==="servicios electricos").length;
+    const html = "<h2>Crónicos</h2><p>"+sorted.length+" casos activos (SSEE "+nSSEE+"; Resto "+(sorted.length-nSSEE)+") — "+new Date().toLocaleDateString("es-AR")+"</p>"+
+      "<table><thead><tr><th>Legajo</th><th>Nombre</th><th>Grupo</th><th>Sindicato</th><th>Gerencia</th><th>Codpla</th><th>Tipo</th><th>Inicio</th><th>Días</th><th>Motivo - Razón</th><th>Fecha Ingreso</th><th>Notificar Res. Puesto</th><th>Opinión médica</th><th>Táctico empleado</th><th>Posible alta</th></tr></thead>"+rows+"</table>";
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Crónicos</title><style>'+printCss+'</style></head><body>'+html+'</body></html>');
+    win.document.close();
+    win.focus();
+    setTimeout(()=>{ win.print(); }, 300);
+  }
+
+  // lo que está escrito ahora en la fila (aunque todavía no haya terminado de guardarse en el servidor)
+  function liveValue(c, field){
+    const el = Array.from(document.querySelectorAll("input[data-case]")).find(x=>x.getAttribute("data-case")===c.id && x.getAttribute("data-field")===field);
+    return el ? el.value : null;
+  }
+
+  function printHistoria(list){
+    if(!list.length) return;
+    if(list.length>5 && !window.confirm("Se van a imprimir "+list.length+" historias clínicas (una por hoja). ¿Continuar?")) return;
+    const e = escHtml;
+    const logoUrl = new URL("icon-192.png", location.href).href;
+    const emitido = new Date().toLocaleString("es-AR");
+    const css = `
+      @page{size:A4;margin:14mm;}
+      *{box-sizing:border-box;}
+      body{font-family:Arial,"Segoe UI",sans-serif;color:#111;font-size:12px;margin:0;}
+      .hc{page-break-after:always;}
+      .hc:last-child{page-break-after:auto;}
+      .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0c2e80;padding-bottom:10px;margin-bottom:12px;}
+      .kicker{font-size:10px;letter-spacing:.14em;font-weight:700;color:#2a78d6;}
+      h1{margin:2px 0 2px;font-size:22px;color:#0c2e80;}
+      .sub{color:#555;font-size:11.5px;}
+      .head img{width:64px;height:64px;}
+      h2{font-size:12.5px;color:#0c2e80;margin:14px 0 6px;padding-bottom:3px;border-bottom:1px solid #bfd3f2;text-transform:uppercase;letter-spacing:.04em;}
+      table{width:100%;border-collapse:collapse;}
+      tr{break-inside:avoid;}
+      .kv td{padding:4px 6px;border-bottom:1px solid #eee;vertical-align:top;}
+      .kv td.k{width:20%;color:#555;font-weight:700;font-size:11px;}
+      .kv td.v{width:30%;}
+      .grid th{text-align:left;font-size:10.5px;color:#555;text-transform:uppercase;padding:4px 6px;border-bottom:1px solid #999;}
+      .grid td{padding:4px 6px;border-bottom:1px solid #e5e5e5;vertical-align:top;}
+      .box{border:1px solid #cfd8e8;border-radius:6px;padding:8px 10px;min-height:34px;white-space:pre-wrap;margin:0;}
+      .mov{padding:6px 0 7px;border-bottom:1px solid #e5e5e5;}
+      .mfecha{font-size:10.5px;font-weight:700;color:#0c2e80;}
+      .mmeta{font-weight:400;color:#777;}
+      .mtexto{margin-top:3px;white-space:pre-wrap;line-height:1.45;font-size:12px;}
+      .none{color:#777;font-style:italic;}
+      .foot{margin-top:18px;font-size:10px;color:#777;border-top:1px solid #ddd;padding-top:6px;}
+      .firmas{display:flex;gap:40px;margin-top:40px;}
+      .firmas div{flex:1;border-top:1px solid #333;padding-top:4px;text-align:center;font-size:10.5px;color:#444;}
+    `;
+    const kv = (a,b) =>"<tr><td class='k'>"+a[0]+"</td><td class='v'>"+a[1]+"</td><td class='k'>"+(b?b[0]:"")+"</td><td class='v'>"+(b?b[1]:"")+"</td></tr>";
+    const pages = list.map(c0=>{
+      const pick = f => { const v = liveValue(c0, f); return v!=null ? v : (c0[f]||""); };
+      const inicioLive = liveValue(c0, "inicio");
+      const inicioTs = inicioLive ? isoDateToTs(inicioLive) : c0.inicioTs;
+      const notif = pick("notificar");
+      const notifTxt = notif ? (isoDateToTs(notif)!=null ? fmtDateFromTs(isoDateToTs(notif)) : notif) : "—";
+      const altaRaw = pick("posibleAlta"), altaN = normalizarFechaDMA(altaRaw);
+      // La historia clínica NO imprime las "Acciones": la firma el empleado y esa información es interna.
+      const opinion = pick("opinionMedica"), tacto = pick("tactoEmpleado"), alta = altaN.ok ? altaN.value : altaRaw;
+      const box = t => t ? "<p class='box'>"+e(t)+"</p>" : "<p class='box none'>Sin datos cargados.</p>";
+      const tramos = (c0.tramos||[]).map(t=>"<tr><td>"+fmtDateFromTs(t.desdeTs)+"</td><td>"+fmtDateFromTs(t.hastaTs)+"</td><td>"+t.dias+"</td><td>"+e(CAT_LABEL[t.cat]||t.cat)+"</td><td>"+e(t.label)+"</td></tr>").join("");
+      // cada movimiento ocupa todo el ancho de la hoja: fecha arriba y el texto completo debajo (antes quedaba una columna casi vacía)
+      const obs = (c0.observaciones||[]).slice().sort((a,b)=>a.ts-b.ts).map(o=>"<div class='mov'><div class='mfecha'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor||o.editadoTs ? " <span class='mmeta'>"+e(etiquetaOrigen(o)+(o.autor ? " · Registró: "+o.autor : "")+(o.editadoTs ? " · editado "+new Date(o.editadoTs).toLocaleString("es-AR")+(o.editadoPor?" por "+o.editadoPor:"") : ""))+"</span>" : "")+"</div><div class='mtexto'>"+e(o.texto)+"</div></div>").join("");
+      return "<section class='hc'>"+
+        "<div class='head'><div><div class='kicker'>HISTORIA CLÍNICA LABORAL</div><h1>"+e(c0.nombre||"Sin nombre")+"</h1><div class='sub'>Legajo "+e(c0.legajo)+" · Seguimiento de ausentismo</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
+        "<h2>Datos del empleado</h2><table class='kv'>"+
+          kv(["Legajo",e(c0.legajo)],["Nombre",e(c0.nombre||"—")])+
+          kv(["Gerencia",e(c0.gerencia||"—")],["Grupo",e(c0.grupo||"—")])+
+          kv(["Sindicato",e(c0.sindicato||"—")],["Fecha de ingreso",c0.fechaIngresoTs!=null?fmtDateFromTs(c0.fechaIngresoTs):"—"])+
+        "</table>"+
+        "<h2>Caso</h2><table class='kv'>"+
+          kv(["Tipo",e(c0.tipo||"—")],["Motivo / diagnóstico",e(c0.motivoLabel||"—")])+
+          kv(["Inicio de la ausencia",fmtDateFromTs(inicioTs)],["Días de ausencia",String(cronicoDias(inicioTs))])+
+          kv(["Notificar res. de puesto",e(notifTxt)],["Posible alta",e(alta||"—")])+
+        "</table>"+
+        "<h2>Opinión médica</h2>"+box(opinion)+
+        "<h2>Táctico empleado</h2>"+box(tacto)+
+        "<h2>Tramos de ausencia</h2>"+(tramos ? "<table class='grid'><thead><tr><th>Desde</th><th>Hasta</th><th>Días</th><th>Categoría</th><th>Motivo</th></tr></thead><tbody>"+tramos+"</tbody></table>" : "<p class='box none'>Sin datos.</p>")+
+        "<h2>Evolución / Observaciones</h2>"+(obs ? "<div class='movs'>"+obs+"</div>" : "<p class='box none'>Sin movimientos registrados.</p>")+
+        "<div class='firmas'><div>Firma del profesional</div><div>Firma del empleado</div></div>"+
+        "<div class='foot'>Documento confidencial: contiene información de salud del empleado. Emitido el "+e(emitido)+".</div>"+
+      "</section>";
+    }).join("");
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Historia clínica</title><style>'+css+'</style></head><body>'+pages+'</body></html>');
+    win.document.close();
+    win.focus();
+    setTimeout(()=>{ win.print(); }, 700);
+  }
+
+  return (
+    <div className="tabpanel cronicos-tab">
+      {!dbReady && (
+        <div className="card"><p className="desc" style={{margin:0}}>Cargando datos guardados de Cronicos...</p></div>
+      )}
+      {!motivosFijos && <ToggleList title="Motivos que generan un caso crónico" items={idMotivoUniverse.map(m=>({key:m.key,label:m.label,ap:m.ap,anp:m.anp}))} included={motivoIncluded} onChange={setMotivoIncluded}
+        defaultKeys={idMotivoUniverse.filter(m=>CRONICOS_DEFAULT_MOTIVOS.has(m.key)).map(m=>m.key)} />}
+
+      {puedeCitar && <CitarEmpleadoBox options={empOptions} minFecha={citaFecha} defaultFecha={fechaCita} onCitar={citarManual} citas={citas} />}
+
+      {!motivoEfectivo.size ? (
+        <div className="card table-card">
+          <h3>Crónicos</h3>
+          <p className="desc">Elegí arriba qué Id Motivo generan un caso (ej. Enfermedad, Enfermedad ART, Accidente de trabajo, Reserva de puesto) — el filtro arranca siempre en «Por defecto» y lo que cambies vale para tu pantalla (no modifica lo que ven los demás). Un caso agrupa, por legajo, todas las ausencias con ese motivo dentro del mismo año, y sólo se lista si el empleado sigue activo y su registro más reciente todavía está bajo ese mismo motivo (si ya volvió a estar presente o cambió de motivo, el caso deja de mostrarse).</p>
+        </div>
+      ) : (
+        <div className="card table-card">
+          <div className="filter-row" style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"}}>
+            <input type="text" placeholder="Buscar legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:240}} />
+            <select value={tipoFilter} onChange={e=>setTipoFilter(e.target.value)}>
+              <option value="__all">Todos los tipos</option>
+              {CRONICO_TIPOS.filter(Boolean).map(t=>(<option key={t} value={t}>{t}</option>))}
+            </select>
+            <select value={saludFilter} onChange={e=>setSaludFilter(e.target.value)} title="Filtrar los casos por ausencias de salud">
+              <option value="__all">Todos los casos</option>
+              <option value="__salud">Salud: AT, ET, EN y CAE ({Array.from(CRONICOS_CODIGOS_SALUD).reduce((a,k)=>a+(saludCount[k]||0),0)})</option>
+              {Array.from(CRONICOS_CODIGOS_SALUD).map(k=>(<option key={k} value={k}>Solo {k} ({saludCount[k]||0})</option>))}
+            </select>
+            <MultiSelect label="Unidad de negocio" options={unidadOptions} selected={unidadSel} onChange={setUnidadSel} allLabel="Todas las unidades" />
+            <button type="button" className="btn secondary" onClick={()=>setColsExtra(v=>!v)} aria-expanded={colsExtra} title="Muestra u oculta juntas las columnas Grupo, Codpla y Notificar Res. Puesto">{colsExtra ? "[−] Ocultar Grupo · Codpla · Notif. Res. Puesto" : "[+] Mostrar Grupo · Codpla · Notif. Res. Puesto"}</button>
+            <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
+            <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
+            <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
+            <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
+          </div>
+          <TopScrollSync targetRef={scrollRef} />
+          <StickyTableHead targetRef={scrollRef} columns={columnasVisibles} sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <div className="overflow-x" ref={scrollRef}>
+            <table>
+              <thead><tr>
+                {columnasVisibles.map(col=>(
+                  <th key={col.key} {...cronicoThProps(col)} onClick={()=>handleSort(col.key)}>
+                    {col.label}{sortKey===col.key ? (sortDir==="asc" ? " ▲" : " ▼") : ""}
+                  </th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {!sorted.length && <tr><td colSpan={nCols} style={{textAlign:"center",color:"var(--muted)",padding:"18px 0"}}>Sin casos activos y vigentes con estos filtros.</td></tr>}
+                {sorted.map(c=>{
+                  const notifStatus = cronicoNotificarStatus(c);
+                  return (
+                  <React.Fragment key={c.id}>
+                    <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
+                      <td className="fz fz1" style={{width:CRONICO_FZ_W, minWidth:CRONICO_FZ_W, maxWidth:CRONICO_FZ_W}}>{c.legajo}</td>
+                      <td className="fz fz2" style={{fontWeight:600}}><div style={{maxWidth:132, overflowWrap:"anywhere"}}>{c.nombre||"—"}</div></td>
+                      <td>
+                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={lockedP}
+                          onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                          onBlur={e=>{ const v = e.target.value.trim(); if(v!==(c.telefonoContacto||"")) commitField(c,"telefonoContacto", v); }}
+                          style={{width:122, fontSize:12.5, padding:"5px 6px"}} />
+                        {c.telefonoEditado && (
+                          <div className="hint" style={puedeGuardar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeGuardar ? ()=>commitField(c,"telefonoContacto","") : undefined}
+                            title={c.telefonoPlantel ? "Celular del plantel: "+c.telefonoPlantel : "El plantel no tiene celular cargado"}>
+                            {puedeGuardar ? "distinto al plantel · restablecer" : "distinto al plantel"}
+                          </div>
+                        )}
+                      </td>
+                      {colsExtra && <td><div style={{maxWidth:82, overflowWrap:"anywhere"}}>{c.grupo||"—"}</div></td>}
+                      <td>{c.sindicato||"—"}</td>
+                      <td>{c.gerencia||"—"}</td>
+                      {colsExtra && <td>{c.codpla||"—"}</td>}
+                      <td>{c.tipo}</td>
+                      <td>
+                        <input key={c.id+"-"+(c.inicioManualTs||"auto")} data-case={c.id} data-field="inicio" type="date" defaultValue={tsToISODate(c.inicioTs)} disabled={locked}
+                          onBlur={e=>{ const v=e.target.value; if(v) commitField(c,"inicioManualTs", isoDateToTs(v)); }}
+                          style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
+                        {c.inicioManualTs!=null && (
+                          <div className="hint" style={puedeEditar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeEditar ? ()=>commitField(c,"inicioManualTs", null) : undefined}>
+                            {puedeEditar ? "editado a mano · restablecer" : "editado a mano"}
+                          </div>
+                        )}
+                      </td>
+                      <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
+                      <td><div style={{maxWidth:162, overflowWrap:"anywhere"}}>{motivoSinCodigo(c.motivoLabel)||"—"}</div></td>
+                      <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
+                      {colsExtra && <td>
+                        <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={lockedP}
+                          onChange={e=>commitField(c,"notificar", e.target.value||"")}
+                          style={{width:116, fontSize:12.5, padding:"5px 4px"}} />
+                      </td>}
+                      <td><input key={c.id+"-op-"+c.opinionMedica} type="text" data-case={c.id} data-field="opinionMedica" defaultValue={c.opinionMedica} onBlur={e=>{ if(e.target.value!==c.opinionMedica) commitField(c,"opinionMedica",e.target.value); }} disabled={locked} /></td>
+                      <td><input key={c.id+"-te-"+c.tactoEmpleado} type="text" data-case={c.id} data-field="tactoEmpleado" defaultValue={c.tactoEmpleado} onBlur={e=>{ if(e.target.value!==c.tactoEmpleado) commitField(c,"tactoEmpleado",e.target.value); }} disabled={locked} /></td>
+                      <td><input key={c.id+"-pa-"+c.posibleAlta} type="text" data-case={c.id} data-field="posibleAlta" defaultValue={c.posibleAlta} placeholder="DD/MM/AAAA" maxLength={10} inputMode="numeric" autoComplete="off" style={{width:100, minWidth:100}}
+                        onChange={e=>fechaDMAOnInput(e.target)}
+                        onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                        onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={lockedP} /></td>
+                      <td style={{minWidth:200}}>
+                        {c.observaciones.length>0 && (
+                          <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
+                            {expandedId===c.id ? "Ocultar" : "Ver"} historial ({c.observaciones.length})
+                          </div>
+                        )}
+                        {puedeGuardar && (
+                          <div style={{display:"flex", gap:4}}>
+                            <input type="text" placeholder="Nuevo movimiento…" value={obsDrafts["observaciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["observaciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"observaciones"); }} disabled={lockedP} />
+                            <button type="button" className="btn secondary" title="Agregar este movimiento al historial del caso" onClick={()=>addEntry(c,"observaciones")} disabled={lockedP}>+</button>
+                          </div>
+                        )}
+                        <div className="hint" style={{cursor:"pointer", marginTop:4, textDecoration:"underline"}} onClick={()=>printHistoria([c])}>Imprimir historia clínica</div>
+                      </td>
+                      <td style={{minWidth:180}}>
+                        {c.acciones.length>0 && (
+                          <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedAccId(expandedAccId===c.id?null:c.id)}>
+                            {expandedAccId===c.id ? "Ocultar" : "Ver"} historial ({c.acciones.length})
+                          </div>
+                        )}
+                        {puedeEditar && (
+                          <div style={{display:"flex", gap:4}}>
+                            <input type="text" placeholder="Nueva acción…" value={obsDrafts["acciones:"+c.id]||""} onChange={e=>setObsDrafts(prev=>({...prev,["acciones:"+c.id]:e.target.value}))} onKeyDown={e=>{ if(e.key==="Enter") addEntry(c,"acciones"); }} disabled={locked} />
+                            <button type="button" className="btn secondary" title="Agregar esta acción al historial del caso" onClick={()=>addEntry(c,"acciones")} disabled={locked}>+</button>
+                          </div>
+                        )}
+                        {!puedeEditar && c.acciones.length===0 && "—"}
+                      </td>
+                      <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
+                        {citaElegir===c.id && puedeCitar ? (
+                          <div style={{display:"flex", flexDirection:"column", gap:4, alignItems:"flex-start", minWidth:200}}>
+                            <span className="hint" style={{fontWeight:700}}>Citar a {c.nombre||c.legajo} el día:</span>
+                            <input type="date" value={citaForm.fecha || fechaCita} min={citaFecha||undefined} title="Día de la citación de este empleado (calendario)" onChange={e=>{ if(e.target.value) setCitaForm(f=>({...f, fecha:e.target.value, hora:""})); }} style={{fontSize:12.5, padding:"5px 6px"}} />
+                            <select value={citaForm.tipo} onChange={e=>setCitaForm(f=>({...f, tipo:e.target.value}))} title="Tipo de control">
+                              {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+                            </select>
+                            {citaForm.tipo==="externa" && <SelectCentro value={citaForm.centro} onChange={ce=>setCitaForm(f=>({...f, centro:ce}))} />}
+                            <SelectHora value={citaForm.hora} onChange={h=>setCitaForm(f=>({...f, hora:h}))} ocupacion={agendaOcupacion(citas, citaForm.fecha || fechaCita)} />
+                            <SelectModalidad value={citaForm.modalidad} onChange={m=>setCitaForm(f=>({...f, modalidad:m}))} />
+                            <div style={{display:"flex", gap:6}}>
+                              <button type="button" className="btn small" onClick={()=>citar(c, citaForm.tipo, citaForm.hora, citaForm.modalidad, citaForm.fecha || fechaCita, citaForm.centro)} disabled={citaBusy===c.id}>Citar</button>
+                              <button type="button" className="btn secondary small" onClick={()=>setCitaElegir(null)}>Cancelar</button>
+                            </div>
+                          </div>
+                        ) : c.cita && !c.cita.atendido && controlExtResuelto(c.cita, c.observaciones) ? (
+                          <span style={{color:"var(--good)", fontWeight:700}} title="Ya se cargó el resultado del centro médico y se marcó justificada / injustificada">✓ Resuelto (control externo)</span>
+                        ) : c.cita && c.cita.atendido ? (
+                          <span style={{color:"var(--good)", fontWeight:700}}>✓ Atendido{c.cita.atendidoTs ? " "+new Date(c.cita.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span>
+                        ) : c.cita ? (
+                          <div>
+                          <label style={{cursor:puedeCitar?"pointer":"default", display:"flex", gap:6, alignItems:"center"}} title={"Citado "+(c.cita.origen==="medicina"?"por la Dra.":"desde Crónicos")+" — destildar para anular"}>
+                            <input type="checkbox" checked onChange={()=>anularCita(c)} disabled={!puedeCitar || citaBusy===c.id || (c.cita.origen==="medicina" && !puedeEditar)} />
+                            <span style={{fontWeight:700}}>Citado {dateKeyToLabel(c.cita.fecha).slice(0,5)}{c.cita.tipoControl ? " · "+TIPOS_CONTROL[c.cita.tipoControl].corto : ""}</span>
+                          </label>
+                          {(c.cita.hora || c.cita.modalidad==="telefonica" || (c.cita.tipoControl==="externa" && c.cita.centro)) && <div className="hint" style={{marginTop:2, fontWeight:700}}>{[c.cita.tipoControl==="externa" && c.cita.centro ? c.cita.centro : "", c.cita.hora ? c.cita.hora+" hs" : "", c.cita.modalidad==="telefonica" ? modalidadCorto("telefonica") : ""].filter(Boolean).join(" · ")}</div>}
+                          </div>
+                        ) : puedeCitar ? (
+                          <label style={{cursor:"pointer", display:"flex", gap:6, alignItems:"center"}} title="Citar a Medicina Laboral: elegís el día en un calendario, el tipo de control, el turno y la modalidad">
+                            <input type="checkbox" checked={false} onChange={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }} disabled={citaBusy===c.id || !fechaCita} /> Citar
+                          </label>
+                        ) : "—"}
+                        {puedeCitar && c.cita && citaElegir!==c.id && <div style={{marginTop:2}}><button type="button" className="cell-link" onClick={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }}>+ citar otra fecha</button></div>}
+                      </td>
+                      {puedeSancionar && (
+                        <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
+                          {c.sancionReg && c.sancionReg.estado!=="marcada" ? (
+                            <span style={{color:"var(--good)", fontWeight:700}} title="Se define y se emite desde el menú Sanciones">✔ Sanción {c.sancionReg.estado==="emitida" ? "emitida" : "definida"}: {c.sancionReg.medida}</span>
+                          ) : (!c.sancionReg && loteDe(c)) ? (
+                            <span style={{color:loteDe(c).enviado_ts ? "var(--good)" : "var(--accent)", fontWeight:700}} title={"Esa ausencia ya está en el menú Sanciones por lote ("+isoToDMY(loteDe(c).fecha)+"): no se vuelve a sancionar"}>
+                              {loteDe(c).enviado_ts ? "✔ Sancionada por lote: "+loteDe(c).sancion+" ("+new Date(loteDe(c).enviado_ts).toLocaleDateString("es-AR")+")" : "En lote de sanción: "+loteDe(c).sancion}
+                            </span>
+                          ) : (
+                            <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}} title="Tildá para que el Administrador defina y emita la sanción por ausencias injustificadas (figura en el menú Sanciones)">
+                              <input type="checkbox" checked={!!c.sancionReg} onChange={()=>c.sancionReg ? desmarcarSancion(c) : marcarSancion(c)} disabled={sancionBusy===c.id} />
+                              <span style={c.sancionReg ? {fontWeight:700, color:"var(--bad)"} : undefined}>{c.sancionReg ? "Sanción marcada" : "Sancionar"}</span>
+                            </label>
+                          )}
+                          {c.draInjustificada && <div className="hint" style={{color:"var(--bad)", marginTop:2}} title="En el control médico del art. 210 la Dra. no justificó la ausencia">La Dra.: ausencia injustificada</div>}
+                        </td>
+                      )}
+                    </tr>
+                    {expandedAccId===c.id && c.acciones.length>0 && (
+                      <tr>
+                        <td colSpan={nCols} style={{background:"var(--plane)"}}>
+                          <div className="hint" style={{marginBottom:4, fontWeight:700}}>Acciones — {c.nombre||c.legajo} (no se imprimen en la historia clínica)</div>
+                          <ObservacionesHistory c={c} field="acciones" labelCol="Acción" editingObs={editingObs} setEditingObs={setEditingObs}
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={locked} readOnly={!puedeEditar} usuario={userRef.current} permisos={permisosEntrada} />
+                        </td>
+                      </tr>
+                    )}
+                    {expandedId===c.id && c.observaciones.length>0 && (
+                      <tr>
+                        <td colSpan={nCols} style={{background:"var(--plane)"}}>
+                          <div className="hint" style={{marginBottom:4, fontWeight:700}}>Observación / Evolución — {c.nombre||c.legajo}</div>
+                          <ObservacionesHistory c={c} field="observaciones" labelCol="Movimiento" editingObs={editingObs} setEditingObs={setEditingObs}
+                            onStartEdit={startEditEntry} onSaveEdit={saveEditEntry} onDelete={deleteEntry} disabled={lockedP} readOnly={!puedeGuardar} usuario={userRef.current} permisos={permisosEntrada} />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===================== Medicina Laboral =====================
+   Jornada de la Dra.: ausentes por salud del día (AT, ET, EN, CAE...), empleados citados (por RRHH desde Crónicos o por la Dra. en una
+   visita anterior), ficha con la evolución cargada en Crónicos y sus propias anotaciones (que se guardan en Crónicos como observaciones),
+   y el listado/reporte imprimible de todo lo visto en la jornada. */
+function MedicinaLaboralTab({parsed, plantel, puedeEditar, puedeEliminar, puedeCargarExt, esAdmin}){
+  const puedeExt = !!(puedeEditar || puedeCargarExt);   // cargar resultados del Control Laboral Cons. Ext. (Administrador, Servicio médico y RRHH)
+  const [fechaSel, setFechaSel] = useKeptState("ml.fecha", null);
+  const maxISO = parsed.maxTs!=null ? tsToISODate(parsed.maxTs) : "";
+  const minISO = parsed.minTs!=null ? tsToISODate(parsed.minTs) : "";
+  const fechaISO = fechaSel || maxISO;
+  const dTs = fechaISO ? isoDateToTs(fechaISO) : null;
+  const [dbReady, setDbReady] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [manual, setManual] = useState(new Map());   // caso -> datos de Crónicos (observaciones, opinión médica...)
+  const [citas, setCitas] = useState(new Map());     // citaciones
+  const [status, setStatus] = useState("");
+  const [openKey, setOpenKey] = useState(null);      // ficha abierta
+  const [notas, setNotas] = useState({});            // borrador de anotación por caso
+  const [reCita, setReCita] = useState({});          // {caso: {fecha, nota}} para "citar nuevamente"
+  const [busy, setBusy] = useState(null);
+  const [search, setSearch] = useState("");
+  const [conEvolucion, setConEvolucion] = useState(false);
+  const [derivForm, setDerivForm] = useState({});    // formulario de derivación abierto por caso: {id|null, centro, fecha, devolucion}
+  const [editObs, setEditObs] = useState(null);      // anotación de la evolución que se está editando: {id, texto}
+  const [agendaVista, setAgendaVista] = useKeptState("ml.agendaVista", "dia");   // "dia" | "mes"
+  const [agendaMes, setAgendaMes] = useKeptState("ml.agendaMes", null);          // "AAAA-MM" del calendario; null = el mes del día que se está viendo
+  const userRef = useRef("");
+  const aliveRef = useRef(true);
+  const manualRef = useRef(new Map());
+  const queueRef = useRef(new Map());
+
+  async function loadAll(){
+    try{
+      const {data:casos, error} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*");
+      if(error) throw error;
+      const m = new Map((casos||[]).map(row=>[row.id, casoRowToManual(row)]));
+      const cm = await loadCitas();
+      if(!aliveRef.current) return false;
+      manualRef.current = m; setManual(m); setCitas(cm); setLoadError("");
+      return true;
+    }catch(err){
+      if(aliveRef.current) setLoadError((err && err.message) ? err.message : String(err));
+      return false;
+    }
+  }
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{ const {data} = await supabaseClient.auth.getSession(); userRef.current = (data && data.session && data.session.user && data.session.user.email) || ""; }catch(e){}
+      await loadAll();
+      if(aliveRef.current) setDbReady(true);
+    })();
+    return ()=>{ aliveRef.current = false; };
+  }, []);
+  async function refresh(){ setStatus("Actualizando..."); const ok = await loadAll(); setStatus(ok ? "Datos actualizados" : ""); }
+
+  // ausentes por salud ese día: casos de salud vigentes con último registro justo ese día
+  const ausentes = useMemo(()=>{
+    if(dTs==null) return [];
+    const upTo = parsed.records.filter(r=>r.valid && r.ts<=dTs);
+    return buildCronicoCases(upTo, plantel, CRONICOS_CODIGOS_SALUD).filter(c=>c.ultimaTs===dTs)
+      .map(c=>({...c, dias: Math.round((dTs-c.inicioTs)/86400000)+1}));
+  }, [parsed, plantel, dTs]);
+  const ausentesById = useMemo(()=> new Map(ausentes.map(c=>[c.id, c])), [ausentes]);
+
+  const citasDelDia = useMemo(()=> Array.from(citas.values()).filter(c=>c.fecha===fechaISO && !c.anulada), [citas, fechaISO]);
+  // citación de ese día de un caso; si el empleado se citó a mano antes de figurar en Crónicos, la citación está bajo su caso provisorio
+  const citaDe = (id, legajo) => {
+    let c = citas.get(id+"|"+fechaISO);
+    if((!c || c.anulada) && legajo) c = citas.get(manualCaseId(legajo, fechaISO)+"|"+fechaISO);
+    return c && !c.anulada ? c : null;
+  };
+
+  // Caso real de Crónicos de cada legajo (si ya figura) y datos del plantel (celular)
+  const casosVigentes = useMemo(()=>{
+    const m = new Map();
+    buildCronicoCases(parsed.records, plantel, CRONICOS_DEFAULT_MOTIVOS).forEach(c=>m.set(String(c.legajo).toUpperCase(), c));
+    return m;
+  }, [parsed, plantel]);
+  const realDe = legajo => casosVigentes.get(String(legajo).toUpperCase()) || null;
+  const plantelPorLegajo = useMemo(()=> new Map((plantel||[]).map(p=>[String(p.legajo||"").toUpperCase(), p])), [plantel]);
+  const celularDe = legajo => ((plantelPorLegajo.get(String(legajo).toUpperCase())||{}).celular)||"";
+  // Teléfono de contacto de un empleado/caso: el que se cargó en Crónicos y, si no, el celular del plantel
+  const telefonoDe = item => telefonoContactoDe(manual.get(item.dataId) || manual.get(item.casoId), celularDe(item.legajo));
+  const empOptions = useMemo(()=> employeeOptionsForCita(plantel, parsed.records), [plantel, parsed]);
+  // casos provisorios (citaciones manuales) de un legajo
+  const manualIdsDe = legajo => Array.from(manual.keys()).filter(id=>esCasoManualId(id) && id.startsWith(sanitizeIdSeg(legajo)+"-MANUAL-"));
+
+  // ---- Anotaciones de la Dra. (todas), para listarlas y exportarlas como historia clínica ----
+  const [anDesde, setAnDesde] = useState("");
+  const [anHasta, setAnHasta] = useState("");
+  const [anSearch, setAnSearch] = useState("");
+  const [anTipo, setAnTipo] = useState("__todos");   // "__todos" | "planta" | "externa"
+  const anotaciones = useMemo(()=>{
+    const labelOf = new Map(parsed.idMotivoUniverse.map(m=>[String(m.key).toUpperCase(), m.label]));
+    const motivoDeCaso = new Map(), datosDe = new Map(), resultadoDe = new Map();
+    citas.forEach(ct=>{
+      if(ct.motivo && !motivoDeCaso.has(ct.casoId)) motivoDeCaso.set(ct.casoId, ct.motivo);
+      const lk = String(ct.legajo).toUpperCase();
+      if(ct.nombre && !datosDe.has(lk)) datosDe.set(lk, {nombre:ct.nombre, unidad:ct.unidad});
+      if(ct.resultado && !ct.anulada) resultadoDe.set(lk+"|"+ct.fecha, ct.resultado);
+    });
+    const ids = Array.from(manual.keys()).sort((a,b)=>(esCasoManualId(a)?1:0)-(esCasoManualId(b)?1:0)); // los casos reales primero: lo copiado al caso real no se repite
+    const seen = new Set(), out = [];
+    ids.forEach(id=>{
+      const m = manual.get(id)||{}, leg = m.legajo || "", lk = leg.toUpperCase();
+      (m.observaciones||[]).forEach(o=>{
+        if((o.origen!=="medicina" && o.origen!=="derivacion") || (o.id && seen.has(o.id))) return;
+        if(o.id) seen.add(o.id);
+        const pl = plantelPorLegajo.get(lk) || {}, dd = datosDe.get(lk) || {};
+        let key = id; const pref = sanitizeIdSeg(leg)+"-";
+        if(key.startsWith(pref)) key = key.slice(pref.length);
+        key = key.replace(/-[^-]*$/, "");
+        const motivo = motivoDeCaso.get(id) || (key==="MANUAL" ? "Citación manual" : (labelOf.get(key.toUpperCase()) || key));
+        const ext = o.origen==="derivacion";
+        const visita = (ext ? o.fechaDeriv : o.fechaVisita) || (o.ts ? tsToISODate(Math.floor(o.ts/86400000)*86400000) : "");
+        out.push({id:o.id||id+"|"+o.ts, visita, ts:o.ts||0, legajo:leg, nombre:pl.nombre||dd.nombre||"", unidad:pl.unidad||dd.unidad||"", motivo,
+          tipo: ext ? "externa" : "planta", centro: ext ? (o.centro||"") : "",
+          texto: ext ? (o.devolucion || "(resultado pendiente)") : (o.texto||""), autor:o.autor||"", resultado:resultadoDe.get(lk+"|"+visita)||"", caso:id});
+      });
+    });
+    return out.sort((a,b)=> (a.visita<b.visita?-1:a.visita>b.visita?1:0) || a.ts-b.ts);
+  }, [manual, citas, plantelPorLegajo, parsed]);
+  const anFiltradas = useMemo(()=>{
+    const qa = normTxt(anSearch);
+    return anotaciones.filter(a=>(!anDesde || a.visita>=anDesde) && (!anHasta || a.visita<=anHasta) && (anTipo==="__todos" || a.tipo===anTipo) &&
+      (!qa || normTxt(a.legajo).includes(qa) || normTxt(a.nombre).includes(qa) || normTxt(a.texto).includes(qa)));
+  }, [anotaciones, anDesde, anHasta, anSearch, anTipo]);
+  const RESULTADO_TXT = {justificada:"Justificada", injustificada:"Injustificada"};
+  function anotacionesAoa(){
+    const header = ["Fecha del control","Hora de registro","Legajo","Nombre","Unidad","Motivo - Razón","Tipo de control","Centro médico","Resultado","Registró","Resultado del control (art. 210 LCT)","Caso"];
+    const rows = anFiltradas.map(a=>[a.visita ? dateKeyToLabel(a.visita) : "", a.ts ? new Date(a.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "",
+      a.legajo, a.nombre, a.unidad, a.motivo, tipoControlLabel(a.tipo), a.centro, a.texto, a.autor, RESULTADO_TXT[a.resultado]||"", a.caso]);
+    return [header, ...rows];
+  }
+  function exportarAnotaciones(formato){
+    const aoa = anotacionesAoa();
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const stamp = new Date().toISOString().slice(0,10);
+    if(formato==="csv"){
+      descargarArchivo("resultados-control-laboral-"+stamp+".csv", "﻿"+XLSX.utils.sheet_to_csv(ws, {FS:";"}), "text/csv;charset=utf-8");
+      return;
+    }
+    ws["!cols"] = [{wch:14},{wch:10},{wch:9},{wch:30},{wch:22},{wch:34},{wch:26},{wch:14},{wch:90},{wch:26},{wch:18},{wch:18}];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Resultados");
+    XLSX.writeFile(wb, "resultados-control-laboral-"+stamp+".xlsx");
+  }
+
+  // Traspaso: cuando un empleado citado a mano ya figura como caso de Crónicos, lo que escribió la Dra. en su caso provisorio se copia
+  // al caso real (sin repetir lo ya copiado). Lo hace quien puede editar, una vez por cada novedad.
+  const traspasoRef = useRef(new Set());
+  useEffect(()=>{
+    if(!puedeEditar || !dbReady) return;
+    manual.forEach((m, id)=>{
+      if(!esCasoManualId(id) || !(m.observaciones||[]).length) return;
+      const legKey = id.replace(/-MANUAL-\d+$/, "");
+      const real = Array.from(casosVigentes.values()).find(c=>sanitizeIdSeg(c.legajo)===legKey);
+      if(!real) return;
+      const have = new Set(((manual.get(real.id)||{}).observaciones||[]).map(o=>o.id));
+      const faltan = m.observaciones.filter(o=>!have.has(o.id));
+      if(!faltan.length) return;
+      const key = id+">"+real.id+":"+faltan.map(o=>o.id).join(",");
+      if(traspasoRef.current.has(key)) return;
+      traspasoRef.current.add(key);
+      enCola(real.id, async ()=>{
+        const nm = await persistCronicoCase({id:real.id, legajo:real.legajo, anio:real.anio}, base=>{
+          const h = new Set((base.observaciones||[]).map(o=>o.id));
+          const add = faltan.filter(o=>!h.has(o.id));
+          return add.length ? {observaciones:[...(base.observaciones||[]), ...add]} : null;
+        }, manualRef.current.get(real.id));
+        if(nm && aliveRef.current){ const n = new Map(manualRef.current); n.set(real.id, nm); manualRef.current = n; setManual(n); setStatus("Se sumó a Crónicos lo anotado a "+(real.nombre||real.legajo)); }
+      }).catch(()=>{ traspasoRef.current.delete(key); });
+    });
+  }, [manual, casosVigentes, puedeEditar, dbReady]);
+
+  // elementos unificados para las tablas. dataId = caso donde están los datos médicos (el real de Crónicos si ya existe).
+  const itemDeAusente = c => ({key:c.id, casoId:c.id, dataId:c.id, legajo:c.legajo, nombre:c.nombre||"", unidad:c.unidad||"", motivo:c.motivoLabel||"", anio:c.anio, dias:c.dias});
+  const itemDeCita = ct => {
+    const real = realDe(ct.legajo);
+    const live = ausentesById.get(ct.casoId) || (real ? ausentesById.get(real.id) : null);
+    if(live) return {...itemDeAusente(live), nota:ct.nota};
+    if(real){
+      const d = dTs!=null ? Math.round((dTs-real.inicioTs)/86400000)+1 : null;
+      return {key:ct.casoId, casoId:ct.casoId, dataId:real.id, legajo:ct.legajo, nombre:ct.nombre||real.nombre||"", unidad:real.unidad||ct.unidad, motivo:real.motivoLabel||ct.motivo, anio:real.anio, dias:d>=1 ? d : null, nota:ct.nota};
+    }
+    return {key:ct.casoId, casoId:ct.casoId, dataId:ct.casoId, legajo:ct.legajo, nombre:ct.nombre, unidad:ct.unidad, motivo:ct.motivo, anio:ct.anio, dias:null, nota:ct.nota};
+  };
+  const q = normTxt(search);
+  const pasa = it => !q || normTxt(it.legajo).includes(q) || normTxt(it.nombre).includes(q);
+  // los citados se ordenan por horario (los que no tienen turno, al final) y, a igual horario, por nombre
+  const horaDeItem = it => ((citaDe(it.casoId, it.legajo)||{}).hora) || "99:99";
+  const itemsCitados = citasDelDia.map(itemDeCita).filter(pasa).sort((a,b)=>horaDeItem(a).localeCompare(horaDeItem(b)) || String(a.nombre).localeCompare(String(b.nombre),"es"));
+  const itemsAusentes = ausentes.map(itemDeAusente).filter(pasa).sort((a,b)=>unitOrderIndex(a.unidad)-unitOrderIndex(b.unidad) || String(a.nombre).localeCompare(String(b.nombre),"es"));
+  const vistos = citasDelDia.filter(c=>c.atendido).sort((a,b)=>a.atendidoTs-b.atendidoTs);
+
+  // anotaciones de la Dra. de esa jornada (están guardadas como observaciones del caso, marcadas como Medicina Laboral)
+  // Todas las observaciones de un empleado: las de su caso real de Crónicos y las de sus casos provisorios (sin repetir las ya copiadas).
+  const obsDe = item => {
+    const seen = new Map();
+    new Set([item.casoId, item.dataId, ...manualIdsDe(item.legajo)]).forEach(id=>((manual.get(id)||{}).observaciones||[]).forEach(o=>{ if(!seen.has(o.id)) seen.set(o.id, o); }));
+    return Array.from(seen.values());
+  };
+  const anotacionesDelDia = item => obsDe(item).filter(o=>o.origen==="medicina" && o.fechaVisita===fechaISO).sort((a,b)=>a.ts-b.ts);
+
+  // ---- acciones ----
+  function enCola(casoId, fn){
+    const qm = queueRef.current; const prev = qm.get(casoId) || Promise.resolve();
+    const job = prev.then(fn, fn); qm.set(casoId, job.catch(()=>{})); return job;
+  }
+  const citaNueva = (item, fecha, extra) => { const cid = item.dataId || item.casoId; return {id:cid+"|"+fecha, casoId:cid, legajo:item.legajo, nombre:item.nombre, unidad:item.unidad, motivo:item.motivo, anio:item.anio||0,
+    fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, ...(extra||{})}; };
+  async function guardarCitaLocal(obj){ const saved = await saveCita(obj); setCitas(prev=>{ const n = new Map(prev); n.set(saved.id, saved); return n; }); return saved; }
+  // Cita a un empleado que todavía no figura en Crónicos (o que sí figura): queda en los Citados del día elegido
+  async function citarManual(emp, fecha, nota, tipoControl, hora, modalidad, centro){
+    if(!puedeEditar) return "No tenés permiso para citar.";
+    const real = realDe(emp.legajo);
+    const casoId = real ? real.id : manualCaseId(emp.legajo, fecha);
+    const ex = citas.get(casoId+"|"+fecha);
+    if(ex && !ex.anulada) return "Ya está citado para el "+dateKeyToLabel(fecha)+".";
+    await guardarCitaLocal({id:casoId+"|"+fecha, casoId, legajo:emp.legajo, nombre:emp.nombre||"", unidad:(real && real.unidad) || emp.unidad || "",
+      motivo: real ? real.motivoLabel : "Citación manual (todavía no figura en Crónicos)", anio: real ? real.anio : (Number(String(fecha).slice(0,4))||0),
+      fecha, origen:"medicina", citadoPor:userRef.current, citadoTs:Date.now(), nota:nota||"", atendido:false, atendidoPor:"", atendidoTs:0, anulada:false, tipoControl:tipoControl||"", hora:hora||"", modalidad: modalidad==="telefonica" ? "telefonica" : "", centro: tipoControl==="externa" ? (centro||"") : ""});
+    return "Citado para el "+dateKeyToLabel(fecha)+(fecha===fechaISO ? ". Ya figura en los Citados de este día." : ".");
+  }
+  // Eliminar una citación errónea o de prueba (solo el Administrador). Las anotaciones de la Dra. no se tocan: están en el caso de Crónicos.
+  async function eliminarCita(ct){
+    if(!puedeEliminar || !ct) return;
+    if(!window.confirm("¿Eliminar definitivamente la citación de "+(ct.nombre||ct.legajo)+" del "+dateKeyToLabel(ct.fecha)+"?\n\nSe borra la citación (con su marca de visto y el resultado del control). Las anotaciones de la Dra. siguen guardadas en Crónicos. No se puede deshacer.")) return;
+    setBusy(ct.id); setStatus("Eliminando...");
+    try{
+      await deleteCita(ct.id);
+      setCitas(prev=>{ const n = new Map(prev); n.delete(ct.id); return n; });
+      setStatus("Citación eliminada");
+    }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // Resultado del control médico (art. 210 LCT) de la citación del día: justificada / injustificada. Si es injustificada, RRHH la ve en Crónicos para emitir la sanción.
+  async function setResultado(item, valor){
+    if(!puedeEditar) return;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      const cur = citaDe(item.casoId, item.legajo);
+      await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), resultado: valor, anulada:false});
+      setStatus(valor==="injustificada" ? "Marcada como ausencia injustificada: RRHH lo verá en Crónicos al decidir si corresponde una sanción" : valor==="justificada" ? "Marcada como ausencia justificada" : "Resultado del control borrado");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function marcarVisto(item){
+    if(!puedeEditar) return;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      const cur = citaDe(item.casoId, item.legajo);
+      await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), atendido:true, atendidoPor:userRef.current, atendidoTs:Date.now(), anulada:false});
+      setStatus("Marcado como visto");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function deshacerVisto(item){
+    const cur = citaDe(item.casoId, item.legajo);
+    if(!puedeEditar || !cur) return;
+    setBusy(item.key); setStatus("Guardando...");
+    try{ await guardarCitaLocal({...cur, atendido:false, atendidoPor:"", atendidoTs:0}); setStatus("Visto deshecho"); }
+    catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function guardarAnotacion(item){
+    const texto = (notas[item.key]||"").trim();
+    if(!puedeEditar || !texto) return;
+    setBusy(item.key); setStatus("Guardando...");
+    const entry = {id:newObsId(), ts:Date.now(), texto, autor:userRef.current, origen:"medicina", fechaVisita:fechaISO};
+    // la anotación va al caso real de Crónicos si el empleado ya figura; si no, a su caso provisorio (después se copia al real)
+    const destId = item.dataId || item.casoId;
+    try{
+      await enCola(destId, async ()=>{
+        const m = await persistCronicoCase({id:destId, legajo:item.legajo, anio:item.anio}, base=>({observaciones:[...(base.observaciones||[]), entry]}), manualRef.current.get(destId));
+        if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(destId, m); manualRef.current = n; setManual(n); }
+      });
+      setNotas(p=>({...p, [item.key]:""}));
+      const cur = citaDe(item.casoId, item.legajo);
+      if(!cur || !cur.atendido) await guardarCitaLocal({...(cur || citaNueva(item, fechaISO)), atendido:true, atendidoPor:userRef.current, atendidoTs:Date.now(), anulada:false});
+      setStatus("Anotación guardada (también figura en Crónicos)");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // ---- derivaciones a Control Laboral Cons. Ext. (centro médico + devolución de la clínica) ----
+  const derivacionesDe = item => obsDe(item).filter(o=>o.origen==="derivacion").sort((a,b)=>a.ts-b.ts);
+  function abrirDeriv(item, o){
+    setDerivForm(p=>({...p, [item.key]: o ? {id:o.id, centro:o.centro||"", fecha:o.fechaDeriv||fechaISO, devolucion:o.devolucion||""} : {id:null, centro:"", fecha:fechaISO, devolucion:""}}));
+  }
+  function cerrarDeriv(item){ setDerivForm(p=>{ const n = {...p}; delete n[item.key]; return n; }); }
+  function cambiarDeriv(item, campo, valor){ setDerivForm(p=>({...p, [item.key]:{...(p[item.key]||{}), [campo]:valor}})); }
+  // casos (real y provisorios) donde está guardada una derivación: se corrige en todos para que no quede una copia vieja
+  const casosConObs = obsId => Array.from(manual.keys()).filter(id=>((manual.get(id)||{}).observaciones||[]).some(o=>o.id===obsId));
+  function aplicarManual(id, m){ if(m && aliveRef.current){ const n = new Map(manualRef.current); n.set(id, m); manualRef.current = n; setManual(n); } }
+  async function guardarDeriv(item){
+    const f = derivForm[item.key];
+    if(!puedeExt || !f) return;
+    if(!f.centro){ setStatus("Elegí el centro médico al que se derivó."); return; }
+    if(!f.fecha || isoDateToTs(f.fecha)==null){ setStatus("Elegí la fecha de la derivación."); return; }
+    const devolucion = (f.devolucion||"").trim();
+    const texto = derivTexto(f.centro, f.fecha, devolucion);
+    const ahora = Date.now(), editor = userRef.current;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      if(f.id){
+        const ids = casosConObs(f.id);
+        for(const id of ids){
+          const mc = manual.get(id) || {};
+          await enCola(id, async ()=>{
+            const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+              const lista = base.observaciones||[];
+              if(!lista.some(o=>o.id===f.id)) return null;
+              return {observaciones: lista.map(o=> o.id===f.id ? {...o, centro:f.centro, fechaDeriv:f.fecha, devolucion, texto, editadoTs:ahora, editadoPor:editor} : o)};
+            }, manualRef.current.get(id));
+            aplicarManual(id, m);
+          });
+        }
+      }else{
+        const entry = {id:newObsId(), ts:ahora, texto, autor:editor, origen:"derivacion", centro:f.centro, fechaDeriv:f.fecha, devolucion};
+        const destId = item.dataId || item.casoId;
+        await enCola(destId, async ()=>{
+          const m = await persistCronicoCase({id:destId, legajo:item.legajo, anio:item.anio}, base=>({observaciones:[...(base.observaciones||[]), entry]}), manualRef.current.get(destId));
+          aplicarManual(destId, m);
+        });
+      }
+      cerrarDeriv(item);
+      setStatus(f.id ? "Resultado del control externo actualizado (también figura en Crónicos)" : "Resultado del control externo registrado (también figura en Crónicos)");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // ---- editar / eliminar una anotación de la evolución desde la ficha (la de la Dra.: ella o el Administrador; las demás: Administrador y Servicio médico) ----
+  const puedeModObs = o => puedeEditar && o.origen!=="derivacion" && o.origen!=="razon" && !entradaBloqueada(o, userRef.current, {admin:!!esAdmin});
+  async function guardarEdicionObs(item){
+    if(!editObs) return;
+    const o = obsDe(item).find(x=>x.id===editObs.id);
+    const texto = (editObs.texto||"").trim();
+    if(!o || !puedeModObs(o)) { setEditObs(null); return; }
+    if(!texto){ setStatus("La anotación no puede quedar vacía. Si querés quitarla, usá Eliminar."); return; }
+    const ahora = Date.now(), editor = userRef.current;
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      for(const id of casosConObs(o.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(x=>x.id===o.id)) return null;
+            return {observaciones: lista.map(x=> x.id===o.id ? {...x, texto, editadoTs:ahora, editadoPor:editor} : x)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      setEditObs(null); setStatus("Anotación corregida (también en Crónicos)");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function eliminarObs(item, o){
+    if(!puedeModObs(o)) return;
+    if(!window.confirm("¿Eliminar esta anotación?\n\n«"+o.texto+"»\n\nSe borra también de Crónicos, para todos los usuarios. No se puede deshacer.")) return;
+    setBusy(item.key); setStatus("Eliminando...");
+    try{
+      for(const id of casosConObs(o.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(x=>x.id===o.id)) return null;
+            return {observaciones: lista.filter(x=>x.id!==o.id)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      if(editObs && editObs.id===o.id) setEditObs(null);
+      setStatus("Anotación eliminada");
+    }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function eliminarDeriv(item){
+    const f = derivForm[item.key];
+    if(!puedeEditar || !f || !f.id) return;
+    if(!window.confirm("¿Eliminar este resultado del Control Laboral Cons. Ext. ("+f.centro+")?\n\nSe borra también de Crónicos, incluida la devolución cargada. No se puede deshacer.")) return;
+    setBusy(item.key); setStatus("Eliminando...");
+    try{
+      for(const id of casosConObs(f.id)){
+        const mc = manual.get(id) || {};
+        await enCola(id, async ()=>{
+          const m = await persistCronicoCase({id, legajo:mc.legajo||item.legajo, anio:mc.anio||item.anio}, base=>{
+            const lista = base.observaciones||[];
+            if(!lista.some(o=>o.id===f.id)) return null;
+            return {observaciones: lista.filter(o=>o.id!==f.id)};
+          }, manualRef.current.get(id));
+          aplicarManual(id, m);
+        });
+      }
+      cerrarDeriv(item); setStatus("Resultado del control externo eliminado");
+    }catch(err){ setStatus("No se pudo eliminar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // Cambiar el horario o la modalidad de la citación del día (desde la ficha)
+  async function cambiarAgenda(item, patch){
+    const cur = citaDe(item.casoId, item.legajo);
+    if(!puedeEditar || !cur) return;
+    setBusy(item.key); setStatus("Guardando...");
+    try{ await guardarCitaLocal({...cur, ...patch}); setStatus("Citación actualizada"); }
+    catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  async function citarNuevamente(item){
+    const rc = reCita[item.key] || {};
+    if(!puedeEditar) return;
+    if(!rc.fecha || isoDateToTs(rc.fecha)==null){ setStatus("Elegí la fecha de la nueva cita."); return; }
+    if(rc.fecha < fechaISO){ setStatus("La nueva cita no puede ser anterior al día que estás viendo."); return; }
+    // si ya tiene una citación vigente ese día no se reemplaza (se perdería lo cargado): se cambia el horario desde su ficha ese día
+    const previa = citas.get((item.dataId||item.casoId)+"|"+rc.fecha);
+    if(previa && !previa.anulada){ setStatus("Ya tiene una citación el "+dateKeyToLabel(rc.fecha)+(previa.hora ? " a las "+previa.hora+" hs" : "")+". Para cambiar el horario, abrí su ficha ese día (en Medicina Laboral, elegí esa fecha o tocá el día en la Agenda → Mes)."); return; }
+    setBusy(item.key); setStatus("Guardando...");
+    try{
+      await guardarCitaLocal(citaNueva(item, rc.fecha, {nota:(rc.nota||"").trim(), tipoControl: rc.tipo || ((citaDe(item.casoId, item.legajo)||{}).tipoControl) || "", hora: rc.hora||"", modalidad: rc.modalidad==="telefonica" ? "telefonica" : "",
+        centro: ((rc.tipo || ((citaDe(item.casoId, item.legajo)||{}).tipoControl) || "")==="externa") ? (rc.centro||"") : ""}));
+      setReCita(p=>({...p, [item.key]:{fecha:"", nota:"", tipo:"", hora:"", modalidad:"presencial", centro:""}}));
+      setStatus("Citado para el "+dateKeyToLabel(rc.fecha)+(rc.hora ? " a las "+rc.hora+" hs" : "")+(rc.modalidad==="telefonica" ? " (control telefónico)" : "")+". Ya figura en la agenda de ese día.");
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+
+  // ---- agenda de la Dra.: citados del día por turno de 30 minutos ----
+  const agendaPorHora = useMemo(()=>agendaOcupacion(citas, fechaISO), [citas, fechaISO]);
+  const horasFueraDeRango = Array.from(agendaPorHora.keys()).filter(h=>!AGENDA_SLOTS.includes(h)).sort();
+  const sinHoraDelDia = citasDelDia.filter(c=>!c.hora);
+  const nTelDelDia = citasDelDia.filter(c=>c.modalidad==="telefonica").length;
+  // citaciones vigentes por día (para el calendario del mes): cantidad, telefónicas y ya atendidas
+  const citasPorFecha = useMemo(()=>{
+    const m = new Map();
+    citas.forEach(c=>{ if(c.anulada) return; const o = m.get(c.fecha) || {n:0, tel:0, ok:0}; o.n++; if(c.modalidad==="telefonica") o.tel++; if(c.atendido) o.ok++; m.set(c.fecha, o); });
+    return m;
+  }, [citas]);
+  const mesAg = (()=>{ const [y, m] = (agendaMes || fechaISO.slice(0,7)).split("-").map(Number); return {y, m}; })();
+  const horasAgenda = Array.from(new Set(AGENDA_SLOTS.map(h=>+h.slice(0,2))));
+  const minutosAgenda = Array.from(new Set(AGENDA_SLOTS.map(h=>h.slice(3)))).sort();
+  // nombres de los citados de un turno (tocar abre su ficha, más abajo en Citados)
+  function chipsAgenda(lst){
+    return lst.map(ct=>{
+      const it = itemDeCita(ct);
+      return (
+        <span key={ct.id} style={{display:"inline-flex", gap:6, alignItems:"center", marginRight:12, flexWrap:"wrap"}}>
+          <button type="button" className="cell-link" onClick={()=>setOpenKey("citados|"+it.key)}>{ct.nombre||ct.legajo}</button>
+          <span className="hint" style={{margin:0}}>{ct.tipoControl ? TIPOS_CONTROL[ct.tipoControl].corto : ""}{ct.tipoControl==="externa" && ct.centro ? " · "+ct.centro : ""}{ct.modalidad==="telefonica" ? " · "+modalidadCorto("telefonica") : ""}</span>
+          {ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓</span> : controlExtResuelto(ct, obsDe(it)) ? <span style={{color:"var(--good)", fontWeight:700}} title="Control externo resuelto">✓</span> : null}
+        </span>
+      );
+    });
+  }
+  function imprimirAgenda(){
+    const e = escHtml;
+    const filas = [];
+    AGENDA_SLOTS.concat(horasFueraDeRango).forEach(h=>{ (agendaPorHora.get(h)||[]).forEach(ct=>filas.push([h, ct])); });
+    sinHoraDelDia.forEach(ct=>filas.push(["Sin horario", ct]));
+    const css = `@page{size:A4 landscape;margin:12mm;} *{box-sizing:border-box;} body{font-family:Arial,"Segoe UI",sans-serif;color:#111;font-size:12px;margin:0;}
+      h1{margin:0 0 2px;font-size:19px;color:#0c2e80;} .sub{color:#555;font-size:11.5px;margin-bottom:10px;}
+      table{width:100%;border-collapse:collapse;} th{background:#eef3fb;text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#0c2e80;border:1px solid #cfd8e8;padding:5px 6px;}
+      td{border:1px solid #cfd8e8;padding:5px 6px;vertical-align:top;} .h{font-weight:700;white-space:nowrap;} .tel{font-weight:700;color:#0c2e80;} .foot{margin-top:12px;font-size:10px;color:#777;}`;
+    const body = filas.map(([h, ct])=>{
+      const it = itemDeCita(ct);
+      return "<tr><td class=\"h\">"+e(h)+"</td><td><b>"+e(ct.nombre||"Sin nombre")+"</b><br>Legajo "+e(ct.legajo)+"</td><td>"+e(it.unidad||"—")+"</td><td>"+e(it.motivo||"—")+"</td><td>"+e(ct.tipoControl ? tipoControlLabel(ct.tipoControl)+(ct.tipoControl==="externa" && ct.centro ? " — "+ct.centro : "") : "—")+"</td><td"+(ct.modalidad==="telefonica" ? " class=\"tel\"" : "")+">"+e(ct.modalidad==="telefonica" ? "Telefónico" : "Presencial")+"</td><td>"+e(telefonoDe(it).tel||"—")+"</td><td>"+e(ct.nota||"")+"</td></tr>";
+    }).join("");
+    const html = "<h1>Agenda de Medicina Laboral — "+e(dateKeyToLabel(fechaISO))+"</h1><div class=\"sub\">"+citasDelDia.length+" citado(s) · turnos de 15 minutos"+(nTelDelDia ? " · "+nTelDelDia+" control(es) telefónico(s)" : "")+"</div>"+
+      "<table><thead><tr><th>Hora</th><th>Empleado</th><th>Unidad</th><th>Motivo - Razón</th><th>Tipo de control</th><th>Modalidad</th><th>Teléfono</th><th>Motivo de la cita</th></tr></thead><tbody>"+(body || "<tr><td colspan=\"8\">No hay citados para este día.</td></tr>")+"</tbody></table>"+
+      "<div class=\"foot\">Documento confidencial. Emitido el "+e(new Date().toLocaleString("es-AR"))+".</div>";
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write("<!doctype html><html><head><meta charset=\"utf-8\"><title>Agenda "+e(dateKeyToLabel(fechaISO))+"</title><style>"+css+"</style></head><body>"+html+"</body></html>");
+    win.document.close(); win.focus();
+    setTimeout(()=>{ win.print(); }, 500);
+  }
+
+  // ---- reporte imprimible de la jornada ----
+  function imprimirJornada(){
+    const e = escHtml;
+    const profesionales = Array.from(new Set(vistos.map(v=>v.atendidoPor).filter(Boolean)));
+    const css = `
+      @page{size:A4;margin:12mm;}
+      *{box-sizing:border-box;}
+      body{font-family:Arial,"Segoe UI",sans-serif;color:#111;font-size:12px;margin:0;}
+      .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0c2e80;padding-bottom:8px;margin-bottom:10px;}
+      .kicker{font-size:10px;letter-spacing:.14em;font-weight:700;color:#2a78d6;}
+      h1{margin:2px 0;font-size:20px;color:#0c2e80;}
+      .sub{color:#555;font-size:11.5px;}
+      .head img{width:56px;height:56px;}
+      .emp{border:1px solid #cfd8e8;border-radius:6px;padding:8px 10px;margin:0 0 9px;break-inside:avoid;}
+      .emp .t{display:flex;justify-content:space-between;gap:10px;font-weight:700;color:#0c2e80;font-size:12.5px;}
+      .emp .m{color:#555;font-size:11px;margin:2px 0 5px;}
+      .lbl{font-size:10px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.04em;margin:5px 0 2px;}
+      .txt{white-space:pre-wrap;line-height:1.45;margin:0 0 3px;}
+      .meta{color:#777;font-size:10px;}
+      .none{color:#777;font-style:italic;}
+      .firma{margin-top:30px;width:40%;border-top:1px solid #333;padding-top:4px;text-align:center;font-size:10.5px;color:#444;}
+      .foot{margin-top:14px;font-size:10px;color:#777;border-top:1px solid #ddd;padding-top:5px;}
+    `;
+    const bloques = vistos.map(v=>{
+      const it = itemDeCita(v);
+      const notasDia = anotacionesDelDia(it);
+      const previas = obsDe(it).filter(o=>!(o.origen==="medicina" && o.fechaVisita===fechaISO) && o.origen!=="derivacion").slice().sort((a,b)=>a.ts-b.ts);
+      const cel = telefonoDe(it).tel;
+      return "<div class='emp'><div class='t'><span>"+e(v.nombre||"Sin nombre")+" — Legajo "+e(v.legajo)+(cel ? " · Cel. "+e(cel) : "")+"</span><span>"+e(v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "")+" hs</span></div>"+
+        "<div class='m'>"+e(it.unidad||"—")+" · "+e(it.motivo || "—")+(it.dias!=null ? " · "+it.dias+" día(s) de ausencia" : "")+" · "+(v.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH")+(v.tipoControl ? " · "+e(tipoControlLabel(v.tipoControl)) : "")+(v.hora ? " · Turno "+e(v.hora)+" hs" : "")+(v.modalidad==="telefonica" ? " · Control telefónico" : "")+(v.nota ? " · Motivo de la cita: "+e(v.nota) : "")+(v.resultado ? " · Control art. 210: "+(v.resultado==="injustificada" ? "ausencia injustificada" : "ausencia justificada") : "")+"</div>"+
+        "<div class='lbl'>Anotaciones de la jornada</div>"+
+        (notasDia.length ? notasDia.map(o=>"<p class='txt'>"+e(o.texto)+" <span class='meta'>("+e(new Date(o.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}))+(o.autor ? " · "+e(o.autor) : "")+")</span></p>").join("") : "<p class='txt none'>Sin anotaciones registradas.</p>")+
+        (derivacionesDe(it).length ? "<div class='lbl'>Resultados de "+e(DERIV_NOMBRE)+"</div>"+derivacionesDe(it).map(o=>"<p class='txt'><b>"+e(o.centro||"—")+"</b> <span class='meta'>(derivado el "+e(o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR"))+")</span> — "+(o.devolucion ? e(o.devolucion) : "<i>devolución pendiente</i>")+"</p>").join("") : "")+
+        (conEvolucion && previas.length ? "<div class='lbl'>Evolución previa (Crónicos)</div>"+previas.map(o=>"<p class='txt'><span class='meta'>"+e(new Date(o.ts).toLocaleString("es-AR"))+(o.autor ? " · "+e(o.autor) : "")+" — </span>"+e(o.texto)+"</p>").join("") : "")+
+        "</div>";
+    }).join("");
+    const logoUrl = new URL("icon-192.png", location.href).href;
+    const html = "<div class='head'><div><div class='kicker'>MEDICINA LABORAL</div><h1>Reporte de la jornada — "+e(dateKeyToLabel(fechaISO))+"</h1><div class='sub'>"+vistos.length+" empleado(s) visto(s)"+(profesionales.length ? " · Profesional: "+e(profesionales.join(", ")) : "")+"</div></div><img src='"+e(logoUrl)+"' alt=''></div>"+
+      (bloques || "<p class='none'>No hay empleados vistos en esta jornada.</p>")+
+      "<div class='firma'>Firma del profesional</div>"+
+      "<div class='foot'>Documento confidencial: contiene información de salud de los empleados. Emitido el "+e(new Date().toLocaleString("es-AR"))+".</div>";
+    const win = window.open("", "_blank");
+    if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return; }
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Reporte de la jornada</title><style>'+css+'</style></head><body>'+html+'</body></html>');
+    win.document.close(); win.focus();
+    setTimeout(()=>{ win.print(); }, 500);
+  }
+
+  // ---- ficha de un empleado ----
+  function renderFicha(item){
+    const m = manual.get(item.dataId) || manual.get(item.casoId) || {};
+    const obs = obsDe(item).filter(o=>o.origen!=="derivacion").sort((a,b)=>b.ts-a.ts);   // los resultados del control externo se ven en su propio bloque (no se repiten acá)
+    const cur = citaDe(item.casoId, item.legajo);
+    const rc = reCita[item.key] || {fecha:"", nota:"", tipo:"", hora:"", modalidad:"presencial"};
+    const ocupado = busy===item.key;
+    const derivs = derivacionesDe(item), df = derivForm[item.key];
+    const sinCaso = esCasoManualId(item.dataId || item.casoId);   // todavía no figura como caso de Crónicos
+    return (
+      <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
+        {sinCaso && <div className="hint" style={{color:"var(--warning)", fontWeight:700}}>Citado a mano: todavía no figura como caso en Crónicos. Cuando se actualice la base se toman sus datos médicos de allí y lo que anotes se suma a su caso.</div>}
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"6px 20px"}}>
+          <div><span className="hint">Unidad</span><div><b>{item.unidad||"—"}</b></div></div>
+          <div><span className="hint">Celular / teléfono de contacto</span><div><b>{telefonoDe(item).tel||"—"}</b>{telefonoDe(item).editado && <span className="hint"> (cargado en Crónicos{telefonoDe(item).plantel ? "; plantel: "+telefonoDe(item).plantel : ""})</span>}</div></div>
+          <div><span className="hint">Motivo - Razón</span><div><b>{item.motivo||"—"}</b></div></div>
+          <div><span className="hint">Opinión médica</span><div>{m.opinionMedica||"—"}</div></div>
+          <div><span className="hint">Táctico empleado</span><div>{m.tactoEmpleado||"—"}</div></div>
+          <div><span className="hint">Posible alta</span><div>{m.posibleAlta||"—"}</div></div>
+          {cur && <div><span className="hint">Citación</span><div>{cur.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH"}{cur.tipoControl ? " · "+tipoControlLabel(cur.tipoControl) : ""}{cur.tipoControl==="externa" && cur.centro ? " · "+cur.centro : ""}{cur.nota ? " — "+cur.nota : ""}</div></div>}
+        </div>
+        {cur && (
+          <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"}}>
+            <span className="hint" style={{fontWeight:700}}>Horario y modalidad del control:</span>
+            {puedeEditar ? (
+              <React.Fragment>
+                {cur.tipoControl==="externa" && <SelectCentro value={cur.centro} onChange={ce=>cambiarAgenda(item, {centro:ce})} disabled={ocupado} />}
+                <SelectHora value={cur.hora} onChange={h=>cambiarAgenda(item, {hora:h})} ocupacion={agendaOcupacion(citas, cur.fecha)} disabled={ocupado} />
+                <SelectModalidad value={cur.modalidad} onChange={m=>cambiarAgenda(item, {modalidad:m})} disabled={ocupado} />
+              </React.Fragment>
+            ) : <b>{[cur.hora ? cur.hora+" hs" : "Sin horario", MODALIDADES[cur.modalidad||"presencial"].label].join(" · ")}</b>}
+            {cur.modalidad==="telefonica" && <b style={{color:"var(--accent)"}}>{modalidadCorto("telefonica")}: comunicarse al {telefonoDe(item).tel || "(sin teléfono cargado)"}</b>}
+          </div>
+        )}
+        <div>
+          <div className="hint" style={{fontWeight:700, marginBottom:4}}>Evolución / Observaciones (las mismas de Crónicos, sin los resultados de controles externos: están más abajo)</div>
+          {obs.length ? (
+            <div style={{display:"flex", flexDirection:"column", gap:6}}>
+              {obs.map(o=>(
+                <div key={o.id} style={{borderBottom:"1px solid var(--border)", paddingBottom:5}}>
+                  <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+                    <div className="hint">{new Date(o.ts).toLocaleString("es-AR")}{o.autor ? " · "+o.autor : ""}{etiquetaOrigen(o)}</div>
+                    {puedeModObs(o) && !(editObs && editObs.id===o.id) && (
+                      <span style={{marginLeft:"auto", whiteSpace:"nowrap"}}>
+                        <button type="button" className="btn secondary small" onClick={()=>setEditObs({id:o.id, texto:o.texto})} disabled={ocupado}>Editar</button>{" "}
+                        <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>eliminarObs(item, o)} disabled={ocupado}>Eliminar</button>
+                      </span>
+                    )}
+                  </div>
+                  {editObs && editObs.id===o.id ? (
+                    <div style={{display:"flex", flexDirection:"column", gap:6, marginTop:4}}>
+                      <textarea rows={Math.min(14, Math.max(4, String(editObs.texto||"").split("\n").length+1))} style={{width:"100%"}} value={editObs.texto} autoFocus
+                        onChange={e=>setEditObs({...editObs, texto:e.target.value})} onKeyDown={e=>{ if(e.key==="Escape") setEditObs(null); }} disabled={ocupado} />
+                      <div style={{display:"flex", gap:8}}>
+                        <button type="button" className="btn small" onClick={()=>guardarEdicionObs(item)} disabled={ocupado}>Guardar cambios</button>
+                        <button type="button" className="btn secondary small" onClick={()=>setEditObs(null)} disabled={ocupado}>Cancelar</button>
+                      </div>
+                    </div>
+                  ) : <div style={{whiteSpace:"pre-wrap"}}>{o.texto}</div>}
+                  {!(editObs && editObs.id===o.id) && o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
+                </div>
+              ))}
+            </div>
+          ) : <div className="hint">Todavía no hay observaciones cargadas.</div>}
+        </div>
+        <div style={{borderTop:"1px solid var(--border)", paddingTop:8}}>
+          <div className="hint" style={{fontWeight:700, marginBottom:4}}>{DERIV_NOMBRE} — resultados por centro médico{cur && cur.tipoControl==="externa" ? " (citado para este control)" : ""}</div>
+          {derivs.length ? (
+            <div style={{display:"flex", flexDirection:"column", gap:6, marginBottom:6}}>
+              {derivs.map(o=>(
+                <div key={o.id} style={{border:"1px solid var(--border)", borderRadius:8, padding:"6px 10px"}}>
+                  <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"}}>
+                    <b>{o.centro||"—"}</b>
+                    <span className="hint">control del {o.fechaDeriv ? dateKeyToLabel(o.fechaDeriv) : new Date(o.ts).toLocaleDateString("es-AR")}{o.autor ? " · registró "+o.autor : ""}</span>
+                    <span style={{fontWeight:700, color: o.devolucion ? "var(--good)" : "var(--warning)"}}>{o.devolucion ? "Resultado recibido" : "Resultado pendiente"}</span>
+                    {puedeExt && !(df && df.id===o.id) && <button type="button" className="btn secondary small" style={{marginLeft:"auto"}} onClick={()=>abrirDeriv(item, o)} disabled={ocupado}>{o.devolucion ? "Editar" : "Cargar devolución"}</button>}
+                  </div>
+                  {o.devolucion && <div style={{whiteSpace:"pre-wrap", marginTop:4}}>{o.devolucion}</div>}
+                  {o.editadoTs && <div className="hint">editado {new Date(o.editadoTs).toLocaleString("es-AR")}{o.editadoPor ? " por "+o.editadoPor : ""}</div>}
+                </div>
+              ))}
+            </div>
+          ) : <div className="hint" style={{marginBottom:6}}>Todavía no hay resultados cargados de controles en centros externos.</div>}
+          {puedeExt && !df && <button type="button" className="btn secondary small" onClick={()=>abrirDeriv(item, null)} disabled={ocupado}>Cargar resultado de {DERIV_NOMBRE}</button>}
+          {puedeExt && df && (
+            <div style={{border:"1px solid var(--accent)", borderRadius:8, padding:10, display:"flex", flexDirection:"column", gap:8}}>
+              <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                <div className="field" style={{margin:0}}>
+                  <label>Centro médico</label>
+                  <select value={df.centro} onChange={e=>cambiarDeriv(item, "centro", e.target.value)} disabled={ocupado}>
+                    <option value="">Elegir…</option>
+                    {DERIV_CENTROS.concat(df.centro && !DERIV_CENTROS.includes(df.centro) ? [df.centro] : []).map(c=>(<option key={c} value={c}>{c}</option>))}
+                  </select>
+                </div>
+                <div className="field" style={{margin:0}}>
+                  <label>Fecha del control</label>
+                  <input type="date" value={df.fecha} onChange={e=>cambiarDeriv(item, "fecha", e.target.value)} disabled={ocupado} />
+                </div>
+              </div>
+              <div>
+                <div className="hint" style={{fontWeight:700, marginBottom:4}}>Resultado / devolución de la clínica (pegalo acá o escribilo; se puede dejar en blanco y cargarlo después)</div>
+                <textarea rows={6} style={{width:"100%"}} placeholder="Pegá o escribí acá lo que informó el centro médico…" value={df.devolucion} onChange={e=>cambiarDeriv(item, "devolucion", e.target.value)} disabled={ocupado} />
+              </div>
+              <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                <button type="button" className="btn small" onClick={()=>guardarDeriv(item)} disabled={ocupado || !df.centro}>{df.id ? "Guardar cambios" : "Registrar resultado"}</button>
+                <button type="button" className="btn secondary small" onClick={()=>cerrarDeriv(item)} disabled={ocupado}>Cancelar</button>
+                {df.id && puedeEditar && <button type="button" className="btn secondary small" style={{color:"var(--bad)", marginLeft:"auto"}} onClick={()=>eliminarDeriv(item)} disabled={ocupado}>Eliminar resultado</button>}
+              </div>
+            </div>
+          )}
+        </div>
+        {puedeEditar && (
+          <React.Fragment>
+            <div style={{display:"flex", gap:14, flexWrap:"wrap", alignItems:"center"}}>
+              <span className="hint" style={{fontWeight:700}} title="Resultado del control médico (art. 210 LCT) de esta citación">Resultado del control (art. 210):</span>
+              {[["", "Sin definir"], ["justificada", "Ausencia justificada"], ["injustificada", "Ausencia injustificada"]].map(([v, t])=>(
+                <label key={v||"none"} style={{display:"inline-flex", gap:5, alignItems:"center", cursor:"pointer", fontWeight:(cur && cur.resultado||"")===v && v ? 700 : 400, color: v==="injustificada" ? "var(--bad)" : undefined}}>
+                  <input type="radio" name={"res-"+item.key} checked={((cur && cur.resultado)||"")===v} onChange={()=>setResultado(item, v)} disabled={ocupado} /> {t}
+                </label>
+              ))}
+              {cur && cur.resultado==="injustificada" && <span className="hint">RRHH lo verá en Crónicos al decidir si corresponde una sanción.</span>}
+            </div>
+            <div>
+              <div className="hint" style={{fontWeight:700, marginBottom:4}}>Anotación de la Dra. (se guarda también en Crónicos y marca al empleado como visto)</div>
+              <textarea rows={3} style={{width:"100%"}} placeholder="Escribí acá lo observado en la consulta…" value={notas[item.key]||""} onChange={e=>setNotas(p=>({...p,[item.key]:e.target.value}))} disabled={ocupado} />
+              <div style={{display:"flex", gap:8, flexWrap:"wrap", marginTop:6}}>
+                <button type="button" className="btn small" onClick={()=>guardarAnotacion(item)} disabled={ocupado || !(notas[item.key]||"").trim()}>Guardar anotación</button>
+                {cur && cur.atendido
+                  ? <button type="button" className="btn secondary small" onClick={()=>deshacerVisto(item)} disabled={ocupado}>Deshacer "visto"</button>
+                  : <button type="button" className="btn secondary small" onClick={()=>marcarVisto(item)} disabled={ocupado}>Marcar como visto (sin anotación)</button>}
+              </div>
+            </div>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+              <span className="hint" style={{fontWeight:700}}>Citar nuevamente:</span>
+              <input type="date" value={rc.fecha} min={fechaISO} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, fecha:e.target.value}}))} style={{fontSize:12.5, padding:"5px 6px"}} disabled={ocupado} />
+              <select value={rc.tipo || (cur && cur.tipoControl) || ""} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, tipo:e.target.value}}))} disabled={ocupado} title="Tipo de control">
+                <option value="">Tipo de control…</option>
+                {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+              </select>
+              {(rc.tipo || (cur && cur.tipoControl) || "")==="externa" && <SelectCentro value={rc.centro} onChange={ce=>setReCita(p=>({...p,[item.key]:{...rc, centro:ce}}))} disabled={ocupado} />}
+              <SelectHora value={rc.hora} onChange={h=>setReCita(p=>({...p,[item.key]:{...rc, hora:h}}))} ocupacion={agendaOcupacion(citas, rc.fecha)} disabled={ocupado} />
+              <SelectModalidad value={rc.modalidad} onChange={m=>setReCita(p=>({...p,[item.key]:{...rc, modalidad:m}}))} disabled={ocupado} />
+              <input type="text" placeholder="Motivo de la cita (opcional)" value={rc.nota} onChange={e=>setReCita(p=>({...p,[item.key]:{...rc, nota:e.target.value}}))} style={{minWidth:220}} disabled={ocupado} />
+              <button type="button" className="btn secondary small" onClick={()=>citarNuevamente(item)} disabled={ocupado || !rc.fecha}>Citar</button>
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    );
+  }
+
+  function renderTabla(items, titulo, vacio, mostrarDias){
+    return (
+      <div className="overflow-x">
+        <table>
+          <thead><tr>
+            {titulo==="citados" && <th>Hora</th>}<th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th>{mostrarDias && <th className="num">Días</th>}<th>Citación</th><th>Estado</th><th></th>
+          </tr></thead>
+          <tbody>
+            {!items.length && <tr><td colSpan={(mostrarDias ? 8 : 7) + (titulo==="citados" ? 1 : 0)} style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{vacio}</td></tr>}
+            {items.map(it=>{
+              const ct = citaDe(it.casoId, it.legajo);
+              const abierto = openKey===titulo+"|"+it.key;
+              return (
+                <React.Fragment key={it.key}>
+                  <tr>
+                    {titulo==="citados" && <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>{ct && ct.hora ? ct.hora : <span className="hint">—</span>}{ct && ct.modalidad==="telefonica" && <div className="hint" style={{fontWeight:700, color:"var(--accent)"}}>{modalidadCorto("telefonica")}</div>}</td>}
+                    <td>{it.legajo}</td><td>{it.nombre||"—"}</td><td>{it.unidad||"—"}</td><td>{it.motivo||"—"}</td>
+                    {mostrarDias && <td className="num">{it.dias!=null ? fmt(it.dias) : "—"}</td>}
+                    <td>{ct ? (ct.origen==="medicina" ? "Citado por la Dra." : "Seleccionado por RRHH") : "—"}{ct && ct.tipoControl ? <div style={{fontWeight:700, fontSize:12, color:"var(--accent)"}}>{tipoControlLabel(ct.tipoControl)}{ct.tipoControl==="externa" && ct.centro ? " — "+ct.centro : ""}</div> : null}{ct && ct.nota ? <div className="hint">{ct.nota}</div> : null}</td>
+                    <td>{ct && ct.atendido ? <span style={{color:"var(--good)", fontWeight:700}}>✓ Visto {ct.atendidoTs ? new Date(ct.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</span> : ct && controlExtResuelto(ct, obsDe(it)) ? <span style={{color:"var(--good)", fontWeight:700}} title="Ya se cargó el resultado del centro médico y se marcó justificada / injustificada">✓ Resuelto (control externo)</span> : ct ? <span style={{color:"var(--warning)", fontWeight:700}}>Pendiente</span> : "—"}
+                      {ct && ct.resultado && <div style={{fontWeight:700, fontSize:12, color: ct.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{ct.resultado==="injustificada" ? "Ausencia injustificada" : "Ausencia justificada"}</div>}</td>
+                    <td style={{whiteSpace:"nowrap"}}><button type="button" className="btn secondary small" onClick={()=>setOpenKey(abierto ? null : titulo+"|"+it.key)}>{abierto ? "Cerrar ficha" : (puedeEditar ? "Ver ficha / Atender" : "Ver ficha")}</button>
+                      {puedeEliminar && ct && <React.Fragment>{" "}<button type="button" className="btn secondary small" style={{color:"var(--bad)"}} title="Eliminar esta citación (solo Administrador)" onClick={()=>eliminarCita(ct)} disabled={busy===ct.id}>Eliminar</button></React.Fragment>}</td>
+                  </tr>
+                  {abierto && (
+                    <tr><td colSpan={(mostrarDias ? 8 : 7) + (titulo==="citados" ? 1 : 0)} style={{background:"var(--plane)"}}>{renderFicha(it)}</td></tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if(dTs==null) return <div className="tabpanel"><div className="card table-card"><p className="desc">Todavía no hay datos de ausentismo cargados.</p></div></div>;
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field">
+          <label>Día</label>
+          <input type="date" value={fechaISO} min={minISO} onChange={e=>{ if(e.target.value) setFechaSel(e.target.value); }} />
+        </div>
+        <div className="field">
+          <label>Buscar</label>
+          <input type="text" placeholder="Legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{minWidth:200}} />
+        </div>
+        <button type="button" className="btn secondary" onClick={()=>setFechaSel(null)} disabled={fechaISO===maxISO}>Ir al último día cargado</button>
+        <button type="button" className="btn secondary" onClick={refresh} disabled={!dbReady} title="Vuelve a leer lo que cargaron los demás usuarios">Actualizar datos</button>
+        <span className="hint">{status}</span>
+      </div>
+      {puedeEditar && <CitarEmpleadoBox options={empOptions} minFecha={minISO} defaultFecha={fechaISO} onCitar={citarManual} citas={citas} />}
+      {loadError && <div className="warn-banner">No se pudieron leer los datos de Medicina Laboral ({loadError}). ¿Ya corriste supabase-migracion-medicina-laboral.sql en Supabase?</div>}
+
+      <CollapsibleCard id="agenda" defaultOpen title={"Agenda — "+(agendaVista==="mes" ? MESES[mesAg.m-1]+" "+mesAg.y : dateKeyToLabel(fechaISO))}
+        summary={agendaVista==="mes" ? "" : "("+citasDelDia.length+" citado"+(citasDelDia.length===1 ? "" : "s")+(nTelDelDia ? " · "+nTelDelDia+" telefónico"+(nTelDelDia===1 ? "" : "s") : "")+")"}
+        right={<React.Fragment>
+          <button type="button" className={"btn small"+(agendaVista==="dia" ? "" : " secondary")} onClick={()=>setAgendaVista("dia")}>Día</button>
+          <button type="button" className={"btn small"+(agendaVista==="mes" ? "" : " secondary")} onClick={()=>{ setAgendaMes(null); setAgendaVista("mes"); }}>Mes</button>
+          {agendaVista==="dia" && <button type="button" className="btn secondary small" onClick={imprimirAgenda} disabled={!citasDelDia.length}>Imprimir agenda</button>}
+        </React.Fragment>}>
+        {agendaVista==="mes" ? (
+          <div>
+            <div className="caption">Tocá un día para abrir su agenda. En cada día: cantidad de citados, 📞 los telefónicos y ✓ los ya atendidos.</div>
+            <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", margin:"6px 0 8px"}}>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(mesDesplazado(mesAg.y, mesAg.m, -1))} aria-label="Mes anterior">◂</button>
+              <b style={{minWidth:150, textAlign:"center"}}>{MESES[mesAg.m-1]} {mesAg.y}</b>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(mesDesplazado(mesAg.y, mesAg.m, 1))} aria-label="Mes siguiente">▸</button>
+              <button type="button" className="btn secondary small" onClick={()=>setAgendaMes(fechaISO.slice(0,7))}>Mes del día elegido</button>
+            </div>
+            <div className="overflow-x">
+              <table style={{tableLayout:"fixed", minWidth:560}}>
+                <thead><tr>{["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"].map(d=>(<th key={d} style={{textAlign:"center"}}>{d}</th>))}</tr></thead>
+                <tbody>
+                  {semanasDelMes(mesAg.y, mesAg.m).map((sem, i)=>(
+                    <tr key={i}>
+                      {sem.map((iso, j)=>{
+                        if(!iso) return <td key={j} style={{border:"1px solid var(--border)", background:"var(--plane)"}}></td>;
+                        const info = citasPorFecha.get(iso);
+                        const sel = iso===fechaISO;
+                        return (
+                          <td key={j} onClick={()=>{ setFechaSel(iso); setAgendaVista("dia"); }} role="button" tabIndex={0} title={"Abrir la agenda del "+dateKeyToLabel(iso)}
+                            onKeyDown={e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); setFechaSel(iso); setAgendaVista("dia"); } }}
+                            style={{cursor:"pointer", verticalAlign:"top", height:62, padding:"6px 8px", border:"1px solid var(--border)", opacity: j>=5 && !info ? .6 : 1,
+                              outline: sel ? "2px solid var(--accent)" : "none", outlineOffset:-2, background: info ? "color-mix(in srgb, var(--accent) 10%, var(--surface))" : undefined}}>
+                            <div style={{fontWeight:700}}>{+iso.slice(8)}</div>
+                            {info && <div style={{fontSize:12, lineHeight:1.35}}><b>{info.n}</b> citado{info.n===1 ? "" : "s"}{info.tel ? <span> · 📞{info.tel}</span> : null}{info.ok ? <span style={{color:"var(--good)"}}> · ✓{info.ok}</span> : null}</div>}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="caption">Podés ver cualquier día, también los posteriores al último archivo cargado (elegilo en «Día» o desde «Mes»). Turnos de {AGENDA_PASO} minutos ({AGENDA_INICIO} a {AGENDA_FIN}). Tocá un nombre para abrir su ficha (más abajo, en Citados). El horario se elige al citar y se puede cambiar desde la ficha. Con «Mes» ves el calendario completo.</div>
+            <div className="overflow-x">
+              <table style={{tableLayout:"fixed", minWidth:640}}>
+                <thead><tr><th style={{width:100}}>Hora</th>{minutosAgenda.map(mm=>(<th key={mm}>:{mm}</th>))}</tr></thead>
+                <tbody>
+                  {horasAgenda.map(hh=>(
+                    <tr key={hh}>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>{pad2(hh)}:00</td>
+                      {minutosAgenda.map(mm=>{
+                        const h = pad2(hh)+":"+mm, lst = agendaPorHora.get(h) || [];
+                        return (<td key={mm} style={{verticalAlign:"top", fontSize:12.5, background: lst.length ? "color-mix(in srgb, var(--accent) 10%, var(--surface))" : undefined}}>
+                          {AGENDA_SLOTS.includes(h) ? (lst.length ? chipsAgenda(lst) : <span className="hint">libre</span>) : null}
+                        </td>);
+                      })}
+                    </tr>
+                  ))}
+                  {horasFueraDeRango.length>0 && (
+                    <tr>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>Otros horarios</td>
+                      <td colSpan={minutosAgenda.length}>{horasFueraDeRango.map(h=>(<span key={h} style={{marginRight:14}}><b>{h}</b> {chipsAgenda(agendaPorHora.get(h)||[])}</span>))}</td>
+                    </tr>
+                  )}
+                  {sinHoraDelDia.length>0 && (
+                    <tr>
+                      <td style={{whiteSpace:"nowrap", fontWeight:700, verticalAlign:"top"}}>Sin horario</td>
+                      <td colSpan={minutosAgenda.length}>{chipsAgenda(sinHoraDelDia)}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </CollapsibleCard>
+
+      <div className="card table-card">
+        <h3>Citados — {dateKeyToLabel(fechaISO)} ({itemsCitados.length})</h3>
+        <div className="caption">Empleados citados para este día: los que RRHH seleccionó desde Crónicos y los que la Dra. citó en una visita anterior.</div>
+        {renderTabla(itemsCitados, "citados", "No hay empleados citados para este día.", false)}
+      </div>
+
+      <CollapsibleCard id="ausentes" title={"Ausentes por salud — "+dateKeyToLabel(fechaISO)} summary={"("+itemsAusentes.length+")"}>
+        <div className="caption">Ausencias por motivos de salud ({Array.from(CRONICOS_CODIGOS_SALUD).join(", ")}) del día. Desde acá se puede abrir la ficha, anotar y marcar como visto.</div>
+        {renderTabla(itemsAusentes, "ausentes", "No hay ausentes por salud este día.", true)}
+      </CollapsibleCard>
+
+      <CollapsibleCard id="vistos" title={"Vistos en la jornada — "+dateKeyToLabel(fechaISO)} summary={"("+vistos.length+")"}
+        right={<React.Fragment>
+          <label className="motivo-check" style={{cursor:"pointer"}}>
+            <input type="checkbox" checked={conEvolucion} onChange={e=>setConEvolucion(e.target.checked)} /> Incluir evolución previa en el reporte
+          </label>
+          <button type="button" className="btn" onClick={imprimirJornada} disabled={!vistos.length}>Imprimir reporte de la jornada</button>
+        </React.Fragment>}>
+        <div className="overflow-x">
+          <table>
+            <thead><tr><th>Hora</th><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th><th>Anotaciones de la jornada</th></tr></thead>
+            <tbody>
+              {!vistos.length && <tr><td colSpan="6" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>Todavía no hay empleados vistos en esta jornada.</td></tr>}
+              {vistos.map(v=>{
+                const it = itemDeCita(v);
+                const nd = anotacionesDelDia(it);
+                return (
+                  <tr key={v.id}>
+                    <td style={{whiteSpace:"nowrap"}}>{v.atendidoTs ? new Date(v.atendidoTs).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "—"}</td>
+                    <td>{v.legajo}</td><td>{v.nombre||"—"}</td><td>{it.unidad||"—"}</td><td>{it.motivo||"—"}</td>
+                    <td style={{whiteSpace:"pre-wrap"}}>{nd.length ? nd.map(o=>o.texto).join("\n— ") : <span className="hint">Sin anotaciones</span>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CollapsibleCard>
+
+      {puedeEditar && (
+        <CollapsibleCard id="resultados" title="Resultados de Control Laboral" summary={"("+fmt(anFiltradas.length)+(anFiltradas.length!==anotaciones.length ? " de "+fmt(anotaciones.length) : "")+")"}>
+          <div className="caption">Todo lo registrado en Medicina Laboral, de todas las fechas: lo que anotó la Dra. en la Consulta Médica Planta y los resultados de los Controles Laborales en centros externos (Cons. Ext.), para consultarlos o exportarlos (por ejemplo, para migrarlos a otro sistema como historia clínica). Se exporta lo que muestran los filtros, en orden cronológico.</div>
+          <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end", margin:"8px 0"}}>
+            <div className="field"><label>Controles desde</label><input type="date" value={anDesde} onChange={e=>setAnDesde(e.target.value)} /></div>
+            <div className="field"><label>Hasta</label><input type="date" value={anHasta} onChange={e=>setAnHasta(e.target.value)} /></div>
+            <div className="field"><label>Tipo de control</label>
+              <select value={anTipo} onChange={e=>setAnTipo(e.target.value)}>
+                <option value="__todos">Todos</option>
+                {Object.keys(TIPOS_CONTROL).map(k=>(<option key={k} value={k}>{TIPOS_CONTROL[k].label}</option>))}
+              </select>
+            </div>
+            <div className="field"><label>Buscar</label><input type="text" placeholder="Legajo, nombre o texto…" value={anSearch} onChange={e=>setAnSearch(e.target.value)} style={{minWidth:200}} /></div>
+            {(anDesde || anHasta || anSearch || anTipo!=="__todos") && <button type="button" className="btn secondary" onClick={()=>{ setAnDesde(""); setAnHasta(""); setAnSearch(""); setAnTipo("__todos"); }}>Quitar filtros</button>}
+            <button type="button" className="btn" onClick={()=>exportarAnotaciones("xlsx")} disabled={!anFiltradas.length}>Exportar a Excel</button>
+            <button type="button" className="btn secondary" onClick={()=>exportarAnotaciones("csv")} disabled={!anFiltradas.length}>Exportar CSV</button>
+          </div>
+          <div className="overflow-x">
+            <table>
+              <thead><tr><th>Fecha del control</th><th>Legajo</th><th>Nombre</th><th>Unidad</th><th>Motivo - Razón</th><th>Tipo de control</th><th>Resultado</th><th>Registró</th><th>Control art. 210</th></tr></thead>
+              <tbody>
+                {!anFiltradas.length && <tr><td colSpan="9" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{anotaciones.length ? "Ningún resultado con estos filtros." : "Todavía no hay resultados cargados."}</td></tr>}
+                {anFiltradas.slice().reverse().slice(0,300).map(a=>(
+                  <tr key={a.id}>
+                    <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>{a.visita ? dateKeyToLabel(a.visita) : "—"}<div className="hint">{a.ts ? new Date(a.ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : ""}</div></td>
+                    <td style={{verticalAlign:"top"}}>{a.legajo}</td><td style={{verticalAlign:"top"}}>{a.nombre||"—"}</td><td style={{verticalAlign:"top"}}>{a.unidad||"—"}</td><td style={{verticalAlign:"top"}}>{a.motivo||"—"}</td>
+                    <td style={{verticalAlign:"top", minWidth:150}}><b>{tipoControlLabel(a.tipo)}</b>{a.centro ? <div className="hint">{a.centro}</div> : null}</td>
+                    <td style={{whiteSpace:"pre-wrap", minWidth:260}}>{a.texto}</td>
+                    <td style={{verticalAlign:"top"}}>{a.autor||"—"}</td>
+                    <td style={{verticalAlign:"top"}}>{a.resultado ? <b style={{color: a.resultado==="injustificada" ? "var(--bad)" : "var(--good)"}}>{RESULTADO_TXT[a.resultado]}</b> : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {anFiltradas.length>300 && <div className="hint" style={{marginTop:6}}>Se muestran las 300 más recientes; la exportación incluye todas las que cumplen los filtros ({fmt(anFiltradas.length)}).</div>}
+        </CollapsibleCard>
+      )}
+    </div>
+  );
+}
+
+/* ===================== Sanciones =====================
+   Casos que RRHH marcó en Crónicos para sancionar por ausencias injustificadas. El Administrador define el tipo de sanción (de menor a mayor gravedad:
+   Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión, con sus días) y revisa las fechas de las ausencias; una vez definidas se emiten
+   las notas en PDF (cada una con el nombre del empleado y la sanción). RRHH ve la lista pero no define ni emite. */
+function localISO(ts){ const d = new Date(ts); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+const SANCION_ESTADOS = {marcada:{txt:"Pendiente de definir", color:"var(--warning)"}, definida:{txt:"Definida: lista para emitir", color:"var(--accent)"}, emitida:{txt:"Emitida", color:"var(--good)"}};
+function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
+  const [sanciones, setSanciones] = useState(new Map());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [desde, setDesde] = useKeptState("san.desde", "");
+  const [hasta, setHasta] = useKeptState("san.hasta", "");
+  const [estadoF, setEstadoF] = useKeptState("san.estado", "__todas");
+  const [search, setSearch] = useKeptState("san.search", "");
+  const [openId, setOpenId] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [busy, setBusy] = useState(null);
+  const userRef = useRef("");
+  const aliveRef = useRef(true);
+
+  async function cargar(){
+    try{ const m = await loadSanciones(); if(aliveRef.current){ setSanciones(m); setError(""); } return true; }
+    catch(err){ if(aliveRef.current) setError((err && err.message) ? err.message : String(err)); return false; }
+  }
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{ const {data} = await supabaseClient.auth.getSession(); userRef.current = (data && data.session && data.session.user && data.session.user.email) || ""; }catch(e){}
+      await cargar();
+      if(aliveRef.current) setLoading(false);
+    })();
+    return ()=>{ aliveRef.current = false; };
+  }, []);
+  async function actualizar(){ setStatus("Actualizando..."); const ok = await cargar(); setStatus(ok ? "Datos actualizados" : ""); }
+
+  const refTs = r => r.marcadaTs || r.definidaTs || r.emitidaTs || 0;
+  const todas = useMemo(()=> Array.from(sanciones.values()).sort((a,b)=>refTs(b)-refTs(a)), [sanciones]);
+  const lista = useMemo(()=>{
+    const q = normTxt(search);
+    return todas.filter(r=>{
+      const iso = refTs(r) ? localISO(refTs(r)) : "";
+      if(desde && iso && iso<desde) return false;
+      if(hasta && iso && iso>hasta) return false;
+      if(estadoF!=="__todas" && r.estado!==estadoF) return false;
+      if(q && !normTxt(r.legajo).includes(q) && !normTxt(r.nombre).includes(q)) return false;
+      return true;
+    });
+  }, [todas, desde, hasta, estadoF, search]);
+  const nPor = est => todas.filter(r=>r.estado===est).length;
+  const definidas = lista.filter(r=>r.estado==="definida");
+
+  function abrir(r){
+    if(openId===r.id){ setOpenId(null); return; }
+    if(!esAdmin && r.estado!=="marcada") return;   // RRHH define, pero no edita lo ya definido
+    setOpenId(r.id);
+    // las notas viejas traían la fecha de ausencia escrita (ej. "26/10/2026"): si se entiende, se pasa a fecha
+    const legacy = !(r.fechas||[]).length && r.fechaAusencia ? parseFechasTexto(r.fechaAusencia) : null;
+    setDraft({motivoSancion:r.motivoSancion||"ausencias", fechaControl:r.fechaControl||"", medida:r.medida||"", dias:r.diasSuspension||1,
+      fechasTxt:(r.fechas||[]).length ? r.fechas.map(isoToDMY).join(", ") : (legacy && legacy.ok ? legacy.isos.map(isoToDMY).join(", ") : ""),
+      suspDesde:r.suspDesde||"", suspHasta:r.suspHasta||"", suspRetoma:r.suspRetoma||"",
+      nInterno:r.nInterno||"", lugar:r.lugar||"Florida", fechaEmision:r.fechaEmision||localISO(Date.now())});
+  }
+  async function guardarDefinicion(r){
+    if(!puedeDefinir || (!esAdmin && r.estado!=="marcada")) return;
+    const d = draft;
+    if(!d.motivoSancion){ setStatus("Elegí el motivo de la sanción."); return; }
+    if(d.motivoSancion==="control" && !d.fechaControl){ setStatus("Indicá la fecha del control médico."); return; }
+    if(!d.medida){ setStatus("Elegí el tipo de sanción."); return; }
+    const dias = parseInt(d.dias, 10);
+    if(d.medida==="Suspensión" && !(dias>=1)){ setStatus("Indicá cuántos días de suspensión."); return; }
+    const pf = parseFechasTexto(d.fechasTxt);
+    if(!pf.ok){ setStatus("Revisá las fechas de las ausencias: escribilas como DD/MM/AAAA separadas por coma."); return; }
+    if(!pf.isos.length && !r.fechaAusencia){ setStatus("Cargá al menos una fecha de ausencia."); return; }
+    setBusy(r.id); setStatus("Guardando...");
+    try{
+      const obj = await saveSancion({...r, estado:"definida", motivoSancion:d.motivoSancion, fechaControl: d.motivoSancion==="control" ? d.fechaControl : "", medida:d.medida, diasSuspension: d.medida==="Suspensión" ? dias : 0,
+        suspDesde: d.medida==="Suspensión" ? (d.suspDesde||"") : "", suspHasta: d.medida==="Suspensión" ? (d.suspHasta||"") : "", suspRetoma: d.medida==="Suspensión" ? (d.suspRetoma||"") : "",
+        fechas:pf.isos, nInterno:(d.nInterno||"").trim(), lugar:(d.lugar||"").trim()||"Florida", fechaEmision:d.fechaEmision||localISO(Date.now()),
+        definidaPor:userRef.current, definidaTs:Date.now(), emitidaPor:"", emitidaTs:0});
+      setSanciones(p=>{ const n = new Map(p); n.set(obj.id, obj); return n; });
+      setOpenId(null); setStatus("Sanción definida: "+obj.medida+(obj.medida==="Suspensión" ? " ("+jornadasTexto(obj.diasSuspension).toLowerCase()+")" : ""));
+    }catch(err){ setStatus("No se pudo guardar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  // La hoja se abre primero (en el mismo clic, para que el navegador no la bloquee); después se registra la emisión.
+  async function emitir(rs){
+    if(!puedeDefinir || !rs.length) return;
+    if(!abrirNotasSancion(rs.length===1 ? sancionNombreArchivo(rs[0]) : "Sanciones - "+localISO(Date.now()), rs)) return;
+    const aMarcar = rs.filter(r=>r.estado==="definida");
+    if(!aMarcar.length){ setStatus("Nota generada"); return; }
+    setStatus("Registrando la emisión…");
+    try{
+      const saved = [];
+      for(const r of aMarcar) saved.push(await saveSancion({...r, estado:"emitida", emitidaPor:userRef.current, emitidaTs:Date.now()}));
+      setSanciones(p=>{ const n = new Map(p); saved.forEach(o=>n.set(o.id, o)); return n; });
+      setStatus(saved.length===1 ? "Sanción emitida" : saved.length+" sanciones emitidas");
+    }catch(err){ setStatus("Se generó la nota pero no se pudo registrar la emisión: "+((err && err.message) ? err.message : String(err))); }
+  }
+  async function quitar(r){
+    if(!esAdmin) return;   // solo el Administrador quita sanciones de la lista
+    if(!window.confirm("¿Quitar la sanción de "+(r.nombre||r.legajo)+" de la lista? Se borra la marca y lo definido. No se puede deshacer.")) return;
+    setBusy(r.id);
+    try{ await deleteSancion(r.id); setSanciones(p=>{ const n = new Map(p); n.delete(r.id); return n; }); setStatus("Sanción quitada de la lista"); }
+    catch(err){ setStatus("No se pudo quitar: "+((err && err.message) ? err.message : String(err))); }
+    setBusy(null);
+  }
+  const campo = (label, k, extra) => (
+    <div className="field" style={{minWidth:170, flex:"1 1 170px"}}>
+      <label>{label}</label>
+      <input type={(extra && extra.type) || "text"} value={draft[k]==null ? "" : draft[k]} min={extra && extra.min} onChange={e=>setDraft(p=>({...p, [k]:e.target.value}))} placeholder={extra && extra.placeholder} />
+    </div>
+  );
+  const fechasDe = r => fechasTexto(r.fechas) || r.fechaAusencia || "—";
+
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field"><label>Marcadas desde</label><input type="date" value={desde} onChange={e=>setDesde(e.target.value)} /></div>
+        <div className="field"><label>Hasta</label><input type="date" value={hasta} onChange={e=>setHasta(e.target.value)} /></div>
+        <div className="field"><label>Estado</label>
+          <select value={estadoF} onChange={e=>setEstadoF(e.target.value)}>
+            <option value="__todas">Todas ({todas.length})</option>
+            <option value="marcada">Pendientes de definir ({nPor("marcada")})</option>
+            <option value="definida">Definidas, listas para emitir ({nPor("definida")})</option>
+            <option value="emitida">Emitidas ({nPor("emitida")})</option>
+          </select>
+        </div>
+        <div className="field"><label>Buscar</label><input type="text" placeholder="Legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{minWidth:180}} /></div>
+        {(desde || hasta || search || estadoF!=="__todas") && <button type="button" className="btn secondary" onClick={()=>{ setDesde(""); setHasta(""); setSearch(""); setEstadoF("__todas"); }}>Quitar filtros</button>}
+        <button type="button" className="btn secondary" onClick={actualizar} disabled={loading} title="Vuelve a leer lo que marcaron los demás usuarios">Actualizar datos</button>
+        {puedeDefinir && <button type="button" className="btn" onClick={()=>emitir(definidas)} disabled={!definidas.length} title="Genera todas las notas definidas de la lista en una sola hoja de impresión (un PDF)">Emitir todas las definidas ({definidas.length})</button>}
+        <span className="hint">{status}</span>
+      </div>
+      {error && <div className="warn-banner">No se pudieron leer las sanciones ({error}). ¿Ya corriste supabase-migracion-sanciones-menu.sql en Supabase?</div>}
+      <SlAntecedentes plantel={plantel} parsed={parsed} />
+
+      <div className="card table-card">
+        <h3>Sanciones ({fmt(lista.length)}{lista.length!==todas.length ? " de "+fmt(todas.length) : ""})</h3>
+        <div className="caption">
+          RRHH marca en Crónicos (casilla «Sancionar») a quien corresponde sancionar. {puedeDefinir ? "Acá definís el motivo (ausencias injustificadas, o encontrarse en condiciones laborales al momento del control médico) y el tipo de sanción —de menor a mayor gravedad: Llamado de atención, Apercibimiento, Severo Apercibimiento o Suspensión (con sus días)—, y revisás las fechas; con todas definidas, se emiten las notas en PDF."+(esAdmin ? "" : " Una vez definida, la definición no se edita ni se quita desde acá (solo el Administrador).") : "El Administrador define el tipo de sanción y emite las notas."}
+        </div>
+        <div className="overflow-x">
+          <table>
+            <thead><tr><th>Legajo</th><th>Nombre</th><th>Sector</th><th>Fechas de las ausencias</th><th>Marcó</th><th>Motivo</th><th>Sanción</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              {!lista.length && <tr><td colSpan="9" style={{textAlign:"center",color:"var(--muted)",padding:"16px 0"}}>{loading ? "Cargando…" : todas.length ? "Ninguna sanción con estos filtros." : "Todavía no hay empleados marcados para sanción."}</td></tr>}
+              {lista.map(r=>{
+                const est = SANCION_ESTADOS[r.estado] || SANCION_ESTADOS.marcada;
+                const abierto = openId===r.id;
+                return (
+                  <React.Fragment key={r.id}>
+                    <tr>
+                      <td style={{verticalAlign:"top"}}>{r.legajo}</td>
+                      <td style={{verticalAlign:"top"}}>{r.nombre||"—"}</td>
+                      <td style={{verticalAlign:"top"}}>{r.sector||r.unidad||"—"}</td>
+                      <td style={{verticalAlign:"top", minWidth:170}}>{fechasDe(r)}</td>
+                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}>{r.marcadaTs ? new Date(r.marcadaTs).toLocaleDateString("es-AR") : "—"}<div className="hint">{r.marcadaPor||""}</div></td>
+                      <td style={{verticalAlign:"top", minWidth:150}}>{(SANCION_MOTIVOS[r.motivoSancion]||SANCION_MOTIVOS.ausencias).corto}{r.motivoSancion==="control" && r.fechaControl ? <div className="hint">Control del {isoToDMY(r.fechaControl)}</div> : null}</td>
+                      <td style={{verticalAlign:"top"}}>{r.medida ? <b>{r.medida}</b> : "—"}{r.medida==="Suspensión" && r.diasSuspension ? <div className="hint">{jornadasTexto(r.diasSuspension)}</div> : null}</td>
+                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}><b style={{color:est.color}}>{est.txt}</b>{r.estado==="emitida" && r.emitidaTs ? <div className="hint">{new Date(r.emitidaTs).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
+                        {puedeDefinir && (
+                          <React.Fragment>
+                            {(esAdmin || r.estado==="marcada") && <button type="button" className="btn secondary small" onClick={()=>abrir(r)}>{abierto ? "Cerrar" : (r.estado==="marcada" ? "Definir" : "Editar definición")}</button>}{" "}
+                            {r.estado==="definida" && <button type="button" className="btn small" onClick={()=>emitir([r])} disabled={busy===r.id}>Emitir PDF</button>}
+                            {r.estado==="emitida" && <button type="button" className="btn secondary small" onClick={()=>emitir([r])} disabled={busy===r.id}>Reimprimir PDF</button>}{" "}
+                            {esAdmin && <button type="button" className="btn secondary small" style={{color:"var(--bad)"}} onClick={()=>quitar(r)} disabled={busy===r.id}>Quitar</button>}
+                          </React.Fragment>
+                        )}
+                      </td>
+                    </tr>
+                    {abierto && (
+                      <tr><td colSpan="9" style={{background:"var(--plane)"}}>
+                        <div style={{display:"flex", flexDirection:"column", gap:10, padding:"6px 2px"}}>
+                          {r.fechaAusencia && !(r.fechas||[]).length && <div className="hint">Nota anterior con la fecha escrita así: «{r.fechaAusencia}». Cargá las fechas abajo para que salgan en la nota.</div>}
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                            <div className="field" style={{minWidth:300, flex:"1 1 300px"}}>
+                              <label>Motivo de la sanción (define qué nota se imprime)</label>
+                              <select value={draft.motivoSancion||"ausencias"} onChange={e=>setDraft(p=>({...p, motivoSancion:e.target.value}))}>
+                                {Object.keys(SANCION_MOTIVOS).map(k=>(<option key={k} value={k}>{SANCION_MOTIVOS[k].label}</option>))}
+                              </select>
+                            </div>
+                            {draft.motivoSancion==="control" && campo("Fecha del control médico", "fechaControl", {type:"date"})}
+                          </div>
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end"}}>
+                            <div className="field" style={{minWidth:230}}>
+                              <label>Tipo de sanción (de menor a mayor gravedad)</label>
+                              <select value={draft.medida||""} onChange={e=>setDraft(p=>({...p, medida:e.target.value}))}>
+                                <option value="">— Elegir —</option>
+                                {SANCION_TIPOS.map((t,i)=>(<option key={t} value={t}>{(i+1)+". "+t}</option>))}
+                              </select>
+                            </div>
+                            {draft.medida==="Suspensión" && campo("Días de suspensión", "dias", {type:"number", min:1})}
+                            {campo(draft.motivoSancion==="control" ? "Fecha(s) de la(s) ausencia(s)" : "Fechas de las ausencias (de menor a mayor)", "fechasTxt", {placeholder:"06/10/2026, 07/10/2026"})}
+                          </div>
+                          {draft.medida==="Suspensión" && (
+                            <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
+                              {campo("Suspendido desde (opcional)", "suspDesde", {type:"date"})}
+                              {campo("Hasta (opcional)", "suspHasta", {type:"date"})}
+                              {campo("Retoma tareas el (opcional)", "suspRetoma", {type:"date"})}
+                              <div className="hint" style={{alignSelf:"center"}}>Si las dejás vacías, en la nota quedan los espacios ___/___/___ para completar a mano.</div>
+                            </div>
+                          )}
+                          <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
+                            {campo("Lugar", "lugar")}
+                            {campo("Fecha de la nota", "fechaEmision", {type:"date"})}
+                            {campo("N° interno (opcional)", "nInterno")}
+                          </div>
+                          <div style={{display:"flex", gap:8}}>
+                            <button type="button" className="btn small" onClick={()=>guardarDefinicion(r)} disabled={busy===r.id}>Guardar definición</button>
+                            <button type="button" className="btn secondary small" onClick={()=>setOpenId(null)}>Cancelar</button>
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== Sanciones por lote (menú «Sanciones por lote», 03/11/2026) =====================
+   Migración supabase-migracion-sanciones-lote.sql (correr ANTES de subir app.jsx). Para deshacer: supabase-deshacer-sanciones-lote.sql.
+   Circuito: 1) se elige un período (desde/hasta) y se buscan las ausencias con Agrupador cuadro presidencia = NO JUST; se omiten los días que ya
+   tienen sanción (menú Sanciones / Crónicos, o incluidos en otro lote). 2) Por empleado se sugiere la sanción por escalamiento según el historial
+   (tabla sanciones_historial, Excel SANCION del sistema: últimos 2 años): sin antecedentes → Apercibimiento → Severo Apercibimiento → Suspensión de
+   1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 29 días. Si con la suspensión pasaría de 30 días firmados en 12 meses, no se emite (corresponde evaluar la
+   desvinculación). 3) Se tilda a quién sancionar, se numera (N° interno), se emiten las notas (Florida, Arial; imprimir, PDF, ZIP por sector) y se
+   envían por mail agrupadas por gerencia (mailto, .eml con los PDF, copiar cuadro). 4) Al marcar una gerencia como «Enviado» quedan marcadas como
+   sancionadas esas ausencias, con la fecha de envío (se ve en Detalle Empleados y en Crónicos, y no vuelven a aparecer en otro lote).
+   Tablas: sanciones_historial, sanciones_lotes, sanciones_lote_items, sanciones_lote_envios, sanciones_mails, sanciones_config. */
+const SL_T = {hist:"sanciones_historial", lotes:"sanciones_lotes", items:"sanciones_lote_items", envios:"sanciones_lote_envios", mails:"sanciones_mails", config:"sanciones_config", motivos:"sanciones_motivos"};
+// códigos (Id Motivo / codpla) que se sancionan: los de la tabla de motivos con Cuadro = "NO JUST"
+const slCodigosNoJust = motivos => new Set((motivos||[]).filter(m=>slNorm(m.cuadro)==="nojust" && String(m.codigo||"").trim()).map(m=>String(m.codigo).trim().toUpperCase()));
+// las tres del escalamiento (las únicas que se sugieren) y las demás medidas de la tabla del sistema, con su código (IDSancion)
+const SL_ESC = ["Apercibimiento","Severo Apercibimiento","Suspensión"];
+const SL_OTRAS = ["Amonestación","Llamado de atención","Pedido de Explicaciones","Comité de Salud"];
+const SL_TODAS = [...SL_ESC, ...SL_OTRAS];
+const SL_COD = {"Amonestación":"01","Apercibimiento":"02","Pedido de Explicaciones":"03","Severo Apercibimiento":"04","Suspensión":"05","Llamado de atención":"06","Comité de Salud":"07"};
+const SL_PASOS = [1,2,3,4,5,7,10,15,20,25,29];
+const SL_LIMITE_DIAS = 30;      // tope de días de suspensión firmados en 12 meses
+const SL_HIST_DIAS = 730;       // el historial guarda los últimos 2 años
+const SL_CFG_DEF = {asunto:"Sanciones por ausentismo – {gerencia} – {periodo}",
+  intro:"Estimados, adjuntamos las notificaciones de sanción correspondientes a su gerencia para su firma y notificación al personal. A continuación el detalle:",
+  cierre:"Saludos cordiales.\nRecursos Humanos."};
+// tabla de motivos por defecto (hoja TABLAS al 30/10/2026): [Nombre, Codigo, Concepto, Dia pago, Cuadro]
+const SL_MOTIVOS_DEF = [
+  ["Accidente de trabajo", "AT", "1037ES Lic. por Accidente", "Pago", "ART"],
+  ["Aislamiento Social Preventivo Obligatorio (S5)", "ASP", "ASP", "Pago", "VARIOS COVID"],
+  ["Ausente C/ Aviso", "CA", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "NO JUST"],
+  ["Ausente C/ Aviso Enfermedad", "CA", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "NO JUST"],
+  ["Ausente S/ Aviso", "SA", "1020ES Ausente sin Aviso", "No pago", "NO JUST"],
+  ["Baja", "BA", "", "No pago", "LIC VS"],
+  ["Cesante", "CE", "1025ES Dias no Trabajados", "No pago", "JUST"],
+  ["Citacion judicial", "CJ", "1031ES Lic. por Citac. Judic.", "Pago", "LIC VS"],
+  ["Compensa Horas", "COH", "", "Pres H.O.", "PRES"],
+  ["Con aviso Especial MTEySS 207/20 (S2)", "CAE", "", "No pago", "JUST"],
+  ["Con aviso Justificado", "CAJ", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Con aviso x Movilidad", "CAM", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Covid 19 Positivo", "C19", "", "Pago", "C19"],
+  ["Dia a Compensar", "DAC", "", "Pres H.O.", "PRES"],
+  ["Dia Compensado", "DC", "", "", "PRES"],
+  ["Dia de lluvia", "DL", "", "Pago", "LIC VS"],
+  ["Donación de sangre", "DS", "1030ES Lic. por Donac. Sangre", "Pago", "LIC VS"],
+  ["Enf Certif Digital", "ECD", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Enf Compatible Virus (S7)", "ECC", "", "Pago", "VARIOS COVID"],
+  ["Enfermedad", "EN", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Enfermedad Con Covid", "ECC", "1029ES Lic. por Enfermedad", "Pago", "ECC"],
+  ["Enfermedad Familiar Sgbatos Art 21", "EFS", "", "Pago", "LIC VS"],
+  ["Enfermedad trabajo (ET)", "ET", "1029ES Lic. por Enfermedad", "Pago", "ENF"],
+  ["Esposa enferma", "EE", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Examen", "EX", "1033ES Lic. por Examen", "Pago", "LIC VS"],
+  ["Excedencia", "ED", "1022ES Periodo Excedencia", "No pago", "LIC VS"],
+  ["Excedente de enfermedad", "EDE", "1019ES Lic. S/Goce sueldos", "No pago", "ENF"],
+  ["Fallecimiento", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento Padres", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento Hermano", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento suegros", "FA", "1035ES Lic. por Fallecimiento", "Pago", "LIC VS"],
+  ["Fallecimiento abuelos", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Feriado", "FER", "", "Pago", "LIC VS"],
+  ["Franco", "FR", "", "Pago", "PRES"],
+  ["Franco compensatorio", "FC", "", "Pago", "LIC VS"],
+  ["Franco Motivo Empresa (S8)", "FPE", "", "Pago", "VARIOS COVID"],
+  ["Hijo enfermo", "HE", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Home Office Protocolo", "HOP", "", "Pres H.O.", "F HOP"],
+  ["Injustificado", "IN", "1020ES Ausente sin Aviso", "No pago", "NO JUST"],
+  ["Inundación", "IND", "", "Pago", "LIC VS"],
+  ["Jornada Parcial", "", "", "", "PRES"],
+  ["Jornada de Lluvia", "CE", "1025ES Dias no Trabajados", "No pago", "JUST"],
+  ["Lic Sanitaria Preventiva (S9)", "LSP", "", "Pago", "VARIOS COVID"],
+  ["Lic. Especial", "LE", "1036ES Lic. Especial", "Lic Esp Paga", "LIC VS"],
+  ["Lic. Grup. Riesgo MTEySS 207/20 (S1)", "LGR", "", "Pago", "LGR"],
+  ["Licencia por Vacuna contra Covid", "LVC", "", "Pago", "VARIOS COVID"],
+  ["Licencia Sin Goce de Haberes", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Maternidad", "MT", "1040ES Lic. por Maternidad", "No pago", "JUST"],
+  ["Matrimonio", "MA", "1039ES Lic. por Matrimonio", "Pago", "LIC VS"],
+  ["Mudanza", "MU", "1032ES Lic. por Mudanza", "Pago", "LIC VS"],
+  ["Mudanza (Sgbatos)", "MU", "1032ES Lic. por Mudanza", "Pago", "LIC VS"],
+  ["Nacimiento", "NAC", "1034ES Lic. por Nacimiento", "Pago", "LIC VS"],
+  ["No Convocado", "NC", "No Convocado", "Pago", "JUST"],
+  ["No informado", "NI", "1025ES Dias no Trabajados", "No pago", "NO JUST"],
+  ["Otro", "FR", "", "Pres H.O.", "PRES"],
+  ["P. Sindical", "PSI", "1038ES Lic. Gremial", "Pres H.O.", "PRES"],
+  ["Paro / huelga", "PH", "", "Pago", "LIC VS"],
+  ["Permiso con Goce", "PCG", "", "Pago", "LIC VS"],
+  ["Permiso Parcial C/Goce", "", "", "", "PRES"],
+  ["Permiso gremial", "PG", "1038ES Lic. Gremial", "Pres H.O.", "PRES"],
+  ["Permiso Sgbatos Art 20.1 (JRP)", "JRP", "", "Pago", "LIC VS"],
+  ["Permiso sin Goce", "LSS", "1019ES Lic. S/Goce sueldos", "No pago", "JUST"],
+  ["Proceso Desvinculacion", "PRD", "", "", "PRD"],
+  ["Licencia con goce de haber", "", "", "Pago", "LIC VS"],
+  ["Pres Home Office", "PHO", "", "Pres H.O.", "F PHO"],
+  ["Pres Home Office (S3)", "PHO", "", "Pres H.O.", "PRES"],
+  ["Presente Gerente/Coordinador", "*", "", "Pago", "PRES"],
+  ["Presente Contratista", "PCT", "", "Pago", "PRES"],
+  ["Proceso Penal", "PRP", "1021ES Lic. S/Goce sueldos c/Aviso", "No pago", "JUST"],
+  ["Reserva de puesto", "RP", "1027ES Reserva de Puesto", "No pago", "JUST"],
+  ["Susp Esp L22250 (S4)", "SUE", "", "SUE", "VARIOS COVID"],
+  ["Suspension", "SUS", "1026ES Dias no Trab.Susp", "No pago", "SUSP"],
+  ["Suspension falta de trabajo", "SFT", "1025ES Dias no Trabajados", "Pago", "LIC VS"],
+  ["Suspension pendiente", "SP", "1026ES Dias no Trab.Susp", "No pago", "SUSP"],
+  ["Trabajo en Comisión", "TC", "", "Pago", "PRES"],
+  ["Tramites Registro", "TR", "", "Pago", "LIC VS"],
+  ["Vacaciones", "VAC", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "LIC VS"],
+  ["Vacaciones Pendientes", "VAP", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "PRES"],
+  ["Vacaciones (Pagas)", "VAP", "1084ES Item 3.3.2 (Adicional vacaciones)", "Pago", "PRES"]
+].map((r,i)=>({id:"D"+String(i+1).padStart(3,"0"), orden:i+1, nombre:r[0], codigo:r[1], concepto:r[2], dia_pago:r[3], cuadro:r[4]}));
+// en el Excel exportado la suspensión va como en el sistema ("Suspension")
+const slExportNombre = s => s==="Suspensión" ? "Suspension" : s;
+const slNorm = s => String(s==null ? "" : s).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const slLeg = v => { const s = String(v==null ? "" : v).trim().replace(/\.0+$/,""); const d = s.replace(/[.\s-]/g,""); return /^\d+$/.test(d) ? String(parseInt(d,10)) : s.toUpperCase(); };
+const slSafe = s => String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Za-z0-9 _.-]/g,"").trim().replace(/\s+/g,"_") || "SinDato";
+function slIso(v){
+  if(v==null || v==="") return null;
+  if(v instanceof Date){ if(isNaN(v)) return null; const d = new Date(v.getTime()+12*3600e3); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
+  if(typeof v==="number"){ if(v<20000 || v>80000) return null; const d = new Date(Math.round((v-25569)*86400e3)); return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate()); }
+  const s = String(v).trim(); let m;
+  if((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return m[1]+"-"+pad2(+m[2])+"-"+pad2(+m[3]);
+  if((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/))){ let y = +m[3]; if(y<100) y += 2000; return y+"-"+pad2(+m[2])+"-"+pad2(+m[1]); }
+  if(/^\d+(\.\d+)?$/.test(s)) return slIso(+s);
+  return null;
+}
+function slAddDays(iso, n){ const [y,m,d] = iso.split("-").map(Number); const t = new Date(Date.UTC(y, m-1, d+n)); return t.getUTCFullYear()+"-"+pad2(t.getUTCMonth()+1)+"-"+pad2(t.getUTCDate()); }
+function slTipo(s){ const n = slNorm(s); if(n.includes("severo")) return "SEV"; if(n.includes("apercib")) return "APE"; if(n.includes("susp")) return "SUS"; return null; }
+function slSugerir(ult, diasAnio){
+  let s;
+  if(!ult) s = {sancion:"Apercibimiento", dias:0, motivo:"Sin antecedentes firmados por ausencia"};
+  else {
+    const t = slTipo(ult.sancion);
+    if(t==="APE") s = {sancion:"Severo Apercibimiento", dias:0, motivo:"Último: Apercibimiento"};
+    else if(t==="SEV") s = {sancion:"Suspensión", dias:1, motivo:"Último: Severo Apercibimiento"};
+    else if(t==="SUS"){ const d = Number(ult.dias) || parseInt((String(ult.sancion).match(/\d+/)||[])[0],10) || 1; const next = SL_PASOS.find(x=>x>d) || 29;
+      s = {sancion:"Suspensión", dias:next, motivo:"Última suspensión: "+d+" día"+(d===1?"":"s")+(d>=29?" (tope de escala)":"")}; }
+    else s = {sancion:"Apercibimiento", dias:0, motivo:"Sanción previa no reconocida"};
+  }
+  s.excede = s.sancion==="Suspensión" && (diasAnio||0)+s.dias > SL_LIMITE_DIAS;
+  return s;
+}
+const slDias = it => it.sancion==="Suspensión" ? (Number(it.dias)||1) : 0;
+const slExcede = (f, it) => it.sancion==="Suspensión" && (f.diasAnio||0)+slDias(it) > SL_LIMITE_DIAS;
+const slSanTxt = (s, d) => s==="Suspensión" ? "Suspensión "+d+" d" : s;
+const slLoteNombre = l => l ? "del "+isoToDMY(l.desde)+" al "+isoToDMY(l.hasta) : "";
+const slChipColor = s => { const t = slTipo(s); return t==="SUS" ? "var(--critical)" : t==="SEV" ? "var(--warning)" : t==="APE" ? "var(--accent)" : "var(--muted)"; };
+
+// lectura completa de una tabla (de a 1000 filas)
+async function slFetchAll(table, orderCol){
+  let from = 0, out = [];
+  while(true){
+    const {data, error} = await supabaseClient.from(table).select("*").order(orderCol, {ascending:true}).range(from, from+999);
+    if(error) throw error;
+    out = out.concat(data||[]);
+    if(!data || data.length<1000) break;
+    from += 1000;
+  }
+  return out;
+}
+// lectura de un Excel/CSV: devuelve las hojas como matrices (CSV: separador ; , o tab, UTF-8 o Windows-1252)
+function slParseCSV(text){
+  const first = text.split(/\r?\n/)[0]||"";
+  const sep = [";",",","\t"].sort((a,b)=>first.split(b).length-first.split(a).length)[0];
+  const rows = []; let row = [], cur = "", q = false;
+  for(let i=0;i<text.length;i++){ const c = text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){ cur+='"'; i++; } else q = false; } else cur += c; }
+    else if(c==='"') q = true;
+    else if(c===sep){ row.push(cur); cur = ""; }
+    else if(c==="\n" || c==="\r"){ if(c==="\r" && text[i+1]==="\n") i++; row.push(cur); rows.push(row); row = []; cur = ""; }
+    else cur += c; }
+  if(cur!=="" || row.length){ row.push(cur); rows.push(row); }
+  return rows.filter(r=>r.some(c=>String(c).trim()!==""));
+}
+async function slLeerHojas(file){
+  const buf = await file.arrayBuffer();
+  if(/\.(csv|txt)$/i.test(file.name)){
+    let text; try{ text = new TextDecoder("utf-8", {fatal:true}).decode(buf); }catch(e){ text = new TextDecoder("windows-1252").decode(buf); }
+    return [slParseCSV(text.replace(/^﻿/,""))];
+  }
+  const wb = XLSX.read(new Uint8Array(buf), {type:"array", cellDates:true});
+  return wb.SheetNames.map(n=>XLSX.utils.sheet_to_json(wb.Sheets[n], {header:1, raw:true, defval:""}));
+}
+// busca la fila de títulos (entre las 20 primeras) que cumple `ok(headers)` y devuelve las filas como objetos con los títulos normalizados
+function slTabla(aoa, ok){
+  for(let i=0;i<Math.min(aoa.length,20);i++){
+    const h0 = (aoa[i]||[]).map(slNorm);
+    if(!ok(new Set(h0))) continue;
+    const seen = {};
+    const h = h0.map(k=>{ if(!k) return k; if(seen[k]){ seen[k]++; return k+"__"+seen[k]; } seen[k] = 1; return k; });
+    return aoa.slice(i+1).filter(r=>r && r.some(c=>c!=="" && c!=null)).map(r=>{ const o = {}; h.forEach((k,j)=>{ if(k) o[k] = r[j]; }); return o; });
+  }
+  return null;
+}
+const slG = (r, ...ks) => { for(const k of ks){ const v = r[k]; if(v!==undefined && v!==null && v!=="") return v; } return ""; };
+const slTxt = v => v==null ? "" : String(v).trim();
+
+// librerías de PDF/ZIP: se cargan recién cuando se necesitan (no cambia index.html)
+function slScript(src){ return new Promise((res, rej)=>{ const s = document.createElement("script"); s.src = src; s.onload = ()=>res(); s.onerror = ()=>rej(new Error("No se pudo cargar una librería ("+src+"). Revisá la conexión.")); document.head.appendChild(s); }); }
+async function slLibs(){
+  if(!window.jspdf) await slScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+  if(!window.JSZip) await slScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+}
+// logo para el PDF: se pasa a JPEG con fondo blanco para que cada PDF pese poco
+let slLogoPromise = null;
+function slLogo(){
+  if(!slLogoPromise) slLogoPromise = new Promise(res=>{
+    const img = new Image();
+    img.onload = ()=>{ try{ const w = Math.min(900, img.naturalWidth), h = Math.round(img.naturalHeight*w/img.naturalWidth); const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h); res({data:c.toDataURL("image/jpeg",0.85), w, h}); }catch(e){ res(null); } };
+    img.onerror = ()=>res(null);
+    img.src = "logo-ema.png";
+  });
+  return slLogoPromise;
+}
+function slDescargar(nombre, blob){
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+
+/* ---- la nota (mismo modelo que las notas del menú Sanciones: Florida, Arial) ---- */
+const SL_JORNADAS_EXTRA = {21:"Veintiuno",22:"Veintidós",23:"Veintitrés",24:"Veinticuatro",25:"Veinticinco",26:"Veintiséis",27:"Veintisiete",28:"Veintiocho",29:"Veintinueve",30:"Treinta"};
+function slJornadas(n){ return n===1 ? "Una Jornada laboral" : (JORNADAS_TXT[n] || SL_JORNADAS_EXTRA[n] || String(n))+" Jornadas laborales"; }
+function slDecision(d){
+  const blanco = "___/___/___", dmy = iso => iso ? isoToDMY(iso) : blanco;
+  return d.medida==="Suspensión"
+    ? "suspenderlo por el término de "+slJornadas(Math.max(1, d.diasSuspension||1))+" desde el día "+dmy(d.suspDesde)+" Hasta el día "+dmy(d.suspHasta)+", inclusive, debiendo retomar tareas en lugar y horario habitual el día "+dmy(d.suspRetoma)+", bajo apercibimiento, si así no lo hiciere, de considerarlo incurso en abandono de trabajo."
+    : "en función de la naturaleza de la falta y sus antecedentes disciplinarios, aplicarle la siguiente medida correctiva: "+(d.medida||"Apercibimiento");
+}
+function slParrafos(d){
+  return ["Notificámosle que ante el incumplimiento a sus obligaciones laborales, al registrar Ausencias injustificadas, en fechas "+(fechasTexto(d.fechas)||"…")+", generando trastornos operativos de su pleno conocimiento, se ha resuelto, en concordancia con sus antecedentes y la gravedad de la falta cometida, "+slDecision(d),
+    "La presente medida tiene por finalidad reencauzar su gestión y evitar en el futuro la reiteración de este tipo de hechos.",
+    "Apercibimosle que ante la reiteración de este tipo de incumplimientos, se le aplicarán medidas disciplinarias más severas,",
+    "Queda Usted debidamente notificado."];
+}
+const SL_NOTA_CSS = `
+  @page{size:A4;margin:0;}
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:#fff;}
+  body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
+  .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;background:#fff;}
+  .nota:last-child{page-break-after:auto;}
+  .top{display:flex;justify-content:space-between;align-items:flex-start;}
+  .top img{width:60mm;height:auto;}
+  .lugar{margin-top:14mm;font-size:13px;}
+  .dest{margin-top:8mm;}
+  .senor{font-style:italic;font-size:15px;}
+  .nom{font-size:21px;line-height:1.25;margin:1mm 0 1mm;}
+  .dato{font-style:italic;font-size:15px;display:flex;}
+  .dato span{display:inline-block;width:24mm;}
+  .dato b{font-weight:700;}
+  hr{border:0;border-top:1.5px solid #000;margin:4mm 0 6mm;}
+  p.cuerpo{text-align:justify;margin:0 0 6mm;font-size:14px;line-height:1.5;}
+  p.ind{text-indent:38mm;}
+  .firmas{margin:16mm 0 0 55mm;font-size:14px;}
+  .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
+  .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
+  .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
+`;
+function slNotaHtml(d, logoUrl){
+  const e = escHtml, ps = slParrafos(d);
+  return "<section class='nota'>"+
+    "<div class='top'><img src='"+e(logoUrl)+"' alt='EMA Servicios'><div class='lugar'>"+e(d.lugar||"Florida")+", &nbsp;"+e(fechaLarga(d.fechaEmision))+"</div></div>"+
+    "<div class='dest'><div class='senor'>Señor/a:</div><div class='nom'>"+e(d.nombre||"")+"</div>"+
+    "<div class='dato'><span>Legajo:</span><b>"+e(d.legajo||"")+"</b></div><div class='dato'><span>Sector:</span><b>"+e(d.sector||"")+"</b></div></div><hr>"+
+    ps.map((p,i)=>"<p class='cuerpo"+(i===0?" ind":"")+"'>"+e(p)+"</p>").join("")+
+    "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
+    "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
+}
+const slLogoUrl = () => new URL("logo-ema.png", location.href).href;
+function slAbrirNotas(titulo, notas){
+  const win = window.open("", "_blank");
+  if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return false; }
+  const logo = slLogoUrl();
+  win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+escHtml(titulo)+'</title><style>'+SL_NOTA_CSS+'</style></head><body>'+notas.map(d=>slNotaHtml(d, logo)).join("")+'</body></html>');
+  win.document.close(); win.focus();
+  setTimeout(()=>{ win.print(); }, 700);
+  return true;
+}
+// texto justificado en el PDF (con sangría en la primera línea)
+function slJustificar(doc, text, x, y, w, indent, lh){
+  const words = text.split(/\s+/).filter(Boolean), sp = doc.getTextWidth(" ");
+  let line = [], lw = 0, first = true;
+  const flush = last => {
+    if(y>272){ doc.addPage(); y = 22; }
+    const x0 = x+(first?indent:0), avail = w-(first?indent:0);
+    const tot = line.reduce((s,t)=>s+doc.getTextWidth(t),0);
+    const gap = (last || line.length<2) ? sp : (avail-tot)/(line.length-1);
+    let cx = x0; line.forEach(t=>{ doc.text(t, cx, y); cx += doc.getTextWidth(t)+gap; });
+    y += lh; line = []; lw = 0; first = false;
+  };
+  for(const t of words){ const tw = doc.getTextWidth(t), avail = w-(first?indent:0), need = line.length ? lw+sp+tw : tw;
+    if(need>avail && line.length){ flush(false); line = [t]; lw = tw; } else { line.push(t); lw = need; } }
+  if(line.length) flush(true);
+  return y;
+}
+function slDibujarNota(doc, d, logo){
+  const L = 18, R = 192, W = R-L; let y = 16, logoH = 0;
+  if(logo){ logoH = 60*logo.h/logo.w; try{ doc.addImage(logo.data, "JPEG", L, y, 60, logoH, "logo-ema", "FAST"); }catch(e){} }
+  doc.setTextColor(0,0,0);
+  doc.setFont("helvetica","normal"); doc.setFontSize(10);
+  doc.text((d.lugar||"Florida")+",  "+fechaLarga(d.fechaEmision), R, y+17, {align:"right"});
+  y += Math.max(logoH, 20)+9;
+  doc.setFont("helvetica","italic"); doc.setFontSize(11.3); doc.text("Señor/a:", L, y); y += 7.5;
+  doc.setFont("helvetica","normal"); doc.setFontSize(15.5);
+  const nl = doc.splitTextToSize(String(d.nombre||""), W); doc.text(nl, L, y); y += nl.length*6.6;
+  doc.setFontSize(11.3);
+  [["Legajo:", d.legajo], ["Sector:", d.sector]].forEach(([k,v])=>{ doc.setFont("helvetica","italic"); doc.text(k, L, y); doc.setFont("helvetica","bold"); doc.text(String(v||""), L+24, y); y += 6; });
+  doc.setLineWidth(0.5); doc.line(L, y-1.5, R, y-1.5); y += 8;
+  doc.setFont("helvetica","normal"); doc.setFontSize(10.5);
+  slParrafos(d).forEach((p,i)=>{ y = slJustificar(doc, p, L, y, W, i===0 ? 38 : 0, 5.6)+3; });
+  let sy = y+12; if(sy>250){ doc.addPage(); sy = 40; }
+  const sx = L+55;
+  ["Me notifico:", "Aclaración:", "DNI:"].forEach((k,i)=>{ const yy = sy+i*10; doc.text(k, sx, yy); doc.setLineWidth(0.25); doc.line(sx+doc.getTextWidth(k)+3, yy+0.6, R, yy+0.6); });
+  doc.text("N° interno: "+(d.nInterno||""), L, 281);
+}
+async function slPdf(notas){
+  await slLibs(); const logo = await slLogo();
+  const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true});
+  notas.forEach((d,i)=>{ if(i) doc.addPage(); slDibujarNota(doc, d, logo); });
+  return doc;
+}
+
+/* ---- mail ---- */
+// acepta "mail@x.com; otro@x.com" y también "Nombre Apellido <mail@x.com>; …"; quita repetidos
+const slMails = s => { const m = String(s||"").match(/[^\s<>;,"'()]+@[^\s<>;,"'()]+/g) || []; return Array.from(new Set(m.map(x=>x.toLowerCase()))); };
+// Outlook de escritorio (clásico) lee los enlaces mailto en Windows-1252: sin esto la ñ y los acentos salen como "Ã±"
+const SL_CP1252 = {0x20AC:0x80,0x201A:0x82,0x0192:0x83,0x201E:0x84,0x2026:0x85,0x2020:0x86,0x2021:0x87,0x02C6:0x88,0x2030:0x89,0x0160:0x8A,0x2039:0x8B,0x0152:0x8C,0x017D:0x8E,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,0x02DC:0x98,0x2122:0x99,0x0161:0x9A,0x203A:0x9B,0x0153:0x9C,0x017E:0x9E,0x0178:0x9F};
+const slEncAnsi = s => { let o = ""; for(const ch of String(s)){ if(/[A-Za-z0-9\-_.~]/.test(ch)){ o += ch; continue; } const c = ch.codePointAt(0); let b = (c<0x80 || (c>=0xA0 && c<=0xFF)) ? c : SL_CP1252[c]; if(b==null) b = 0x3F; o += "%"+b.toString(16).toUpperCase().padStart(2,"0"); } return o; };
+// acentos y ñ como entidades (&#241;) para que el HTML del mail no dependa de la codificación del programa de correo
+const slAsciiHtml = s => String(s).replace(/[^\x00-\x7F]/g, c=>"&#"+c.codePointAt(0)+";");
+const slB64 = buf => { const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf); let s = ""; for(let i=0;i<u.length;i+=0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i+0x8000)); return btoa(s).replace(/.{76}/g, "$&\r\n"); };
+const slB64Txt = t => slB64(new TextEncoder().encode(t));
+const slHdr = t => /^[\x20-\x7E]*$/.test(t) ? t : "=?UTF-8?B?"+slB64(new TextEncoder().encode(t)).replace(/\r\n/g,"")+"?=";
+const slCsvCell = v => { const s = String(v==null ? "" : v); return /[;"\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+const slCsv = rows => "﻿"+rows.map(r=>r.map(slCsvCell).join(";")).join("\r\n");
+async function slCopiar(htmlStr, text){
+  try{ if(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write){ await navigator.clipboard.write([new ClipboardItem({"text/html":new Blob([htmlStr],{type:"text/html"}), "text/plain":new Blob([text],{type:"text/plain"})})]); return true; } }catch(e){}
+  try{ await navigator.clipboard.writeText(text); return true; }catch(e){}
+  return false;
+}
+
+/* ---- selector de gerencias (una, varias, todas o ninguna) ---- */
+// sin la columna motivo_omision (falta supabase-migracion-sanciones-lote-omision.sql) se guarda igual todo lo demás
+let slSinColOmision = false;
+async function slUpsertItems(rows){
+  const limpiar = rs => rs.map(r=>{ const {motivo_omision, ...x} = r; return x; });
+  let {error} = await supabaseClient.from(SL_T.items).upsert(slSinColOmision ? limpiar(rows) : rows);
+  if(error && /motivo_omision/i.test((error.message||"")+" "+(error.details||""))){ slSinColOmision = true; ({error} = await supabaseClient.from(SL_T.items).upsert(limpiar(rows))); }
+  return {error, sinColumna: slSinColOmision && rows.some(r=>r.motivo_omision)};
+}
+// motivo por el que no se sanciona (al quitar la tilde): campo para escribirlo y, una vez cargado, texto en rojo como «dado de baja»
+function SlOmision({it, onSave}){
+  const [edit, setEdit] = useState(!it.motivo_omision);
+  const [txt, setTxt] = useState(it.motivo_omision||"");
+  useEffect(()=>{ setTxt(it.motivo_omision||""); if(!it.motivo_omision) setEdit(true); }, [it.motivo_omision]);
+  if(edit) return (
+    <input type="text" value={txt} placeholder="Motivo de la omisión" title="Por qué no se sanciona (Enter para guardar)"
+      style={{display:"block", width:170, marginTop:4, fontSize:12, padding:"4px 6px", borderColor:"var(--critical)"}}
+      onChange={e=>setTxt(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+      onBlur={()=>{ const v = txt.trim(); if(v!==(it.motivo_omision||"")) onSave(v); if(v) setEdit(false); }} />
+  );
+  return <div className="hint" style={{color:"var(--critical)", fontWeight:700, cursor:"pointer", maxWidth:170, whiteSpace:"normal"}} title="Tocá para cambiar el motivo" onClick={()=>setEdit(true)}>Omitida: {it.motivo_omision}</div>;
+}
+// selector con tildes (una, varias, todas o ninguna): Gerencias, Empresa, Sector y Sanción. Todos con el mismo ancho.
+const SL_FILTRO_W = 220;
+function SlMulti({label, all, counts, value, onChange}){
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(()=>{ const h = e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", h); return ()=>document.removeEventListener("mousedown", h); }, []);
+  const sel = value==null ? all : value.filter(x=>all.includes(x));
+  const txt = value==null || sel.length===all.length ? "Todas" : !sel.length ? "Ninguna" : sel.length===1 ? sel[0] : sel.length+" de "+all.length;
+  const toggle = (g, on) => { const n = on ? [...sel, g] : sel.filter(x=>x!==g); onChange(n.length===all.length ? null : n); };
+  return (
+    <div className="field" ref={ref} style={{position:"relative", width:SL_FILTRO_W, flex:"0 0 "+SL_FILTRO_W+"px"}}>
+      <label>{label}</label>
+      <button type="button" className="btn secondary small" style={{width:"100%", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={sel.join(", ")} onClick={()=>setOpen(o=>!o)}>{txt} ▾</button>
+      {open && (
+        <div className="card" style={{position:"absolute", top:"100%", left:0, zIndex:40, marginTop:4, padding:10, minWidth:SL_FILTRO_W+40, maxWidth:"min(380px, 90vw)", maxHeight:340, overflowY:"auto", display:"flex", flexDirection:"column", gap:6}}>
+          <div style={{display:"flex", gap:6}}>
+            <button type="button" className="btn secondary small" onClick={()=>onChange(null)}>Todas</button>
+            <button type="button" className="btn secondary small" onClick={()=>onChange([])}>Ninguna</button>
+          </div>
+          {all.map(g=>(
+            <label key={g} style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}>
+              <input type="checkbox" checked={sel.includes(g)} onChange={e=>toggle(g, e.target.checked)} /> {g}
+              <span className="hint" style={{marginLeft:"auto"}}>{counts[g]||0}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SancionesLoteTab({parsed, plantel, esAdmin}){
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [hist, setHist] = useState([]);
+  const [lotes, setLotes] = useState([]);
+  const [items, setItems] = useState([]);
+  const [envios, setEnvios] = useState([]);
+  const [mails, setMails] = useState([]);
+  const [cfg, setCfg] = useState(SL_CFG_DEF);
+  const [crSan, setCrSan] = useState(new Map());
+  // tabla de motivos: la guardada en el servidor; si todavía no hay (o falta el SQL), la de por defecto
+  const [motivos, setMotivos] = useState(SL_MOTIVOS_DEF);
+  const [motivosEstado, setMotivosEstado] = useState("def");   // "base" = guardada en el servidor · "def" = por defecto, sin guardar · "sintabla" = falta el SQL
+  const [loteId, setLoteId] = useKeptState("sl.lote", "");
+  const [vista, setVista] = useKeptState("sl.vista", "evaluar");
+  const [nuevoDesde, setNuevoDesde] = useKeptState("sl.desde", "");
+  const [nuevoHasta, setNuevoHasta] = useKeptState("sl.hasta", "");
+  const [omitidas, setOmitidas] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [confirmar, setConfirmar] = useState("");
+  const userRef = useRef(""); const aliveRef = useRef(true);
+  const itemsRef = useRef(items); itemsRef.current = items;
+  const lotesRef = useRef(lotes); lotesRef.current = lotes;
+  const say = (t) => setStatus(t);
+  const errTxt = err => (err && err.message) ? err.message : String(err);
+
+  async function cargar(){
+    try{
+      const [h, l, it, en, ml, cf] = await Promise.all([
+        slFetchAll(SL_T.hist, "id_sancion"), slFetchAll(SL_T.lotes, "id"), slFetchAll(SL_T.items, "id"),
+        slFetchAll(SL_T.envios, "id"), slFetchAll(SL_T.mails, "gerencia"),
+        supabaseClient.from(SL_T.config).select("*").eq("id","main").maybeSingle()
+      ]);
+      if(cf.error) throw cf.error;
+      if(!aliveRef.current) return false;
+      const c = {...SL_CFG_DEF}; if(cf.data) ["asunto","intro","cierre"].forEach(k=>{ if(cf.data[k]) c[k] = cf.data[k]; });
+      setHist(h); setLotes(l); setItems(it); setEnvios(en); setMails(ml); setCfg(c); setError("");
+    }catch(err){ if(aliveRef.current) setError(errTxt(err)); return false; }
+    try{ const m = await loadSanciones(); if(aliveRef.current) setCrSan(m); }catch(e){ /* sin la tabla del menú Sanciones: no hay días que omitir por ese lado */ }
+    try{
+      const mo = await slFetchAll(SL_T.motivos, "id");
+      if(aliveRef.current){ if(mo.length){ setMotivos(mo.slice().sort((a,b)=>(a.orden||0)-(b.orden||0))); setMotivosEstado("base"); } else { setMotivos(SL_MOTIVOS_DEF); setMotivosEstado("def"); } }
+    }catch(e){ if(aliveRef.current){ setMotivos(SL_MOTIVOS_DEF); setMotivosEstado("sintabla"); } }
+    return true;
+  }
+  const codigosNoJust = useMemo(()=> slCodigosNoJust(motivos), [motivos]);
+  useEffect(()=>{
+    aliveRef.current = true;
+    (async ()=>{
+      try{ const {data} = await supabaseClient.auth.getSession(); userRef.current = (data && data.session && data.session.user && data.session.user.email) || ""; }catch(e){}
+      await cargar();
+      if(aliveRef.current) setLoading(false);
+    })();
+    return ()=>{ aliveRef.current = false; flushItems(); flushLote(); };
+  }, []);
+  async function actualizar(){ say("Actualizando…"); const ok = await cargar(); say(ok ? "Datos actualizados" : ""); }
+
+  /* ---- guardado diferido de las evaluaciones (una sola tanda cada 0,7 s) ---- */
+  const dirty = useRef(new Set()); const flushT = useRef(null);
+  function updItems(patches){
+    setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
+    Object.keys(patches).forEach(k=>dirty.current.add(k));
+    clearTimeout(flushT.current); flushT.current = setTimeout(flushItems, 700);
+  }
+  const updItem = (id, patch) => updItems({[id]:patch});
+  async function flushItems(){
+    clearTimeout(flushT.current);
+    const ids = Array.from(dirty.current); dirty.current.clear();
+    if(!ids.length) return;
+    const now = new Date().toISOString();
+    const rows = itemsRef.current.filter(x=>ids.includes(x.id)).map(x=>({...x, editado_por:userRef.current, updated_at:now}));
+    if(!rows.length) return;
+    const {error, sinColumna} = await slUpsertItems(rows);
+    if(error){ ids.forEach(i=>dirty.current.add(i)); if(aliveRef.current) say("No se pudo guardar: "+error.message); }
+    else if(aliveRef.current) say(sinColumna ? "Cambios guardados, salvo el motivo de la omisión: falta correr supabase-migracion-sanciones-lote-omision.sql en Supabase." : "Cambios guardados");
+  }
+  // guarda ya (sin esperar) un grupo de cambios — se usa al marcar envíos
+  async function guardarItemsYa(patches){
+    const now = new Date().toISOString();
+    const rows = itemsRef.current.filter(x=>patches[x.id]).map(x=>({...x, ...patches[x.id], editado_por:userRef.current, updated_at:now}));
+    if(rows.length){ const {error} = await slUpsertItems(rows); if(error) throw error; }
+    setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
+  }
+  const loteDirty = useRef(null); const loteT = useRef(null);
+  function updLote(patch){
+    const id = loteId;
+    setLotes(list=>list.map(l=>l.id===id ? {...l, ...patch} : l));
+    loteDirty.current = id; clearTimeout(loteT.current); loteT.current = setTimeout(flushLote, 700);
+  }
+  async function flushLote(){
+    clearTimeout(loteT.current);
+    const id = loteDirty.current; loteDirty.current = null; if(!id) return;
+    const l = lotesRef.current.find(x=>x.id===id); if(!l) return;
+    const {error} = await supabaseClient.from(SL_T.lotes).upsert({...l, updated_at:new Date().toISOString()});
+    if(error && aliveRef.current) say("No se pudo guardar el lote: "+error.message);
+  }
+
+  /* ---- índices ---- */
+  const hoy = localISO(Date.now());
+  const plantelIdx = useMemo(()=> new Map((plantel||[]).map(p=>[slLeg(p.legajo), p])), [plantel]);
+  const histIdx = useMemo(()=>{
+    const m = new Map();
+    hist.forEach(h=>{ const k = slLeg(h.legajo); if(!m.has(k)) m.set(k, []); m.get(k).push(h); });
+    m.forEach(a=>a.sort((x,y)=>String(y.fecha_creado||"").localeCompare(String(x.fecha_creado||""))));
+    return m;
+  }, [hist]);
+  const lim = slAddDays(hoy, -365);
+  function infoLegajo(leg){
+    const h = histIdx.get(slLeg(leg)) || [];
+    const ultima = h.find(s=>slNorm(s.aplicada)==="si" && slNorm(s.motivo).startsWith("ausencia")) || null;
+    const diasAnio = h.filter(s=>slNorm(s.aplicada)==="si" && s.fecha_creado && s.fecha_creado>=lim).reduce((t,s)=>t+(Number(s.dias)||0), 0);
+    return {hist:h, ultima, diasAnio, sug:slSugerir(ultima, diasAnio)};
+  }
+  const lotesOrden = useMemo(()=> lotes.slice().sort((a,b)=>String(b.hasta).localeCompare(String(a.hasta)) || (b.creado_ts||0)-(a.creado_ts||0)), [lotes]);
+  const lote = lotes.find(l=>l.id===loteId) || null;
+  const itemsLote = useMemo(()=> lote ? items.filter(i=>i.lote_id===lote.id) : [], [items, lote && lote.id]);
+
+  // días ya sancionados por legajo: menú Sanciones (Crónicos) y otros lotes (incluidos)
+  function yaSancionadas(loteActualId){
+    const m = new Map();
+    const add = (leg, iso, origen) => { const k = slLeg(leg); if(!m.has(k)) m.set(k, new Map()); if(!m.get(k).has(iso)) m.get(k).set(iso, origen); };
+    crSan.forEach(s=>diasDeSancion(s).forEach(d=>add(s.legajo, d, "menú Sanciones ("+((SANCION_ESTADOS[s.estado]||{}).txt||s.estado)+")")));
+    items.forEach(it=>{
+      if(it.lote_id===loteActualId){ (it.fechas||[]).forEach(d=>add(it.legajo, d, "este lote")); return; }
+      if(!it.incluir) return;
+      const l = lotes.find(x=>x.id===it.lote_id);
+      (it.fechas||[]).forEach(d=>add(it.legajo, d, "lote "+slLoteNombre(l)+(it.enviado_ts ? " (enviada)" : "")));
+    });
+    return m;
+  }
+  function buscarAusencias(desde, hasta, loteActualId){
+    const ya = yaSancionadas(loteActualId);
+    const porLeg = new Map(), omit = [], bajas = new Set();
+    ((parsed && parsed.records) || []).forEach(r=>{
+      if(!r.valid) return;
+      // se toma por el Id Motivo (codpla) según la tabla de motivos (Cuadro = NO JUST); si la fila no trae código, por el Agrupador cuadro presidencia
+      const cod = String(r.idMotivo||"").trim().toUpperCase();
+      if(cod ? !codigosNoJust.has(cod) : String(r.presidencia||"").trim().toUpperCase()!=="NO JUST") return;
+      const iso = r.dateKey; if(!iso || iso<desde || iso>hasta) return;
+      const k = slLeg(r.legajo); const y = ya.get(k);
+      // los legajos dados de baja (plantel con fecha de egreso ya cumplida) no se sancionan
+      const pl = plantelIdx.get(k); if(pl && pl.bajaTs!=null && pl.bajaTs<=Date.now()){ bajas.add(k); return; }
+      if(y && y.has(iso)){ if(y.get(iso)!=="este lote") omit.push({legajo:r.legajo, nombre:r.nombre, fecha:iso, origen:y.get(iso)}); return; }
+      if(!porLeg.has(k)) porLeg.set(k, {legajo:r.legajo, nombreR:r.nombre, sectorR:r.sector, gerenciaR:r.gerencia, unidadR:r.unidad, fechas:new Set()});
+      porLeg.get(k).fechas.add(iso);
+    });
+    return {porLeg, omit, bajas:bajas.size};
+  }
+  function nuevoItem(idLote, c){
+    const p = plantelIdx.get(slLeg(c.legajo));
+    const nombre = (p && p.nombre) || c.nombreR || "";
+    const inf = infoLegajo(c.legajo);
+    const baja = !!(p && p.bajaTs!=null && p.bajaTs<=Date.now());
+    return {id:idLote+"|"+slLeg(c.legajo), lote_id:idLote, legajo:String(c.legajo), nombre, apellido:String(nombre).split(/[,. ]/)[0]||"",
+      sector:(p && p.sector) || c.sectorR || "", gerencia:(p && p.gerencia) || c.gerenciaR || "", unidad:(p && p.unidad) || c.unidadR || "",
+      fechas:Array.from(c.fechas).sort(), incluir:!baja, sancion:inf.sug.sancion, dias:inf.sug.dias||0, n_interno:"",
+      susp_desde:null, susp_hasta:null, susp_retoma:null, enviado_ts:null, enviado_por:"", editado_por:userRef.current, updated_at:new Date().toISOString()};
+  }
+  async function crearLote(){
+    const desde = nuevoDesde, hasta = nuevoHasta;
+    if(!desde || !hasta || desde>hasta){ say("Elegí un período válido (desde ≤ hasta)."); return; }
+    if(!parsed){ say("Todavía no hay datos de ausentismo cargados."); return; }
+    setBusy("crear"); say("Buscando ausencias injustificadas…");
+    try{
+      const {porLeg, omit, bajas} = buscarAusencias(desde, hasta, null);
+      const txtBajas = bajas ? " · "+bajas+" legajo"+(bajas===1?"":"s")+" dado"+(bajas===1?"":"s")+" de baja no se incluye"+(bajas===1?"":"n") : "";
+      if(!porLeg.size){
+        setOmitidas(omit); setBusy("");
+        say("No hay ausencias injustificadas pendientes del "+isoToDMY(desde)+" al "+isoToDMY(hasta)+(omit.length ? " (las "+omit.length+" que hay ya tienen sanción)" : "")+txtBajas+". No se creó el lote.");
+        return;
+      }
+      const id = "L"+desde.replace(/-/g,"")+"-"+hasta.replace(/-/g,"")+"-"+Date.now().toString(36);
+      const l = {id, desde, hasta, estado:"abierto", fecha_emision:hoy, completar_fechas:false, periodo:"", texto_especial:"", start_num:"", creado_por:userRef.current, creado_ts:Date.now(), updated_at:new Date().toISOString()};
+      const {error:e1} = await supabaseClient.from(SL_T.lotes).insert(l); if(e1) throw e1;
+      const rows = Array.from(porLeg.values()).map(c=>nuevoItem(id, c));
+      if(rows.length) await upsertInBatches(SL_T.items, rows, "id");
+      setLotes(p=>[...p, l]); setItems(p=>[...p, ...rows]); setLoteId(id); setVista("evaluar"); setOmitidas(omit);
+      say("Lote creado: "+rows.length+" empleado"+(rows.length===1?"":"s")+" con ausencias injustificadas"+(omit.length ? " · "+omit.length+" ausencia"+(omit.length===1?"":"s")+" omitida"+(omit.length===1?"":"s")+" por estar ya sancionada"+(omit.length===1?"":"s") : "")+txtBajas);
+    }catch(err){ say("No se pudo crear el lote: "+errTxt(err)+" (¿corriste supabase-migracion-sanciones-lote.sql?)"); }
+    setBusy("");
+  }
+  async function agregarNuevas(){
+    if(!lote) return;
+    setBusy("agregar"); say("Buscando ausencias nuevas en el período…");
+    try{
+      await flushItems();
+      const {porLeg, omit} = buscarAusencias(lote.desde, lote.hasta, lote.id);
+      const own = new Map(itemsLote.map(i=>[slLeg(i.legajo), i]));
+      const rows = []; let nFechas = 0, nNuevos = 0;
+      porLeg.forEach((c,k)=>{
+        const ex = own.get(k);
+        if(ex){ const f = Array.from(new Set([...(ex.fechas||[]), ...c.fechas])).sort(); nFechas += f.length-(ex.fechas||[]).length; rows.push({...ex, fechas:f, updated_at:new Date().toISOString()}); }
+        else { nNuevos++; nFechas += c.fechas.size; rows.push(nuevoItem(lote.id, c)); }
+      });
+      if(rows.length) await upsertInBatches(SL_T.items, rows, "id");
+      const byId = new Map(rows.map(r=>[r.id, r]));
+      setItems(p=>[...p.map(x=>byId.get(x.id) || x), ...rows.filter(r=>!p.some(x=>x.id===r.id))]);
+      setOmitidas(omit);
+      say(rows.length ? (nFechas===1 ? "Se agregó 1 ausencia (" : "Se agregaron "+nFechas+" ausencias (")+nNuevos+" empleado"+(nNuevos===1?"":"s")+" nuevo"+(nNuevos===1?"":"s")+")" : "No hay ausencias nuevas en el período.");
+    }catch(err){ say("No se pudo actualizar el lote: "+errTxt(err)); }
+    setBusy("");
+  }
+  async function borrarLote(){
+    if(!lote || !esAdmin) return;
+    setBusy("borrar");
+    try{
+      const {error} = await supabaseClient.from(SL_T.lotes).delete().eq("id", lote.id); if(error) throw error;
+      setLotes(p=>p.filter(x=>x.id!==lote.id)); setItems(p=>p.filter(x=>x.lote_id!==lote.id)); setEnvios(p=>p.filter(x=>x.lote_id!==lote.id));
+      setLoteId(""); setConfirmar(""); say("Lote borrado. Sus ausencias vuelven a quedar disponibles para otro lote.");
+    }catch(err){ say("No se pudo borrar el lote: "+errTxt(err)); }
+    setBusy("");
+  }
+
+  /* ---- filas del lote ---- */
+  // empresa de cada legajo: del plantel o, si no está, de las filas de ausentismo (nombres ya unificados por withCanonEmpresa)
+  const empresaRec = useMemo(()=>{ const m = new Map(); ((parsed && parsed.records) || []).forEach(r=>{ if(r.empresa) m.set(slLeg(r.legajo), r.empresa); }); return m; }, [parsed]);
+  // codpla actual de cada ausencia (legajo|fecha) en la base del Radar: sirve para ver si la base cambió después de armar el lote
+  const codIdx = useMemo(()=>{ const m = new Map(); ((parsed && parsed.records) || []).forEach(r=>{ if(r.valid && r.dateKey) m.set(slLeg(r.legajo)+"|"+r.dateKey, {cod:String(r.idMotivo||"").trim().toUpperCase(), pres:String(r.presidencia||"").trim().toUpperCase(), motivo:r.motivo||""}); }); return m; }, [parsed]);
+  // estado de una fecha del lote: cod (codpla actual) y ok (sigue siendo sancionable). Sin fila en la base: ok=false, sinDato=true
+  const fechaInfo = (leg, iso) => {
+    const x = codIdx.get(slLeg(leg)+"|"+iso);
+    if(!x) return {cod:"", ok:false, sinDato:true, motivo:""};
+    return {cod:x.cod || x.pres, ok: x.cod ? codigosNoJust.has(x.cod) : x.pres==="NO JUST", sinDato:false, motivo:x.motivo};
+  };
+  // saca del lote las fechas que ya no son sancionables según la base actual (no toca las ya enviadas); si a alguien no le queda ninguna, lo omite con el motivo
+  function quitarNoSancionables(){
+    const p = {}; let nF = 0, nE = 0;
+    itemsLote.forEach(it=>{
+      if(it.enviado_ts) return;
+      const quedan = (it.fechas||[]).filter(d=>fechaInfo(it.legajo, d).ok);
+      if(quedan.length===(it.fechas||[]).length) return;
+      nF += (it.fechas||[]).length-quedan.length;
+      if(quedan.length) p[it.id] = {fechas:quedan};
+      else { nE++; p[it.id] = {fechas:it.fechas, incluir:false, motivo_omision:"Sin ausencias NO JUST: la base se actualizó ("+(it.fechas||[]).map(d=>isoToDMY(d).slice(0,5)+" "+(fechaInfo(it.legajo,d).cod||"sin dato")).join(", ")+")"}; }
+    });
+    if(!nF){ say("Todas las fechas del lote siguen siendo NO JUST en la base."); return; }
+    updItems(p);
+    say("Se quitaron "+nF+" fecha"+(nF===1?"":"s")+" que ya no son sancionables"+(nE ? "; "+nE+" empleado"+(nE===1?"":"s")+" quedó"+(nE===1?"":"aron")+" omitido"+(nE===1?"":"s")+" por no tener ninguna" : "")+".");
+  }
+  // Cada vez que se abre el lote se vuelve a comparar con la base actual del Radar (ausentismo_registros): las fechas que HOY ya no son
+  // sancionables (se justificaron o cambió el codpla después de armar el lote) quedan afuera solas, en pantalla, notas, envíos y exportación.
+  // Lo guardado no se borra (si la base vuelve a cambiar, se recalcula). Lo ya enviado no se toca.
+  const filasTodas = useMemo(()=> itemsLote.map(it0=>{
+    const todas = it0.fechas || [];
+    const vigentes = it0.enviado_ts ? todas : todas.filter(d=>fechaInfo(it0.legajo, d).ok);
+    const justificadas = it0.enviado_ts ? [] : todas.filter(d=>!vigentes.includes(d));
+    const it = justificadas.length ? {...it0, fechas:vigentes} : it0;
+    const inf = infoLegajo(it.legajo);
+    const p = plantelIdx.get(slLeg(it.legajo));
+    return {it, justificadas, ...inf, enPlantel:!!p, baja:!!(p && p.bajaTs!=null && p.bajaTs<=Date.now()), empresa:(p && p.empresa) || empresaRec.get(slLeg(it.legajo)) || "(sin empresa)"};
+  // los dados de baja no se muestran ni se sancionan (salvo que ya se hubiera enviado su sanción antes de la baja)
+  }), [itemsLote, histIdx, plantelIdx, empresaRec, codIdx, codigosNoJust]);
+  // a quien no le queda ninguna fecha sancionable no se lo muestra (tampoco a los dados de baja), salvo que ya se haya enviado
+  const filas = useMemo(()=> filasTodas.filter(f=>(!f.baja || f.it.enviado_ts) && ((f.it.fechas||[]).length || f.it.enviado_ts))
+    .sort((a,b)=> String(a.it.gerencia).localeCompare(String(b.it.gerencia),"es") || String(a.it.sector).localeCompare(String(b.it.sector),"es") || String(a.it.nombre).localeCompare(String(b.it.nombre),"es")), [filasTodas]);
+  // fechas que se dejaron afuera porque en la base actual ya están justificadas (para informar, sin alarma)
+  const justificadasInfo = useMemo(()=>{ const out = []; filasTodas.forEach(f=>{ if(f.baja && !f.it.enviado_ts) return; f.justificadas.forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); out.push({legajo:f.it.legajo, nombre:f.it.nombre, fecha:d, cod:fi.sinDato ? "sin dato" : fi.cod, motivo:fi.motivo}); }); }); return out; }, [filasTodas]);
+  const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
+  const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
+  const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
+    suspDesde: lote && lote.completar_fechas ? (f.it.susp_desde||"") : "", suspHasta: lote && lote.completar_fechas ? (f.it.susp_hasta||"") : "", suspRetoma: lote && lote.completar_fechas ? (f.it.susp_retoma||"") : "",
+    nInterno:f.it.n_interno||"", lugar:"Florida", fechaEmision:(lote && lote.fecha_emision) || hoy});
+  const archivoDe = f => "Sancion_"+slSafe(f.it.legajo)+"_"+slSafe(f.it.apellido || f.it.nombre)+".pdf";
+  const periodoAuto = useMemo(()=>{
+    if(!lote) return "";
+    if(lote.desde.slice(0,7)===lote.hasta.slice(0,7)){ const m = +lote.desde.slice(5,7); const s = MESES_LARGO[m-1]+" "+lote.desde.slice(0,4); return s[0].toUpperCase()+s.slice(1); }
+    return isoToDMY(lote.desde)+" al "+isoToDMY(lote.hasta);
+  }, [lote && lote.desde, lote && lote.hasta]);
+  const periodo = (lote && lote.periodo) || periodoAuto;
+  const textoAuto = lote ? "SANCION AUSENCIAS MANUAL del "+(lote.desde.slice(0,4)===lote.hasta.slice(0,4) ? isoToDMY(lote.desde).slice(0,5) : isoToDMY(lote.desde))+" - "+isoToDMY(lote.hasta) : "";
+  const textoEsp = (lote && lote.texto_especial) || textoAuto;
+
+  /* ---- exportar lote (Excel / CSV) ---- */
+  function loteRows(){
+    const H = ["Id Sancion","Empleado","Sancion","Motivo","Fecha creado","Dias de Suspencion","Fecha Sancion","Nivel de gravedad","Sector","Fecha Firma","Aplicada","Legajo","Nombre","Gerencia","Fechas ausencia","Nº Interno","Sugerida","Cant Suspensión","Texto Especial","IDSancion"];
+    const fe = isoToDMY((lote && lote.fecha_emision) || hoy);
+    return [H, ...enLote.map(f=>{ const it = f.it;
+      return ["", it.legajo+" "+it.nombre, slExportNombre(it.sancion), "Ausencia injustificada", fe, slDias(it), fe, "", it.sector, "", "", it.legajo, it.nombre, it.gerencia,
+        (it.fechas||[]).map(isoToDMY).join("; "), it.n_interno||"", slExportNombre(SL_ESC.includes(it.sancion) ? it.sancion : f.sug.sancion), slDias(it)||0, textoEsp, SL_COD[it.sancion]||""]; })];
+  }
+  const nombreBase = () => lote ? lote.desde+"_al_"+lote.hasta : hoy;
+  function exportarCSV(){ slDescargar("Lote_sanciones_"+nombreBase()+".csv", new Blob([slCsv(loteRows())], {type:"text/csv"})); say("CSV descargado"); }
+  function exportarXLSX(){
+    // Legajo y N° interno como número (si no, Excel los ordena como texto); IDSancion como texto para conservar el 0
+    const rows = loteRows().map((r,i)=> i===0 ? r : r.map((c,j)=> (j===11 || j===15) && /^\d+$/.test(String(c)) ? +c : c));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "SANCION");
+    slDescargar("Lote_sanciones_"+nombreBase()+".xlsx", new Blob([XLSX.write(wb, {type:"array", bookType:"xlsx"})]));
+    say("Excel descargado");
+  }
+
+  /* ---- salida de notas ---- */
+  const enLoteOrden = enLote; // ya ordenado por gerencia, sector y nombre
+  async function pdfUno(f){ setBusy("pdf"); try{ const doc = await slPdf([notaDe(f)]); slDescargar(archivoDe(f), doc.output("blob")); say("Descargado "+archivoDe(f)); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  async function pdfTodas(){ setBusy("pdfall"); try{ const doc = await slPdf(enLoteOrden.map(notaDe)); slDescargar("Sanciones_"+nombreBase()+".pdf", doc.output("blob")); say("PDF combinado descargado ("+enLoteOrden.length+" notas)"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  async function zipDe(lista){
+    await slLibs(); const logo = await slLogo(); const z = new window.JSZip();
+    lista.forEach(f=>{ const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true}); slDibujarNota(doc, notaDe(f), logo); z.folder(slSafe(f.it.sector||"Sin sector")).file(archivoDe(f), doc.output("arraybuffer")); });
+    return z.generateAsync({type:"blob"});
+  }
+  async function zipTodas(){ setBusy("zip"); try{ slDescargar("Sanciones_por_sector_"+nombreBase()+".zip", await zipDe(enLoteOrden)); say("ZIP descargado"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
+  function imprimir(lista){ if(!lista.length) return; slAbrirNotas(lista.length===1 ? lista[0].it.legajo+" "+lista[0].it.nombre+" - "+lista[0].it.sancion : "Sanciones "+slLoteNombre(lote), lista.map(notaDe)); }
+
+  /* ---- render ---- */
+  const sinTablas = error && /PGRST205|42P01|does not exist|schema cache|sanciones_/i.test(error);
+  return (
+    <div className="tabpanel">
+      <div className="card controls">
+        <div className="field"><label>Lote</label>
+          <select value={loteId} onChange={e=>{ flushItems(); setLoteId(e.target.value); setOmitidas(null); setConfirmar(""); }} style={{minWidth:300}}>
+            <option value="">— Elegí un lote o creá uno nuevo —</option>
+            {lotesOrden.map(l=>{ const its = items.filter(i=>i.lote_id===l.id); const env = its.filter(i=>i.enviado_ts).length;
+              return <option key={l.id} value={l.id}>{"Ausencias "+slLoteNombre(l)+" · "+its.length+" empleados"+(env ? " · "+env+" enviados" : "")}</option>; })}
+          </select>
+        </div>
+        <div className="field"><label>Nuevo lote: desde</label><input type="date" value={nuevoDesde} onChange={e=>setNuevoDesde(e.target.value)} /></div>
+        <div className="field"><label>Hasta</label><input type="date" value={nuevoHasta} onChange={e=>setNuevoHasta(e.target.value)} /></div>
+        <button type="button" className="btn" onClick={crearLote} disabled={!!busy || !nuevoDesde || !nuevoHasta}>{busy==="crear" ? "Buscando…" : "Buscar injustificadas y crear lote"}</button>
+        <button type="button" className="btn secondary" onClick={actualizar} disabled={loading} title="Vuelve a leer lo que guardaron los demás usuarios">Actualizar datos</button>
+        <span className="hint">{status}</span>
+      </div>
+      {error && <div className="warn-banner">{sinTablas ? "Falta crear las tablas de Sanciones por lote: corré supabase-migracion-sanciones-lote.sql en el SQL Editor de Supabase." : "No se pudieron leer los datos ("+error+")."}</div>}
+      {loading && <div className="card table-card"><div className="hint">Cargando…</div></div>}
+      {!loading && !error && (()=>{
+        // último período evaluado = el lote con la fecha "hasta" más reciente (lotesOrden[0])
+        const ult = lotesOrden[0];
+        if(!ult) return <div className="card controls" style={{paddingTop:10, paddingBottom:10}}><span className="hint">Todavía no se evaluó ningún período: elegí «desde» y «hasta» y creá el primer lote.</span></div>;
+        const its = items.filter(i=>i.lote_id===ult.id), env = its.filter(i=>i.enviado_ts).length;
+        const sig = slAddDays(ult.hasta, 1);
+        return (
+          <div className="card controls" style={{paddingTop:10, paddingBottom:10, borderLeft:"4px solid var(--accent)"}}>
+            <div style={{display:"flex", flexDirection:"column", gap:2}}>
+              <span><b>Último período evaluado:</b> {slLoteNombre(ult)}</span>
+              <span className="hint">{its.length} empleados{env ? " · "+env+" con envío marcado" : " · sin envíos marcados"}{ult.creado_ts ? " · lote creado el "+new Date(ult.creado_ts).toLocaleDateString("es-AR") : ""}{ult.creado_por ? " por "+ult.creado_por : ""}</span>
+            </div>
+            <span className="hint">El próximo período empezaría el {isoToDMY(sig)}.</span>
+            <button type="button" className="btn secondary small" onClick={()=>{ setNuevoDesde(sig); if(nuevoHasta && nuevoHasta<sig) setNuevoHasta(""); }} title="Completa «Nuevo lote: desde» con el día siguiente al último período evaluado">Usar como «desde»</button>
+            {ult.id!==loteId && <button type="button" className="btn secondary small" onClick={()=>{ flushItems(); setLoteId(ult.id); setOmitidas(null); setConfirmar(""); }}>Abrir ese lote</button>}
+          </div>
+        );
+      })()}
+      <SlAntecedentes plantel={plantel} parsed={parsed} hist={hist} items={items} lotes={lotes} crSan={crSan} codigosNoJust={codigosNoJust} />
+
+      {lote && (
+        <div className="card controls" style={{paddingTop:12, paddingBottom:12}}>
+          <div style={{display:"flex", flexDirection:"column", gap:2}}>
+            <b>Ausencias injustificadas {slLoteNombre(lote)}</b>
+            <span className="hint">Creado {lote.creado_ts ? new Date(lote.creado_ts).toLocaleString("es-AR") : ""}{lote.creado_por ? " por "+lote.creado_por : ""} · {filas.length} empleados · {enLote.length} con nota · {bloqueados.length} bloqueados por tope</span>
+          </div>
+          <div style={{display:"flex", gap:6}}>
+            {[["evaluar","1. Evaluar"],["cartas","2. Cartas"],["envios","3. Envíos"]].map(([k,t])=>(
+              <button key={k} type="button" className={"btn small"+(vista===k ? "" : " secondary")} onClick={()=>{ flushItems(); setVista(k); }}>{t}</button>
+            ))}
+          </div>
+          <button type="button" className="btn secondary small" onClick={agregarNuevas} disabled={!!busy} title="Si se actualizó el archivo de ausentismo, suma las injustificadas nuevas del período">Agregar ausencias nuevas del período</button>
+          {esAdmin && (confirmar==="borrar"
+            ? <span style={{display:"flex", gap:6, alignItems:"center"}}><span className="hint" style={{color:"var(--critical)", fontWeight:700}}>¿Borrar el lote y sus evaluaciones? No se puede deshacer.</span>
+                <button type="button" className="btn small" style={{background:"var(--critical)"}} onClick={borrarLote} disabled={!!busy}>Sí, borrar</button>
+                <button type="button" className="btn secondary small" onClick={()=>setConfirmar("")}>Cancelar</button></span>
+            : <button type="button" className="btn secondary small" style={{color:"var(--critical)"}} onClick={()=>setConfirmar("borrar")}>Borrar lote</button>)}
+        </div>
+      )}
+      {omitidas && omitidas.length>0 && (
+        <div className="card table-card">
+          <details>
+            <summary style={{cursor:"pointer", fontWeight:700}}>{omitidas.length===1 ? "1 ausencia del período no se incluyó porque ya tiene sanción (ver detalle)" : omitidas.length+" ausencias del período no se incluyeron porque ya tienen sanción (ver detalle)"}</summary>
+            <div className="overflow-x" style={{marginTop:8}}><table><thead><tr><th>Legajo</th><th>Nombre</th><th>Fecha</th><th>Ya sancionada en</th></tr></thead><tbody>
+              {omitidas.map((o,i)=>(<tr key={i}><td>{o.legajo}</td><td>{o.nombre}</td><td>{isoToDMY(o.fecha)}</td><td>{o.origen}</td></tr>))}
+            </tbody></table></div>
+          </details>
+        </div>
+      )}
+
+      {!lote && !loading && !error && (
+        <div className="card table-card">
+          <h3>Cómo se usa</h3>
+          <div className="caption" style={{marginTop:0}}>
+            1) Elegí el período (por ejemplo del 17/10 al 31/10) y tocá «Buscar injustificadas y crear lote»: se toman las ausencias cuyo Id Motivo (codpla) figura como «NO JUST» en la tabla de motivos (abajo de todo), se dejan afuera los legajos dados de baja y se omiten las ausencias que ya tienen sanción (menú Sanciones o un lote anterior).
+            2) En «Evaluar» tildás a quién sancionar; la sanción se sugiere según el historial y la podés cambiar. 3) En «Cartas» emitís las notas (imprimir, PDF o ZIP por sector). 4) En «Envíos» mandás por mail a cada gerencia y la marcás como «Enviado»: esas ausencias quedan sancionadas, con la fecha de envío.
+          </div>
+        </div>
+      )}
+
+      {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
+        fechaInfo={fechaInfo} justificadasInfo={justificadasInfo}
+        textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
+          const k = slLeg(leg); const out = [];
+          crSan.forEach(s=>{ if(slLeg(s.legajo)===k && s.estado==="emitida") out.push("Menú Sanciones: "+(s.medida||"sanción")+(s.emitidaTs ? " emitida "+new Date(s.emitidaTs).toLocaleDateString("es-AR") : "")); });
+          items.forEach(it=>{ if(it.lote_id!==lote.id && slLeg(it.legajo)===k && it.incluir && it.enviado_ts) out.push("Lote: "+it.sancion+(it.sancion==="Suspensión" ? " "+slDias(it)+" d" : "")+" enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")); });
+          return out; }} />}
+      {lote && vista==="cartas" && <SlCartas enLote={enLoteOrden} lote={lote} updItem={updItem} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe}
+        pdfUno={pdfUno} pdfTodas={pdfTodas} zipTodas={zipTodas} imprimir={imprimir} busy={busy} />}
+      {lote && vista==="envios" && <SlEnvios enLote={enLoteOrden} lote={lote} envios={envios} setEnvios={setEnvios} mails={mails} setMails={setMails} cfg={cfg} setCfg={setCfg}
+        esAdmin={esAdmin} periodo={periodo} periodoAuto={periodoAuto} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe} zipDe={zipDe} guardarItemsYa={guardarItemsYa}
+        userRef={userRef} say={say} busy={busy} setBusy={setBusy} nombreBase={nombreBase} />}
+
+      <SlHistorial hist={hist} setHist={setHist} esAdmin={esAdmin} mails={mails} setMails={setMails} say={say}
+        motivosEstado={motivosEstado} setMotivos={setMotivos} setMotivosEstado={setMotivosEstado} />
+      <SlMotivos motivos={motivos} setMotivos={setMotivos} estado={motivosEstado} setEstado={setMotivosEstado} esAdmin={esAdmin} say={say} />
+    </div>
+  );
+}
+
+/* ---- 1. Evaluar ---- */
+function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo}){
+  const [q, setQ] = useKeptState("sl.q", "");
+  const [gers, setGers] = useKeptState("sl.gers", null);
+  const [sectores, setSectores] = useKeptState("sl.sectores", null);
+  const [tipos, setTipos] = useKeptState("sl.tipos", null);
+  const [emps, setEmps] = useKeptState("sl.empresas", "__def");   // "__def" = por defecto, solo «Propios»
+  const [orden, setOrden] = useKeptState("sl.orden", null);
+  const [abierto, setAbierto] = useState({});
+  // opciones y cantidades de cada filtro (null = todas)
+  const opciones = get => { const c = {}; filas.forEach(f=>{ const v = get(f); c[v] = (c[v]||0)+1; }); return {all:Object.keys(c).sort((a,b)=>a.localeCompare(b,"es")), counts:c}; };
+  const gerO = opciones(f=>f.it.gerencia||"(sin gerencia)"), secO = opciones(f=>f.it.sector||"(sin sector)"), empO = opciones(f=>f.empresa||"(sin empresa)");
+  const tipO = (()=>{ const o = opciones(f=>f.it.sancion||""); o.all = SL_TODAS.filter(s=>o.counts[s]); return o; })();
+  const propios = empO.all.find(e=>normTxt(e)==="propios");
+  const empSel = emps==="__def" ? (propios ? [propios] : null) : emps;
+  const pasa = (sel, v) => sel==null || sel.includes(v);
+  // orden por columna: 1er clic ascendente, 2º descendente, 3º (Legajo) «como Excel» en texto, luego vuelve al orden por gerencia y sector
+  const SORTS = {legajo:f=>+f.it.legajo||f.it.legajo, legajoTxt:f=>String(f.it.legajo), nombre:f=>normTxt(f.it.nombre), fechas:f=>(f.it.fechas||[])[0]||"",
+    ultima:f=>f.ultima ? f.ultima.fecha_creado||"" : "", dias:f=>f.diasAnio||0, sancion:f=>SL_TODAS.indexOf(f.it.sancion)*100+slDias(f.it), num:f=>f.it.n_interno ? (+f.it.n_interno||f.it.n_interno) : null};
+  const cmp = (a,b) => a===b ? 0 : a==null ? 1 : b==null ? -1 : (typeof a==="number" && typeof b==="number") ? a-b : String(a).localeCompare(String(b),"es",{numeric:true});
+  const cmpTxt = (a,b) => a<b ? -1 : a>b ? 1 : 0;
+  let ordenadas = filas;
+  if(orden && SORTS[orden.key]){ const fn = SORTS[orden.key], m = orden.dir==="desc" ? -1 : 1, cf = orden.key==="legajoTxt" ? cmpTxt : cmp;
+    ordenadas = filas.map((f,i)=>({f,i,v:fn(f)})).sort((a,b)=>{ const c = cf(a.v,b.v); return (a.v==null||b.v==null) ? c||a.i-b.i : (c*m)||a.i-b.i; }).map(x=>x.f); }
+  const qn = normTxt(q);
+  const vista = ordenadas.filter(f=>pasa(gers, f.it.gerencia||"(sin gerencia)") && pasa(sectores, f.it.sector||"(sin sector)") && pasa(tipos, f.it.sancion||"") && pasa(empSel, f.empresa||"(sin empresa)")
+    && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn)));
+  // tildados que los filtros dejan afuera de la pantalla: igual reciben número y nota (se avisa)
+  const enVista = new Set(vista.map(f=>f.it.id));
+  const ocultosTildados = enLote.filter(f=>!enVista.has(f.it.id)).length;
+  const th = (k, label, right) => {
+    const cur = orden && orden.key; const on = cur===k || (k==="legajo" && cur==="legajoTxt"); const dir = on ? orden.dir : null;
+    const next = !on ? {key:k, dir:"asc"} : (dir==="asc" && cur!=="legajoTxt") ? {key:k, dir:"desc"} : (k==="legajo" && cur==="legajo") ? {key:"legajoTxt", dir:"asc"} : null;
+    return <th style={{textAlign:right ? "right" : "left", cursor:"pointer", whiteSpace:"nowrap", color:on ? "var(--accent)" : undefined}} onClick={()=>setOrden(next)} title="Ordenar">{label} <span style={{fontSize:9, opacity:on?1:.45}}>{on ? (cur==="legajoTxt" ? "Aa" : dir==="asc" ? "▲" : "▼") : "▲▼"}</span></th>;
+  };
+  const nOn = vista.filter(f=>f.it.incluir).length, allOn = vista.length>0 && nOn===vista.length;
+  function setTodos(v){ const p = {}; vista.forEach(f=>{ if(f.it.incluir!==v) p[f.it.id] = {incluir:v}; }); updItems(p); }
+  function aplicarSug(){ const p = {}; vista.forEach(f=>{ p[f.it.id] = {sancion:f.sug.sancion, dias:f.sug.dias||0}; }); updItems(p); }
+  function numerar(){
+    let n = parseInt(lote.start_num, 10); if(isNaN(n)) return;
+    const p = {}; ordenadas.forEach(f=>{ if(f.it.incluir && !slExcede(f, f.it)) p[f.it.id] = {n_interno:String(n++)}; }); updItems(p);
+  }
+  const sinNum = enLote.filter(f=>!f.it.n_interno).length;
+  const cnt = SL_TODAS.map(s=>[s, enLote.filter(f=>f.it.sancion===s).length]).filter(([s,n])=>n>0 || SL_ESC.includes(s));
+  const ordenLabel = {legajoTxt:"Legajo como Excel (texto)", legajo:"Legajo", nombre:"Empleado", fechas:"Fechas", ultima:"Última sanción firmada", dias:"Días susp. 12 m", sancion:"Sanción", num:"N° interno"};
+  const omitidasSinMotivo = filas.filter(f=>!f.it.incluir && !f.it.motivo_omision).length;
+  return (
+    <React.Fragment>
+      {/* fila omitida: se atenúa todo menos la tilde y el legajo (donde va el motivo, en rojo) */}
+      <style>{".sl-off > td:nth-child(n+3){opacity:.5}"}</style>
+      {justificadasInfo.length>0 && (
+        <div className="card table-card" style={{paddingTop:10, paddingBottom:10}}>
+          <details>
+            <summary style={{cursor:"pointer", fontSize:13}}>
+              <span className="hint">Se dejaron afuera <b style={{color:"var(--ink)"}}>{justificadasInfo.length}</b> fecha{justificadasInfo.length===1?"":"s"} que en la base actual del Radar ya figura{justificadasInfo.length===1?"":"n"} justificada{justificadasInfo.length===1?"":"s"} (se actualizó el ausentismo después de armar el lote). No se sancionan. Ver detalle</span>
+            </summary>
+            <div className="overflow-x" style={{marginTop:8}}><table><thead><tr><th>Legajo</th><th>Nombre</th><th>Fecha</th><th>Codpla actual</th><th>Motivo</th></tr></thead><tbody>
+              {justificadasInfo.map((x,i)=>(<tr key={i}><td>{x.legajo}</td><td>{x.nombre}</td><td>{isoToDMY(x.fecha)}</td><td><b>{x.cod}</b></td><td>{x.motivo}</td></tr>))}
+            </tbody></table></div>
+          </details>
+        </div>
+      )}
+      {bloqueados.length>0 && <div className="warn-banner" style={{flexDirection:"column", alignItems:"flex-start"}}>
+        <span>{bloqueados.length} empleado{bloqueados.length>1?"s":""} superaría{bloqueados.length>1?"n":""} los {SL_LIMITE_DIAS} días de suspensión firmados en 12 meses. No se {bloqueados.length>1?"les":"le"} emite nota: corresponde evaluar la desvinculación por cúmulo de sanciones.</span>
+        <span style={{fontWeight:400}}>{bloqueados.map(f=>f.it.legajo+" "+f.it.nombre+" ("+f.diasAnio+" + "+slDias(f.it)+" = "+(f.diasAnio+slDias(f.it))+")").join(" · ")}</span>
+      </div>}
+      <div className="card controls">
+        <div className="hint" style={{flexBasis:"100%"}}><b style={{color:"var(--ink)"}}>{enLote.length}</b> con nota · {cnt.map(([s,n])=>n+" "+s).join(" · ")}{bloqueados.length ? " · "+bloqueados.length+" bloqueados por tope" : ""}{sinNum ? " · "+sinNum+" sin N° interno" : ""}{filas.length-enLote.length-bloqueados.length>0 ? " · "+(filas.length-enLote.length-bloqueados.length)+" omitidas" : ""}{omitidasSinMotivo ? <span style={{color:"var(--critical)", fontWeight:700}}>{" · "+omitidasSinMotivo+" sin motivo de omisión"}</span> : null}</div>
+        <div className="field" style={{flex:"1 1 200px"}}><label>Buscar legajo o nombre</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Ej.: 9957 o Cifarelli" /></div>
+        <SlMulti label="Gerencias" all={gerO.all} counts={gerO.counts} value={gers} onChange={setGers} />
+        <SlMulti label="Empresa" all={empO.all} counts={empO.counts} value={empSel} onChange={setEmps} />
+        <SlMulti label="Sector" all={secO.all} counts={secO.counts} value={sectores} onChange={setSectores} />
+        <SlMulti label="Sanción" all={tipO.all} counts={tipO.counts} value={tipos} onChange={setTipos} />
+        {/* N° interno + Numerar arriba, Texto especial abajo */}
+        <div style={{display:"flex", flexDirection:"column", gap:10, flex:"1 1 340px", minWidth:0}}>
+          <div style={{display:"flex", gap:10, alignItems:"flex-end"}}>
+            <div className="field"><label>N° interno inicial</label><input type="number" style={{width:120}} value={lote.start_num||""} onChange={e=>updLote({start_num:e.target.value})} placeholder="Ej.: 3501" /></div>
+            <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados, en el orden de la tabla">Numerar lote</button>
+          </div>
+          <div className="field"><label>Texto especial (columna del Excel/CSV)</label><input type="text" style={{width:"100%"}} value={lote.texto_especial||""} onChange={e=>updLote({texto_especial:e.target.value})} placeholder={textoAuto} /></div>
+        </div>
+        {/* Exportar Excel arriba, CSV abajo */}
+        <div style={{display:"flex", flexDirection:"column", gap:10}}>
+          <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!enLote.length}>Exportar Excel</button>
+          <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!enLote.length}>Exportar CSV</button>
+        </div>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
+          <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
+          <span className="hint">Mostrando {vista.length} de {filas.length}</span>
+          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: igual reciben N° interno al numerar y salen en Cartas y Envíos">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (igual se numeran y tienen nota)</span>}
+          {orden && ordenLabel[orden.key] ? <React.Fragment><span className="hint">· Orden: <b>{ordenLabel[orden.key]}</b> {orden.key==="legajoTxt" ? "" : orden.dir==="asc" ? "▲" : "▼"}</span><button type="button" className="cell-link" onClick={()=>setOrden(null)}>quitar orden</button></React.Fragment>
+            : <span className="hint">· Orden: gerencia y sector (tocá un título para ordenar)</span>}
+          <span className="hint">· «Numerar lote» sigue el orden de la tabla.</span>
+        </div>
+      </div>
+      <div className="card table-card">
+        <div className="overflow-x">
+          <table>
+            <thead><tr>
+              <th><input type="checkbox" title="Marcar / desmarcar todos los visibles" checked={allOn} ref={el=>{ if(el) el.indeterminate = nOn>0 && !allOn; }} onChange={e=>setTodos(e.target.checked)} disabled={!vista.length} /></th>
+              {th("legajo","Legajo")}{th("nombre","Empleado")}{th("fechas","Fechas de ausencia")}{th("ultima","Última sanción firmada")}{th("dias","Días susp. 12 m", true)}{th("sancion","Sanción a aplicar")}{th("num","N° interno")}<th></th>
+            </tr></thead>
+            <tbody>
+              {!vista.length && <tr><td colSpan="9" style={{textAlign:"center", color:"var(--muted)", padding:"16px 0"}}>{[gers, empSel, sectores, tipos].some(s=>s && !s.length) ? "Hay un filtro en «Ninguna»: elegí al menos una opción." : filas.length ? "Nadie con estos filtros." : "No hay ausencias injustificadas en el período (o ya estaban sancionadas)."}</td></tr>}
+              {vista.map(f=>{
+                const it = f.it, blk = slExcede(f, it), d = slDias(it);
+                const coincide = it.sancion===f.sug.sancion && (it.sancion!=="Suspensión" || d===+f.sug.dias);
+                const prev = radarPrevio(it.legajo);
+                return (
+                  <React.Fragment key={it.id}>
+                    <tr className={it.incluir ? "" : "sl-off"}>
+                      <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} title={it.incluir ? "Quitá la tilde si no se va a sancionar (te pide el motivo)" : "Volver a incluir"} onChange={e=>updItem(it.id, e.target.checked ? {incluir:true, motivo_omision:""} : {incluir:false})} /></td>
+                      <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}
+                        {!it.incluir && <SlOmision it={it} onSave={v=>updItem(it.id, {motivo_omision:v})} />}</td>
+                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:250}}>{(it.fechas||[]).map(x=>{
+                        // debajo de cada fecha, chiquito, el codpla que tiene HOY en la base; en rojo si ya no es NO JUST (base actualizada después de armar el lote)
+                        const fi = fechaInfo(it.legajo, x), mal = !fi.ok;
+                        return (
+                          <span key={x} title={fi.sinDato ? "Esta fecha ya no figura como ausencia en la base del Radar" : (fi.motivo ? fi.cod+" — "+fi.motivo : fi.cod)+(mal ? " · ya NO es NO JUST: revisar" : "")}
+                            style={{display:"inline-flex", flexDirection:"column", alignItems:"center", lineHeight:1.15, border:"1px solid "+(mal ? "var(--critical)" : "var(--border)"), borderRadius:8, padding:"2px 6px", fontSize:12, color:mal ? "var(--critical)" : "var(--ink)"}}>
+                            <span>{isoToDMY(x)}</span>
+                            <span style={{fontSize:9.5, fontWeight:700, letterSpacing:".04em", color:mal ? "var(--critical)" : "var(--muted)"}}>{fi.sinDato ? "SIN DATO" : (fi.cod||"—")}{mal ? " ⚠" : ""}</span>
+                          </span>
+                        ); })}</div></td>
+                      <td style={{verticalAlign:"top", minWidth:170}}>{f.ultima ? <React.Fragment><b style={{color:slChipColor(f.ultima.sancion)}}>{f.ultima.sancion}</b><div className="hint">{isoToDMY(f.ultima.fecha_creado)}{Number(f.ultima.dias) ? " · "+f.ultima.dias+" d" : ""}</div></React.Fragment> : <span className="hint">Sin antecedentes</span>}
+                        {prev.map((t,i)=>(<div key={i} className="hint" style={{color:"var(--warning)"}} title="Emitida en el Radar; todavía no figura firmada en el historial">{t}</div>))}</td>
+                      <td style={{verticalAlign:"top", textAlign:"right", fontWeight:f.diasAnio>=20 ? 700 : 400, color:f.diasAnio>=SL_LIMITE_DIAS ? "var(--critical)" : f.diasAnio>=20 ? "var(--warning)" : undefined}}>{f.diasAnio||0}</td>
+                      <td style={{verticalAlign:"top", minWidth:250}}>
+                        <div style={{display:"flex", gap:6}}>
+                          <select value={it.sancion} onChange={e=>{ const v = e.target.value; updItem(it.id, {sancion:v, dias:v==="Suspensión" ? (d||f.sug.dias||1) : 0}); }}>
+                            {SL_ESC.map(s=>(<option key={s} value={s}>{s}</option>))}
+                            <optgroup label="Otras medidas">{SL_OTRAS.map(s=>(<option key={s} value={s}>{s}</option>))}</optgroup>
+                          </select>
+                          {it.sancion==="Suspensión" && <select value={d} onChange={e=>updItem(it.id, {dias:+e.target.value})}>{SL_PASOS.map(x=>(<option key={x} value={x}>{x+" d"+((f.diasAnio||0)+x>SL_LIMITE_DIAS ? " · supera 30" : "")}</option>))}</select>}
+                        </div>
+                        {blk ? <div className="hint" style={{marginTop:6, color:"var(--critical)", fontWeight:700}}>No se emite: {f.diasAnio} días firmados en 12 meses + {d} = {f.diasAnio+d}. Supera el máximo de {SL_LIMITE_DIAS}: corresponde evaluar la desvinculación por cúmulo de sanciones.</div>
+                          : <div className="hint" style={{marginTop:6, color:coincide ? "var(--good)" : "var(--warning)", fontWeight:600}}>
+                              {coincide ? "✓ Coincide con la sugerencia" : <React.Fragment>Sugerida: <b>{slSanTxt(f.sug.sancion, f.sug.dias)}</b> <button type="button" className="cell-link" onClick={()=>updItem(it.id, {sancion:f.sug.sancion, dias:f.sug.dias||0})}>usar</button></React.Fragment>}
+                              <span style={{fontWeight:400}}> · {f.sug.motivo}</span>
+                            </div>}
+                      </td>
+                      <td style={{verticalAlign:"top"}}><input type="text" style={{width:90}} value={it.n_interno||""} onChange={e=>updItem(it.id, {n_interno:e.target.value})} /></td>
+                      <td style={{verticalAlign:"top"}}><button type="button" className="btn secondary small" onClick={()=>setAbierto(o=>({...o, [it.id]:!o[it.id]}))}>{abierto[it.id] ? "Ocultar" : "Historial"} ({f.hist.length})</button></td>
+                    </tr>
+                    {abierto[it.id] && (
+                      <tr><td colSpan="9" style={{background:"var(--plane)"}}>
+                        {f.hist.length ? <table><thead><tr><th>Fecha creado</th><th>Sanción</th><th>Motivo</th><th>Días</th><th>Aplicada</th><th>Fecha firma</th><th>Id</th></tr></thead><tbody>
+                          {f.hist.map(h=>(<tr key={h.id_sancion}><td>{isoToDMY(h.fecha_creado)}</td><td style={{color:slChipColor(h.sancion), fontWeight:700}}>{h.sancion}</td><td>{h.motivo}</td><td>{Number(h.dias)||""}</td><td>{slNorm(h.aplicada)==="si" ? "Sí" : "—"}</td><td>{isoToDMY(h.fecha_firma)}</td><td className="hint">{h.id_sancion}</td></tr>))}
+                        </tbody></table> : <span className="hint">Sin sanciones en el historial (últimos 2 años).</span>}
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ---- 2. Cartas ---- */
+function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pdfTodas, zipTodas, imprimir, busy}){
+  const [sel, setSel] = useState(0);
+  if(!enLote.length) return <div className="card table-card"><h3>No hay notas para emitir</h3><div className="caption" style={{marginTop:0}}>Tildá al menos un empleado en «Evaluar».</div></div>;
+  const i = Math.min(sel, enLote.length-1), f = enLote[i], susp = f.it.sancion==="Suspensión";
+  function setDesde(v){
+    if(!v){ updItem(f.it.id, {susp_desde:null}); return; }
+    const hasta = slAddDays(v, slDias(f.it)-1);
+    updItem(f.it.id, {susp_desde:v, susp_hasta:hasta, susp_retoma:slAddDays(hasta, 1)});
+  }
+  const html = "<!doctype html><html><head><meta charset='utf-8'><style>"+SL_NOTA_CSS+" body{background:#fff}</style></head><body>"+slNotaHtml(notaDe(f), slLogoUrl())+"</body></html>";
+  return (
+    <React.Fragment>
+      <div className="card controls">
+        <div className="field"><label>Fecha de la nota</label><input type="date" value={lote.fecha_emision||""} onChange={e=>updLote({fecha_emision:e.target.value})} /></div>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer"}}><input type="checkbox" checked={!!lote.completar_fechas} onChange={e=>updLote({completar_fechas:e.target.checked})} /> Completar fechas de suspensión</label>
+        <button type="button" className="btn" onClick={()=>imprimir(enLote)}>Imprimir todas ({enLote.length})</button>
+        <button type="button" className="btn secondary" onClick={pdfTodas} disabled={!!busy}>{busy==="pdfall" ? "Generando…" : "PDF combinado"}</button>
+        <button type="button" className="btn secondary" onClick={zipTodas} disabled={!!busy}>{busy==="zip" ? "Generando…" : "ZIP por sector"}</button>
+      </div>
+      <div style={{display:"grid", gridTemplateColumns:"minmax(240px,320px) minmax(0,1fr)", gap:16, alignItems:"start"}}>
+        <div className="card" style={{maxHeight:"75vh", overflowY:"auto"}}>
+          {enLote.map((x,k)=>(
+            <button key={x.it.id} type="button" onClick={()=>setSel(k)} style={{all:"unset", display:"block", cursor:"pointer", padding:"9px 12px", borderBottom:"1px solid var(--border)", background:k===i ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent", width:"100%", boxSizing:"border-box"}}>
+              <div style={{display:"flex", justifyContent:"space-between", gap:8}}><b style={{fontSize:13}}>{x.it.nombre}</b><span className="hint">{x.it.n_interno ? "N° "+x.it.n_interno : <span style={{color:"var(--warning)"}}>sin N°</span>}</span></div>
+              <div className="hint">{x.it.legajo} · {x.it.sector} · <b style={{color:slChipColor(x.it.sancion)}}>{x.it.sancion==="Suspensión" ? "Susp. "+slDias(x.it)+" d" : x.it.sancion}</b></div>
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex", flexDirection:"column", gap:12, minWidth:0}}>
+          <div className="card controls" style={{paddingTop:10, paddingBottom:10}}>
+            <button type="button" className="btn secondary small" onClick={()=>setSel(Math.max(0,i-1))} disabled={i===0}>← Anterior</button>
+            <span className="hint">{i+1} / {enLote.length}</span>
+            <button type="button" className="btn secondary small" onClick={()=>setSel(Math.min(enLote.length-1,i+1))} disabled={i===enLote.length-1}>Siguiente →</button>
+            <button type="button" className="btn secondary small" onClick={()=>imprimir([f])}>Imprimir esta</button>
+            <button type="button" className="btn secondary small" onClick={()=>pdfUno(f)} disabled={!!busy}>Descargar {archivoDe(f)}</button>
+          </div>
+          {susp && lote.completar_fechas && (
+            <div className="card controls" style={{paddingTop:10, paddingBottom:10}}>
+              <div className="field"><label>Suspendido desde</label><input type="date" value={f.it.susp_desde||""} onChange={e=>setDesde(e.target.value)} /></div>
+              <div className="field"><label>Hasta (inclusive)</label><input type="date" value={f.it.susp_hasta||""} onChange={e=>updItem(f.it.id, {susp_hasta:e.target.value||null})} /></div>
+              <div className="field"><label>Retoma tareas el</label><input type="date" value={f.it.susp_retoma||""} onChange={e=>updItem(f.it.id, {susp_retoma:e.target.value||null})} /></div>
+              <span className="hint" style={{flex:"1 1 200px"}}>Al elegir «desde» se proponen hasta y retoma en días corridos; ajustalos si la jornada no es corrida.</span>
+            </div>
+          )}
+          <div className="card" style={{overflowX:"auto", padding:12, background:"var(--plane)"}}>
+            <iframe title="Vista previa de la nota" srcDoc={html} style={{width:"210mm", height:"297mm", border:"1px solid var(--border)", background:"#fff", display:"block", margin:"0 auto"}} />
+          </div>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+/* ---- 3. Envíos ---- */
+function SlEnvios({enLote, lote, envios, setEnvios, mails, setMails, cfg, setCfg, esAdmin, periodo, periodoAuto, updLote, notaDe, archivoDe, zipDe, guardarItemsYa, userRef, say, busy, setBusy, nombreBase}){
+  const [mailEnc, setMailEnc] = useState(()=>{ try{ return localStorage.getItem("sl.mailenc")||"ansi"; }catch(e){ return "ansi"; } });
+  useEffect(()=>{ try{ localStorage.setItem("sl.mailenc", mailEnc); }catch(e){} }, [mailEnc]);
+  const [nueva, setNueva] = useState("");
+  const mailOf = g => mails.find(m=>slNorm(m.gerencia)===slNorm(g));
+  const grupos = useMemo(()=>{ const m = new Map(); enLote.forEach(f=>{ const g = f.it.gerencia||"(sin gerencia)"; if(!m.has(g)) m.set(g, []); m.get(g).push(f); }); return Array.from(m.entries()).sort((a,b)=>a[0].localeCompare(b[0],"es")); }, [enLote]);
+  const envioDe = g => envios.find(e=>e.lote_id===lote.id && slNorm(e.gerencia)===slNorm(g));
+  const gerList = Array.from(new Set([...mails.map(m=>m.gerencia), ...grupos.map(([g])=>g)])).filter(g=>g && !g.startsWith("("));
+  // guardado diferido de mails y texto (solo Administrador)
+  const mT = useRef({}); const cT = useRef(null);
+  function setMail(g, patch){
+    const cur = mailOf(g) || {gerencia:g, mails:"", cc:""}; const row = {...cur, ...patch, gerencia:cur.gerencia||g};
+    setMails(list=>{ const i = list.findIndex(m=>slNorm(m.gerencia)===slNorm(g)); if(i<0) return [...list, row]; const o = list.slice(); o[i] = row; return o; });
+    clearTimeout(mT.current[g]); mT.current[g] = setTimeout(async ()=>{ const {error} = await supabaseClient.from(SL_T.mails).upsert({...row, updated_at:new Date().toISOString()}); say(error ? "No se pudo guardar el mail: "+error.message : "Mails guardados"); }, 700);
+  }
+  async function quitarMail(g){ const m = mailOf(g); if(!m) return; const {error} = await supabaseClient.from(SL_T.mails).delete().eq("gerencia", m.gerencia); if(error){ say("No se pudo quitar: "+error.message); return; } setMails(list=>list.filter(x=>x!==m)); }
+  function setTxt(patch){
+    const c = {...cfg, ...patch}; setCfg(c);
+    clearTimeout(cT.current); cT.current = setTimeout(async ()=>{ const {error} = await supabaseClient.from(SL_T.config).upsert({id:"main", asunto:c.asunto, intro:c.intro, cierre:c.cierre, updated_at:new Date().toISOString()}); say(error ? "No se pudo guardar el texto: "+error.message : "Texto del mail guardado"); }, 700);
+  }
+  const asunto = g => String(cfg.asunto||"").replace(/\{gerencia\}/g, g).replace(/\{periodo\}/g, periodo);
+  const cols = ["Legajo","Nombre","Sector","Fechas","Sanción","Días","N° interno"];
+  const filasDe = lista => lista.map(f=>[f.it.legajo, f.it.nombre, f.it.sector, (f.it.fechas||[]).map(isoToDMY).join("; "), f.it.sancion, slDias(f.it)||"", f.it.n_interno||""]);
+  const tablaHtml = lista => "<table style=\"border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px\"><thead><tr>"+cols.map(c=>"<th style=\"border:1px solid #999;background:#E4E8F5;padding:4px 8px;text-align:left\">"+escHtml(c)+"</th>").join("")+"</tr></thead><tbody>"+filasDe(lista).map(r=>"<tr>"+r.map(c=>"<td style=\"border:1px solid #999;padding:4px 8px\">"+escHtml(c)+"</td>").join("")+"</tr>").join("")+"</tbody></table>";
+  const cuerpoHtml = lista => slAsciiHtml("<div style=\"font-family:Arial,sans-serif;font-size:14px\"><p>"+escHtml(cfg.intro).replace(/\n/g,"<br>")+"</p>"+tablaHtml(lista)+"<p>"+escHtml(cfg.cierre).replace(/\n/g,"<br>")+"</p></div>");
+  const cuerpoTxt = lista => cfg.intro+"\n\n"+filasDe(lista).map(r=>r[0]+" | "+r[1]+" | "+r[2]+" | "+r[3]+" | "+r[4]+(r[5] ? " ("+r[5]+" d)" : "")+" | N° "+r[6]).join("\n")+"\n\n"+cfg.cierre;
+  const tablaTxt = lista => [cols.join("\t"), ...filasDe(lista).map(r=>r.join("\t"))].join("\n");
+  function mailto(g, lista){
+    const m = mailOf(g) || {}; const enc = mailEnc==="ansi" ? slEncAnsi : encodeURIComponent;
+    let body = cuerpoTxt(lista); if(body.length>1500) body = cfg.intro+"\n\n(El detalle está en el cuadro: usá «Copiar cuadro» y pegalo acá.)\n\n"+cfg.cierre;
+    body = body.replace(/\r?\n/g, "\r\n");
+    const q = []; if(m.cc) q.push("cc="+slMails(m.cc).map(enc).join(";")); q.push("subject="+enc(asunto(g))); q.push("body="+enc(body));
+    return "mailto:"+slMails(m.mails).join(";")+"?"+q.join("&");
+  }
+  async function zipGer(g, lista){ setBusy("zip-"+g); try{ slDescargar("Sanciones_"+slSafe(g)+"_"+nombreBase()+".zip", await zipDe(lista)); say("ZIP descargado: adjuntalo al mail."); }catch(err){ say("Error: "+((err&&err.message)||err)); } setBusy(""); }
+  async function eml(g, lista){
+    setBusy("eml-"+g);
+    try{
+      await slLibs(); const logo = await slLogo(); const m = mailOf(g) || {};
+      const B = "----=_RRHH_mix_"+Math.random().toString(36).slice(2), A = "----=_RRHH_alt_"+Math.random().toString(36).slice(2);
+      const parts = ["To: "+slMails(m.mails).join(", "), m.cc ? "Cc: "+slMails(m.cc).join(", ") : null, "Subject: "+slHdr(asunto(g)), "X-Unsent: 1", "MIME-Version: 1.0", "Content-Type: multipart/mixed; boundary=\""+B+"\"", "",
+        "--"+B, "Content-Type: multipart/alternative; boundary=\""+A+"\"", "",
+        "--"+A, "Content-Type: text/plain; charset=\"utf-8\"", "Content-Transfer-Encoding: base64", "", slB64Txt(cuerpoTxt(lista).replace(/\r?\n/g,"\r\n")),
+        "--"+A, "Content-Type: text/html; charset=\"utf-8\"", "Content-Transfer-Encoding: base64", "", slB64Txt("<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head><body>"+cuerpoHtml(lista)+"</body></html>"),
+        "--"+A+"--"].filter(x=>x!==null);
+      lista.forEach(f=>{ const doc = new window.jspdf.jsPDF({unit:"mm", format:"a4", compress:true}); slDibujarNota(doc, notaDe(f), logo);
+        parts.push("--"+B, "Content-Type: application/pdf; name=\""+archivoDe(f)+"\"", "Content-Transfer-Encoding: base64", "Content-Disposition: attachment; filename=\""+archivoDe(f)+"\"", "", slB64(doc.output("arraybuffer"))); });
+      parts.push("--"+B+"--", "");
+      slDescargar("Mail_"+slSafe(g)+"_"+nombreBase()+".eml", new Blob([parts.join("\r\n")], {type:"message/rfc822"}));
+      say("Descargado el .eml: abrilo con Outlook y presioná Enviar.");
+    }catch(err){ say("Error: "+((err&&err.message)||err)); }
+    setBusy("");
+  }
+  async function copiar(lista){ const ok = await slCopiar(cuerpoHtml(lista), tablaTxt(lista)); say(ok ? "Cuadro copiado. Pegalo en el cuerpo del mail." : "No se pudo copiar: seleccioná el cuadro y copialo a mano."); }
+  async function marcar(g, lista, on){
+    setBusy("env-"+g);
+    try{
+      const id = lote.id+"|"+slNorm(g), ts = Date.now();
+      if(on){
+        const m = mailOf(g) || {};
+        const row = {id, lote_id:lote.id, gerencia:g, destinatarios:slMails(m.mails).join("; "), cc:slMails(m.cc).join("; "), legajos:lista.map(f=>f.it.legajo), n_internos:lista.map(f=>f.it.n_interno||""), enviado_ts:ts, enviado_por:userRef.current, updated_at:new Date().toISOString()};
+        const {error} = await supabaseClient.from(SL_T.envios).upsert(row); if(error) throw error;
+        // se guardan las fechas vigentes al momento del envío (sin las que ya figuran justificadas en la base)
+        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:ts, enviado_por:userRef.current, fechas:f.it.fechas||[]}; }); await guardarItemsYa(p);
+        setEnvios(list=>[...list.filter(e=>e.id!==id), row]);
+        say(lista.length===1 ? "Marcado como enviado: la sanción de "+g+" queda registrada con la fecha de hoy." : "Marcado como enviado: las "+lista.length+" sanciones de "+g+" quedan registradas con la fecha de hoy.");
+      } else {
+        const {error} = await supabaseClient.from(SL_T.envios).delete().eq("id", id); if(error) throw error;
+        const p = {}; lista.forEach(f=>{ p[f.it.id] = {enviado_ts:null, enviado_por:""}; }); await guardarItemsYa(p);
+        setEnvios(list=>list.filter(e=>e.id!==id));
+        say("Se quitó la marca de enviado de "+g+".");
+      }
+    }catch(err){ say("No se pudo guardar: "+((err&&err.message)||err)); }
+    setBusy("");
+  }
+  function exportarLog(){
+    const rows = [["Fecha envío","Gerencia","Destinatarios","CC","Sectores","Cantidad","Legajos","N° interno","Período","Estado","Marcado por"],
+      ...grupos.map(([g,lista])=>{ const m = mailOf(g) || {}; const e = envioDe(g);
+        return [e && e.enviado_ts ? new Date(e.enviado_ts).toLocaleString("es-AR") : "", g, slMails(m.mails).join("; "), slMails(m.cc).join("; "), Array.from(new Set(lista.map(f=>f.it.sector))).join("; "), lista.length, lista.map(f=>f.it.legajo).join(" "), lista.map(f=>f.it.n_interno||"").join(" "), periodo, e ? "Enviado" : "Pendiente", e ? e.enviado_por : ""]; })];
+    slDescargar("Log_envios_"+nombreBase()+".csv", new Blob([slCsv(rows)], {type:"text/csv"})); say("Log descargado");
+  }
+  const ro = !esAdmin;
+  return (
+    <React.Fragment>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(340px, 1fr))", gap:16}}>
+        <div className="card table-card">
+          <h3>Texto del mail</h3>
+          <div className="caption">Se usa para todas las gerencias; {"{gerencia}"} y {"{periodo}"} se reemplazan solos.{ro ? " Lo edita el Administrador." : ""}</div>
+          <div className="field"><label>Asunto</label><input type="text" value={cfg.asunto} disabled={ro} onChange={e=>setTxt({asunto:e.target.value})} /></div>
+          <div className="field"><label>Período (de este lote)</label><input type="text" value={lote.periodo||""} placeholder={periodoAuto} onChange={e=>updLote({periodo:e.target.value})} /></div>
+          <div className="field"><label>Introducción</label><textarea rows="3" value={cfg.intro} disabled={ro} onChange={e=>setTxt({intro:e.target.value})} /></div>
+          <div className="field"><label>Cierre</label><textarea rows="2" value={cfg.cierre} disabled={ro} onChange={e=>setTxt({cierre:e.target.value})} /></div>
+          <div className="field"><label>Mi programa de correo (para «Abrir en mi correo»)</label>
+            <select value={mailEnc} onChange={e=>setMailEnc(e.target.value)}><option value="ansi">Outlook de escritorio (clásico)</option><option value="utf8">Outlook nuevo, Outlook web, Gmail u otro</option></select></div>
+          <div className="hint">Si en el mail aparecen «Ã±» o «Ã³» en lugar de ñ y acentos, cambiá esta opción. El .eml y «Copiar cuadro» funcionan bien con cualquiera.</div>
+        </div>
+        <div className="card table-card">
+          <h3>Mails por gerencia</h3>
+          <div className="caption">Separá varios mails con «;» (también acepta «Nombre &lt;mail&gt;»).{ro ? " Los edita el Administrador." : " Se pueden cargar desde un Excel con la hoja Gerencia | Mails | CC (abajo, en Historial)."}</div>
+          <div className="overflow-x"><table><thead><tr><th>Gerencia</th><th>Mails</th><th>CC</th>{!ro && <th></th>}</tr></thead><tbody>
+            {!gerList.length && <tr><td colSpan="4" className="hint">Sin gerencias todavía.</td></tr>}
+            {gerList.map(g=>{ const m = mailOf(g) || {mails:"", cc:""}; return (
+              <tr key={g}><td style={{fontWeight:700, whiteSpace:"nowrap"}}>{g}</td>
+                <td><input type="text" style={{width:"100%", minWidth:200}} value={m.mails} disabled={ro} onChange={e=>setMail(g, {mails:e.target.value})} /></td>
+                <td><input type="text" style={{width:"100%", minWidth:120}} value={m.cc} disabled={ro} onChange={e=>setMail(g, {cc:e.target.value})} /></td>
+                {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitarMail(g)} disabled={!mailOf(g)}>Quitar</button></td>}</tr>); })}
+          </tbody></table></div>
+          {!ro && <div style={{display:"flex", gap:8}}><input type="text" placeholder="Nueva gerencia" value={nueva} onChange={e=>setNueva(e.target.value)} /><button type="button" className="btn secondary small" disabled={!nueva.trim()} onClick={()=>{ setMail(nueva.trim(), {}); setNueva(""); }}>Agregar</button></div>}
+        </div>
+      </div>
+      <div className="card controls" style={{paddingTop:12, paddingBottom:12}}>
+        <span className="hint"><b style={{color:"var(--ink)"}}>{grupos.length}</b> gerencias · <b style={{color:"var(--ink)"}}>{enLote.length}</b> notas · <b style={{color:"var(--ink)"}}>{grupos.filter(([g])=>envioDe(g)).length}</b> marcadas como enviadas</span>
+        <button type="button" className="btn secondary small" onClick={exportarLog} disabled={!grupos.length}>Exportar log CSV</button>
+      </div>
+      {!grupos.length && <div className="card table-card"><div className="hint">No hay notas en el lote.</div></div>}
+      {grupos.map(([g, lista])=>{
+        const m = mailOf(g), to = slMails(m && m.mails), cc = slMails(m && m.cc), e = envioDe(g);
+        return (
+          <div key={g} className="card table-card" style={e ? {borderColor:"var(--good)"} : undefined}>
+            <div style={{display:"flex", justifyContent:"space-between", gap:12, flexWrap:"wrap", alignItems:"flex-start"}}>
+              <div><h3>{g}</h3><div className="hint">{lista.length} nota{lista.length===1?"":"s"} · {Array.from(new Set(lista.map(f=>f.it.sector))).join(", ")}</div></div>
+              <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontWeight:700}}>
+                {e && <span style={{color:"var(--good)"}}>✔ Enviado {new Date(e.enviado_ts).toLocaleString("es-AR")}{e.enviado_por ? " · "+e.enviado_por : ""}</span>}
+                <input type="checkbox" checked={!!e} disabled={busy==="env-"+g} onChange={ev=>marcar(g, lista, ev.target.checked)} /> Marcar enviado
+              </label>
+            </div>
+            <div className="hint" style={{color:"var(--ink)"}}><b>Para:</b> {to.length ? to.join("; ") : <span style={{color:"var(--critical)", fontWeight:700}}>sin destinatarios: completá la tabla de mails</span>}{cc.length ? <React.Fragment> · <b>CC:</b> {cc.join("; ")}</React.Fragment> : null}</div>
+            <div className="hint" style={{color:"var(--ink)"}}><b>Asunto:</b> {asunto(g)}</div>
+            <div className="overflow-x"><table><thead><tr>{cols.map(c=>(<th key={c}>{c}</th>))}</tr></thead><tbody>
+              {filasDe(lista).map((r,k)=>(<tr key={k}>{r.map((c,j)=>(<td key={j}>{c}</td>))}</tr>))}
+            </tbody></table></div>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              <a className="btn small" href={mailto(g, lista)} style={{textDecoration:"none"}}>Abrir en mi correo</a>
+              <button type="button" className="btn secondary small" onClick={()=>zipGer(g, lista)} disabled={!!busy}>{busy==="zip-"+g ? "Generando…" : "ZIP de PDFs"}</button>
+              <button type="button" className="btn secondary small" onClick={()=>eml(g, lista)} disabled={!!busy}>{busy==="eml-"+g ? "Generando…" : "Descargar .eml"}</button>
+              <button type="button" className="btn secondary small" onClick={()=>copiar(lista)}>Copiar cuadro</button>
+            </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/* ---- Tabla de motivos de ausencia: qué Id Motivo (codpla) se sanciona (Cuadro = NO JUST). La edita el Administrador. ---- */
+/* ---- Antecedentes de un empleado (menús Sanciones y Sanciones por lote) ----
+   Buscador por legajo o nombre: historial del sistema (últimos 2 años), lo hecho en el Radar (lotes: enviadas, omitidas con motivo, en curso; menú
+   Sanciones), días de suspensión firmados en 12 meses frente al tope de 30, la próxima sanción según la escala y las ausencias NO JUST de los últimos
+   12 meses. Si no recibe los datos por props (menú Sanciones), los lee recién la primera vez que se busca. */
+function SlAntecedentes({plantel, parsed, hist, items, lotes, crSan, codigosNoJust}){
+  const propio = hist===undefined;
+  const [q, setQ] = useKeptState("ant.q", "");
+  const [leg, setLeg] = useKeptState("ant.leg", "");
+  const [datos, setDatos] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  useEffect(()=>{
+    if(!propio || datos || cargando || (!q && !leg)) return;
+    let vivo = true; setCargando(true);
+    (async ()=>{
+      const out = {hist:[], items:[], lotes:[], crSan:new Map(), motivos:SL_MOTIVOS_DEF};
+      try{ out.hist = await slFetchAll(SL_T.hist, "id_sancion"); }catch(e){}
+      try{ out.items = await slFetchAll(SL_T.items, "id"); }catch(e){}
+      try{ out.lotes = await slFetchAll(SL_T.lotes, "id"); }catch(e){}
+      try{ out.crSan = await loadSanciones(); }catch(e){}
+      try{ const mo = await slFetchAll(SL_T.motivos, "id"); if(mo.length) out.motivos = mo; }catch(e){}
+      if(vivo){ setDatos(out); setCargando(false); }
+    })();
+    return ()=>{ vivo = false; };
+  }, [q, leg]);
+  const H = propio ? (datos ? datos.hist : []) : hist;
+  const IT = propio ? (datos ? datos.items : []) : (items||[]);
+  const LO = propio ? (datos ? datos.lotes : []) : (lotes||[]);
+  const CR = propio ? (datos ? datos.crSan : new Map()) : (crSan||new Map());
+  const NJ = propio ? slCodigosNoJust(datos ? datos.motivos : SL_MOTIVOS_DEF) : (codigosNoJust||slCodigosNoJust(SL_MOTIVOS_DEF));
+  // personas para buscar: plantel + historial (por si ya no está en el plantel)
+  const personas = useMemo(()=>{
+    const m = new Map();
+    (plantel||[]).forEach(p=>{ const k = slLeg(p.legajo); if(k) m.set(k, {legajo:k, nombre:p.nombre||"", p}); });
+    H.forEach(h=>{ const k = slLeg(h.legajo); if(k && !m.has(k)) m.set(k, {legajo:k, nombre:h.nombre||String(h.empleado||"").replace(/^\s*\d+\s*[-.]?\s*/,""), p:null}); });
+    return Array.from(m.values());
+  }, [plantel, H]);
+  const qn = normTxt(q);
+  const coincidencias = !qn ? [] : personas.filter(x=> /^\d+$/.test(qn) ? x.legajo.startsWith(String(parseInt(qn,10))) : normTxt(x.nombre).includes(qn)).slice(0, 8);
+  const sel = leg ? (personas.find(x=>x.legajo===leg) || {legajo:leg, nombre:"", p:null}) : null;
+  const hoy = localISO(Date.now()), lim = slAddDays(hoy, -365);
+  const info = useMemo(()=>{
+    if(!sel) return null;
+    const h = H.filter(x=>slLeg(x.legajo)===sel.legajo).sort((a,b)=>String(b.fecha_creado||"").localeCompare(String(a.fecha_creado||"")));
+    const ultima = h.find(s=>slNorm(s.aplicada)==="si" && slNorm(s.motivo).startsWith("ausencia")) || null;
+    const diasAnio = h.filter(s=>slNorm(s.aplicada)==="si" && s.fecha_creado && s.fecha_creado>=lim).reduce((t,s)=>t+(Number(s.dias)||0), 0);
+    const radar = [];
+    IT.filter(it=>slLeg(it.legajo)===sel.legajo).forEach(it=>{
+      const l = LO.find(x=>x.id===it.lote_id);
+      radar.push({orden:(it.fechas||[])[0]||"", origen:"Lote "+slLoteNombre(l), fechas:it.fechas||[], sancion:it.incluir ? slSanTxt(it.sancion, Number(it.dias)||1) : "—",
+        estado: !it.incluir ? "✎ No sancionada: "+(it.motivo_omision||"sin motivo") : it.enviado_ts ? "✔ Enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR") : "• En lote, sin enviar",
+        color: !it.incluir ? "var(--warning)" : it.enviado_ts ? "var(--good)" : "var(--accent)", n:it.n_interno||""});
+    });
+    CR.forEach(s=>{ if(slLeg(s.legajo)!==sel.legajo) return; const f = diasDeSancion(s);
+      radar.push({orden:f[0]||"", origen:"Menú Sanciones", fechas:f, sancion:s.medida ? (s.medida+(s.medida==="Suspensión" && s.diasSuspension ? " "+s.diasSuspension+" d" : "")) : "—",
+        estado: s.estado==="emitida" ? "✔ Emitida "+(s.emitidaTs ? new Date(s.emitidaTs).toLocaleDateString("es-AR") : "") : ((SANCION_ESTADOS[s.estado]||{}).txt||s.estado),
+        color: s.estado==="emitida" ? "var(--good)" : "var(--accent)", n:s.nInterno||""}); });
+    radar.sort((a,b)=>String(b.orden).localeCompare(String(a.orden)));
+    // ausencias NO JUST de los últimos 12 meses en la base del Radar
+    const aus = ((parsed && parsed.records)||[]).filter(r=>r.valid && slLeg(r.legajo)===sel.legajo && r.dateKey>=lim && (()=>{ const c = String(r.idMotivo||"").trim().toUpperCase(); return c ? NJ.has(c) : cuadroPres(r)==="NO JUST"; })())
+      .map(r=>({fecha:r.dateKey, cod:String(r.idMotivo||"").toUpperCase()})).sort((a,b)=>b.fecha.localeCompare(a.fecha));
+    // sanciones ya enviadas/emitidas desde el Radar DESPUÉS del último registro del historial: todavía no figuran firmadas, pero conviene tenerlas en
+    // cuenta. Se muestra cómo quedaría la escala si se firman (no cambia la sugerencia oficial, que sale del historial).
+    const ultHist = h.length ? String(h[0].fecha_creado||"") : "";
+    const post = [];
+    IT.forEach(it=>{ if(slLeg(it.legajo)===sel.legajo && it.incluir && it.enviado_ts && localISO(it.enviado_ts)>ultHist) post.push({ts:it.enviado_ts, sancion:it.sancion, dias:slDias(it)}); });
+    CR.forEach(s=>{ if(slLeg(s.legajo)===sel.legajo && s.estado==="emitida" && s.emitidaTs && localISO(s.emitidaTs)>ultHist && s.motivoSancion!=="control") post.push({ts:s.emitidaTs, sancion:s.medida||"", dias:s.medida==="Suspensión" ? (s.diasSuspension||1) : 0}); });
+    post.sort((a,b)=>b.ts-a.ts);
+    const diasPost = post.filter(x=>localISO(x.ts)>=lim).reduce((t,x)=>t+(x.dias||0), 0);
+    const sugConRadar = post.length ? slSugerir({sancion:post[0].sancion, dias:post[0].dias}, diasAnio+diasPost) : null;
+    return {h, ultima, diasAnio, sug:slSugerir(ultima, diasAnio), radar, aus, post, diasPost, sugConRadar};
+  }, [sel && sel.legajo, H, IT, LO, CR, parsed, NJ]);
+  const p = sel && sel.p;
+  const baja = p && p.bajaTs!=null && p.bajaTs<=Date.now();
+  const quedan = info ? Math.max(0, SL_LIMITE_DIAS-info.diasAnio) : 0;
+  const elegir = x => { setLeg(x.legajo); setQ(x.legajo+" "+x.nombre); };
+  return (
+    <CollapsibleCard id="sl-antecedentes" title="Antecedentes de un empleado" summary={sel ? sel.legajo+" "+(sel.nombre||"") : "buscá por legajo o nombre"}>
+      <div style={{display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap", position:"relative"}}>
+        <div className="field" style={{flex:"1 1 280px", maxWidth:420, position:"relative"}}>
+          <label>Legajo o nombre</label>
+          <input type="text" value={q} placeholder="Ej.: 9957 o Cifarelli" onChange={e=>{ setQ(e.target.value); setLeg(""); }}
+            onKeyDown={e=>{ if(e.key==="Enter" && coincidencias.length) elegir(coincidencias[0]); }} />
+          {!leg && coincidencias.length>0 && (
+            <div className="card" style={{position:"absolute", top:"100%", left:0, right:0, zIndex:40, marginTop:4, padding:4, display:"flex", flexDirection:"column"}}>
+              {coincidencias.map(x=>(
+                <button key={x.legajo} type="button" onClick={()=>elegir(x)} style={{all:"unset", cursor:"pointer", padding:"6px 8px", borderRadius:6, fontSize:13}}
+                  onMouseEnter={e=>e.currentTarget.style.background="var(--plane)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <b>{x.legajo}</b> {x.nombre}{x.p && x.p.sector ? <span className="hint"> · {x.p.sector}</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {(q || leg) && <button type="button" className="btn secondary small" onClick={()=>{ setQ(""); setLeg(""); }}>Limpiar</button>}
+        {cargando && <span className="hint">Leyendo antecedentes…</span>}
+        {qn && !leg && !coincidencias.length && !cargando && <span className="hint">Nadie con ese legajo o nombre.</span>}
+      </div>
+      {sel && info && (
+        <div style={{display:"flex", flexDirection:"column", gap:10, marginTop:6}}>
+          <div style={{display:"flex", gap:"6px 16px", flexWrap:"wrap", alignItems:"baseline"}}>
+            <b style={{fontSize:15}}>{sel.legajo} · {sel.nombre||"(sin nombre)"}</b>
+            {p ? <span className="hint">{[p.sector, p.gerencia, p.unidad].filter(Boolean).join(" · ")}</span> : <span className="hint" style={{color:"var(--critical)"}}>no figura en el plantel</span>}
+            {baja && <span className="hint" style={{color:"var(--critical)", fontWeight:700}}>dado de baja {fmtDateFromTs(p.bajaTs)}</span>}
+          </div>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(190px, 1fr))", gap:10}}>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Última sanción firmada por ausencia</div>
+              {info.ultima ? <div><b style={{color:slChipColor(info.ultima.sancion)}}>{info.ultima.sancion}</b>{Number(info.ultima.dias) ? " · "+info.ultima.dias+" d" : ""}<div className="hint">{isoToDMY(info.ultima.fecha_creado)}</div></div> : <b>Sin antecedentes</b>}</div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Días de suspensión firmados (12 meses)</div>
+              <b style={{color:info.diasAnio>=SL_LIMITE_DIAS ? "var(--critical)" : info.diasAnio>=20 ? "var(--warning)" : undefined}}>{info.diasAnio} de {SL_LIMITE_DIAS}</b>
+              <div className="hint">{quedan ? "Le quedan "+quedan+" día"+(quedan===1?"":"s")+" antes del tope" : "Llegó al tope: corresponde evaluar desvinculación"}</div></div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Próxima según la escala</div>
+              <b style={{color:info.sug.excede ? "var(--critical)" : undefined}}>{slSanTxt(info.sug.sancion, info.sug.dias)}</b>
+              <div className="hint">{info.sug.excede ? "Supera los 30 días: no se emite" : info.sug.motivo}</div>
+              {info.sugConRadar && <div className="hint" style={{color:"var(--warning)", marginTop:4}} title="Enviadas o emitidas desde el Radar después del último registro del historial: todavía no figuran firmadas">
+                Ojo: {info.post.length===1 ? "hay 1 sanción enviada" : "hay "+info.post.length+" sanciones enviadas"} desde el Radar que aún no figura{info.post.length===1?"":"n"} en el historial (última: {slSanTxt(info.post[0].sancion, info.post[0].dias)}, {new Date(info.post[0].ts).toLocaleDateString("es-AR")}).
+                Si se firma{info.post.length===1?"":"n"}: <b>{info.sugConRadar.excede ? "supera el tope de 30 días" : slSanTxt(info.sugConRadar.sancion, info.sugConRadar.dias)}</b>{info.diasPost ? " · "+(info.diasAnio+info.diasPost)+" de 30 días" : ""}.
+              </div>}</div>
+            <div className="card" style={{padding:"10px 12px"}}><div className="hint">Ausencias NO JUST en 12 meses</div>
+              <b>{info.aus.length}</b>{parsed ? null : <div className="hint">(se ven en Sanciones por lote)</div>}
+              {info.aus.length>0 && <div className="hint">Última: {isoToDMY(info.aus[0].fecha)} ({info.aus[0].cod||"NO JUST"})</div>}</div>
+          </div>
+          <div className="overflow-x"><table>
+            <thead><tr><th>Fecha</th><th>Sanción</th><th>Motivo</th><th className="num">Días</th><th>Aplicada</th><th>Firma</th><th>Origen</th></tr></thead>
+            <tbody>
+              {info.h.map(h=>(<tr key={"h"+h.id_sancion}><td>{isoToDMY(h.fecha_creado)}</td><td style={{color:slChipColor(h.sancion), fontWeight:700}}>{h.sancion}</td><td>{h.motivo}</td><td className="num">{Number(h.dias)||""}</td><td>{slNorm(h.aplicada)==="si" ? "Sí" : <span className="hint">no firmada</span>}</td><td>{isoToDMY(h.fecha_firma)}</td><td className="hint">Historial del sistema</td></tr>))}
+              {info.radar.map((x,i)=>(<tr key={"r"+i}><td>{x.fechas.length ? x.fechas.slice(0,3).map(d=>isoToDMY(d).slice(0,5)).join(", ")+(x.fechas.length>3 ? "…" : "")+"/"+String(x.fechas[0]).slice(0,4) : "—"}</td><td style={{fontWeight:700}}>{x.sancion}</td><td style={{color:x.color, fontWeight:600}}>{x.estado}</td><td></td><td></td><td className="hint">{x.n ? "N° "+x.n : ""}</td><td className="hint">{x.origen}</td></tr>))}
+              {!info.h.length && !info.radar.length && <tr><td colSpan="7" className="hint">Sin sanciones registradas (historial de los últimos 2 años y Radar).</td></tr>}
+            </tbody>
+          </table></div>
+          {info.aus.length>0 && <div className="hint">Ausencias NO JUST (12 meses): {info.aus.slice(0,20).map(a=>isoToDMY(a.fecha).slice(0,5)+(a.cod ? " "+a.cod : "")).join(" · ")}{info.aus.length>20 ? " …" : ""}</div>}
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
+function SlMotivos({motivos, setMotivos, estado, setEstado, esAdmin, say}){
+  const [q, setQ] = useState("");
+  const [soloNJ, setSoloNJ] = useState(false);
+  const ref = useRef(motivos); ref.current = motivos;
+  const estRef = useRef(estado); estRef.current = estado;
+  const timers = useRef({});
+  const ro = !esAdmin || estado==="sintabla";
+  const nj = slCodigosNoJust(motivos);
+  const cuadros = Array.from(new Set(motivos.map(m=>m.cuadro).filter(Boolean))).sort((a,b)=>a.localeCompare(b,"es"));
+  // la primera vez que se edita, se guarda la tabla completa (hasta entonces es la de por defecto)
+  async function guardar(id){
+    const now = new Date().toISOString();
+    if(estRef.current!=="base"){
+      const {error} = await supabaseClient.from(SL_T.motivos).upsert(ref.current.map(m=>({...m, updated_at:now})));
+      if(error){ say("No se pudo guardar la tabla de motivos: "+error.message); return; }
+      setEstado("base"); say("Tabla de motivos guardada"); return;
+    }
+    const m = ref.current.find(x=>x.id===id); if(!m) return;
+    const {error} = await supabaseClient.from(SL_T.motivos).upsert({...m, updated_at:now});
+    say(error ? "No se pudo guardar el motivo: "+error.message : "Tabla de motivos guardada");
+  }
+  function cambiar(id, patch){
+    setMotivos(list=>list.map(m=>m.id===id ? {...m, ...patch} : m));
+    clearTimeout(timers.current[id]); timers.current[id] = setTimeout(()=>guardar(id), 700);
+  }
+  function agregar(){
+    const orden = ref.current.reduce((mx,m)=>Math.max(mx, m.orden||0), 0)+1;
+    const m = {id:"M"+Date.now().toString(36), orden, nombre:"", codigo:"", concepto:"", dia_pago:"", cuadro:"NO JUST"};
+    setMotivos(list=>[...list, m]); setQ(""); setSoloNJ(false);
+    clearTimeout(timers.current[m.id]); timers.current[m.id] = setTimeout(()=>guardar(m.id), 700);
+  }
+  async function quitar(m){
+    if(estRef.current==="base"){ const {error} = await supabaseClient.from(SL_T.motivos).delete().eq("id", m.id); if(error){ say("No se pudo quitar: "+error.message); return; } }
+    setMotivos(list=>list.filter(x=>x.id!==m.id));
+    if(estRef.current!=="base") setTimeout(()=>guardar(null), 60);
+    say("Motivo quitado: "+(m.nombre||m.codigo));
+  }
+  const qn = normTxt(q);
+  const lista = motivos.filter(m=>(!soloNJ || slNorm(m.cuadro)==="nojust") && (!qn || [m.nombre, m.codigo, m.concepto, m.cuadro].some(v=>normTxt(v).includes(qn))));
+  const celda = (m, k, w) => ro ? <span>{m[k]||""}</span>
+    : <input type="text" value={m[k]||""} style={{width:w, fontSize:12.5, padding:"4px 6px"}} list={k==="cuadro" ? "sl-cuadros" : undefined}
+        onChange={e=>cambiar(m.id, {[k]: k==="codigo" ? e.target.value.toUpperCase() : e.target.value})} />;
+  return (
+    <CollapsibleCard id="sl-motivos" title="Tipos de ausencia que se sancionan (tabla de motivos)"
+      summary={motivos.length+" motivos · se sancionan los códigos "+(Array.from(nj).join(", ")||"—")+(estado==="def" ? " · tabla por defecto" : "")}>
+      <div className="caption" style={{marginTop:0}}>
+        Al crear un lote se toman las ausencias cuyo <b>Id Motivo (codpla)</b> figura acá con <b>Cuadro = NO JUST</b> (si una fila no trae código, se usa el Agrupador cuadro presidencia).
+        Para sumar otro tipo de ausencia, poné «NO JUST» en su Cuadro o agregá un motivo nuevo. Los cambios valen para los lotes nuevos y para «Agregar ausencias nuevas del período».
+        También se puede reemplazar la tabla completa subiendo un Excel con la hoja TABLAS (Nombre | Codigo | Concepto | Dia pago | Cuadro) en «Historial de sanciones».
+        {ro && esAdmin ? "" : ro ? " La edita el Administrador." : ""}
+      </div>
+      {estado==="sintabla" && <div className="warn-banner">Se usa la tabla por defecto y no se puede editar: falta correr supabase-migracion-sanciones-lote-motivos.sql en Supabase.</div>}
+      <div style={{display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap"}}>
+        <div className="field"><label>Buscar</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Nombre, código o cuadro" style={{minWidth:220}} /></div>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}><input type="checkbox" checked={soloNJ} onChange={e=>setSoloNJ(e.target.checked)} /> Solo los que se sancionan (NO JUST)</label>
+        <span className="hint">Mostrando {lista.length} de {motivos.length}</span>
+      </div>
+      <datalist id="sl-cuadros">{cuadros.map(c=>(<option key={c} value={c} />))}</datalist>
+      <div className="overflow-x" style={{maxHeight:520, overflowY:"auto"}}>
+        <table>
+          <thead><tr><th>Nombre</th><th>Código</th><th>Concepto</th><th>Día pago</th><th>Cuadro</th><th>¿Se sanciona?</th>{!ro && <th></th>}</tr></thead>
+          <tbody>
+            {lista.map(m=>{ const san = slNorm(m.cuadro)==="nojust";
+              return (
+                <tr key={m.id} style={san ? {background:"color-mix(in srgb, var(--critical) 8%, transparent)"} : undefined}>
+                  <td>{celda(m, "nombre", 230)}</td>
+                  <td>{celda(m, "codigo", 60)}</td>
+                  <td>{celda(m, "concepto", 230)}</td>
+                  <td>{celda(m, "dia_pago", 90)}</td>
+                  <td>{celda(m, "cuadro", 120)}</td>
+                  <td style={{fontWeight:700, color:san ? "var(--critical)" : "var(--muted)"}}>{san ? (m.codigo ? "Sí" : "Sí (falta el código)") : "—"}</td>
+                  {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitar(m)}>Quitar</button></td>}
+                </tr>
+              ); })}
+            {!lista.length && <tr><td colSpan="7" className="hint">Ningún motivo con este filtro.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {!ro && <div><button type="button" className="btn secondary small" onClick={agregar}>+ Agregar tipo de ausencia</button></div>}
+    </CollapsibleCard>
+  );
+}
+
+/* ---- Permisos de Geo <-> CODPLA de Calipso (tabla `geo_permisos`, migración supabase-migracion-permisos-geo.sql) ----
+   Cada permiso de GeoVictoria (nombre y N°) con el CODPLA (Id Motivo) que le corresponde en Calipso. Es la base para actualizar el día
+   desde la carga de Geo. La edita el Administrador; RRHH la ve. Mientras la tabla esté vacía se usa GEO_PERMISOS_DEF (la que pasó RRHH el 16/11/2026)
+   y la primera edición la guarda completa. Sin el SQL se usa la de por defecto, sin poder editarla. */
+const GEO_PERMISOS_TABLE = "geo_permisos";
+// [CODPLA, Permiso, N° de Geo, Goce de sueldo, Permite marcar]; CODPLA vacío = sin equivalente en Calipso (hoy no se podría cargar)
+const GEO_PERMISOS_DEF = [
+  ["AT","Accidente de trabajo","54","Si","No"], ["","Accidentes","-9","Si","Si"], ["","Amamantamiento (Fuero)","-11","Si","Si"],
+  ["CA","Ausente C/ Aviso","44","No","No"], ["CAE","Ausente C/ Aviso Enfermedad","45","No","No"], ["SA","Ausente S/ Aviso","46","No","No"],
+  ["","Capacitación","-6","Si","Si"], ["CE","Cesante","10","No","No"], ["CJ","Citacion Judicial","11","Si","No"], ["","Compensación","-10","Si","Si"],
+  ["DAC","Dia a Compensar","48","No","Si"], ["","Dia Compensado","49","Si","Si"], ["DS","Donación de sangre","12","Si","No"],
+  ["EN","Enfermedad","34","Si","No"], ["EFS","Enfermedad Familiar Sgbatos Art 21","14","Si","No"], ["ET","Enfermedad trabajo (ET)","15","Si","No"],
+  ["EX","Examen","16","Si","No"], ["ED","Excedencia","13","No","No"], ["FA","Fallecimiento abuelos","35","Si","No"], ["FA","Fallecimiento Esposo/a","36","Si","No"],
+  ["FA","Fallecimiento Hermano","37","Si","No"], ["FA","Fallecimiento Hermanos","37","No","No"], ["FA","Fallecimiento Hijo","38","Si","No"],
+  ["FA","Fallecimiento nieto","39","Si","No"], ["FA","Fallecimiento nietos","39","No","No"], ["FA","Fallecimiento Padres","40","Si","No"], ["FA","Fallecimiento suegros","41","Si","No"],
+  ["","Horas Salida Entre jornada C/Goce","51","Si","--:--"], ["","Horas Salida Entre jornada S/Goce","52","No","--:--"], ["JDL","Jornada de Lluvia","66","No","No"],
+  ["LSP","Lic Sanitaria Preventiva","21","Si","No"], ["","Licencia Médica Estándar","-2","No","No"], ["LVC","Licencia por Vacuna contra Covid","23","Si","No"],
+  ["LSS","Licencia Sin Goce de Haberes","57","No","Si"], ["MT","Maternidad","25","Si","No"], ["MA","Matrimonio","24","Si","No"], ["MU","Mudanza (Sgbatos)","26","No","No"],
+  ["NAC","Nacimiento","27","Si","No"], ["","Otro","-3","No","Si"], ["PH","Paro / huelga","5","No","No"], ["","P. Administrativo","-4","Si","Si"],
+  ["","P. Fallecimiento","-5","Si","Si"], ["PSI","P. Sindical","-7","Si","Si"], ["PCG","Permiso con Goce","-12","Si","Si"], ["PCT","Permiso Contratista","63","Si","Si"],
+  ["JRP","Permiso Sgbatos Art 20.1 (JRP)","19","Si","--:--"], ["PSG","Permiso sin Goce","-13","No","Si"], ["PHO","Pres Home Office","47","Si","Si"],
+  ["","Presente Eventual B","56","Si","Si"], ["PGC","Presente Gerente/Coordinador","55","Si","Si"], ["PCT","Presente Contratista","63","Si","Si"],
+  ["PRD","Proceso Desvinculacion","65","No","No"], ["PHO","Presente Home Office","28","Si","No"], ["RP","Reserva de puesto","30","No","No"], ["","Reunión","-8","Si","Si"],
+  ["SFT","Suspension falta de trabajo","158","No","No"], ["SUS","Suspension","33","No","No"], ["","Suspension Preventiva Art 224 LCT","50","No","No"],
+  ["TEC","Trabajo en Comisión","53","Si","Si"], ["VAC","Vacaciones","42","Si","No"], ["VAP","Vacaciones Pendientes","43","Si","No"]
+].map((r,i)=>({id:"G"+String(i+1).padStart(3,"0"), orden:i+1, codpla:r[0], permiso:r[1], numero:r[2], goce:r[3], permite_marcar:r[4]}));
+
+function GeoPermisosTab({parsed, esAdmin}){
+  const [rows, setRows] = useState(GEO_PERMISOS_DEF);
+  const [estado, setEstado] = useState("cargando");   // cargando | base (guardada en el servidor) | def (por defecto, sin guardar) | sintabla (falta el SQL) | error
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [q, setQ] = useState("");
+  const [soloSin, setSoloSin] = useState(false);
+  const ref = useRef(rows); ref.current = rows;
+  const estRef = useRef(estado); estRef.current = estado;
+  const timers = useRef({});
+  useEffect(()=>{
+    let vivo = true;
+    (async ()=>{
+      try{
+        const d = await slFetchAll(GEO_PERMISOS_TABLE, "orden");
+        if(!vivo) return;
+        if(d.length){ setRows(d); setEstado("base"); } else { setRows(GEO_PERMISOS_DEF); setEstado("def"); }
+      }catch(e){
+        if(!vivo) return;
+        if(/PGRST205|42P01|does not exist|schema cache/i.test(String(e && e.code)+" "+String(e && e.message))) setEstado("sintabla");
+        else { setEstado("error"); setErr((e && e.message) || String(e)); }
+      }
+    })();
+    return ()=>{ vivo = false; };
+  }, []);
+  const ro = !esAdmin || estado==="sintabla" || estado==="error" || estado==="cargando";
+  // la primera vez que se edita se guarda la tabla completa (hasta entonces es la de por defecto); después, solo la fila tocada
+  async function guardar(id){
+    const now = new Date().toISOString();
+    if(estRef.current!=="base"){
+      const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).upsert(ref.current.map(r=>({...r, updated_at:now})));
+      if(error){ setMsg("No se pudo guardar la tabla: "+error.message); return; }
+      setEstado("base"); setMsg("Tabla guardada"); return;
+    }
+    const r = ref.current.find(x=>x.id===id); if(!r) return;
+    const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).upsert({...r, updated_at:now});
+    setMsg(error ? "No se pudo guardar: "+error.message : "Cambio guardado");
+  }
+  function cambiar(id, patch){
+    setRows(list=>list.map(r=>r.id===id ? {...r, ...patch} : r));
+    clearTimeout(timers.current[id]); timers.current[id] = setTimeout(()=>guardar(id), 700);
+  }
+  function agregar(){
+    const orden = ref.current.reduce((mx,r)=>Math.max(mx, r.orden||0), 0)+1;
+    const r = {id:"G"+Date.now().toString(36), orden, codpla:"", permiso:"", numero:"", goce:"Si", permite_marcar:"No"};
+    setRows(list=>[...list, r]); setQ(""); setSoloSin(false);
+    clearTimeout(timers.current[r.id]); timers.current[r.id] = setTimeout(()=>guardar(r.id), 700);
+  }
+  async function quitar(r){
+    if(estRef.current==="base"){
+      const {error} = await supabaseClient.from(GEO_PERMISOS_TABLE).delete().eq("id", r.id);
+      if(error){ setMsg("No se pudo quitar: "+error.message); return; }
+    }
+    clearTimeout(timers.current[r.id]);
+    setRows(list=>list.filter(x=>x.id!==r.id));
+    if(estRef.current!=="base") setTimeout(()=>guardar(null), 60);
+    setMsg("Permiso quitado: "+(r.permiso||r.codpla||"(vacío)"));
+  }
+  async function restaurar(){
+    if(!window.confirm("¿Volver a la tabla original (la que pasó RRHH el 16/11/2026)? Se pierden los permisos agregados, quitados o cambiados.")) return;
+    try{
+      if(estRef.current==="base"){ const {error:eD} = await supabaseClient.from(GEO_PERMISOS_TABLE).delete().neq("id", ""); if(eD) throw eD; }
+      const now = new Date().toISOString();
+      const {error:eI} = await supabaseClient.from(GEO_PERMISOS_TABLE).insert(GEO_PERMISOS_DEF.map(r=>({...r, updated_at:now})));
+      if(eI) throw eI;
+      setRows(GEO_PERMISOS_DEF); setEstado("base"); setMsg("Tabla original restaurada");
+    }catch(e){ setMsg("No se pudo restaurar: "+((e && e.message) || String(e))); }
+  }
+  function descargar(){
+    const aoa = [["CODPLA","Permiso","N°","Goce de Sueldo","Permite Marcar"]].concat(rows.map(r=>[r.codpla||"", r.permiso||"", r.numero||"", r.goce||"", r.permite_marcar||""]));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Permisos Geo");
+    XLSX.writeFile(wb, "equivalencias-geo-codpla-"+localISO(Date.now())+".xlsx");
+  }
+  // controles
+  const codplaTabla = new Set(rows.map(r=>String(r.codpla||"").trim().toUpperCase()).filter(Boolean));
+  const universo = parsed && parsed.idMotivoUniverse ? parsed.idMotivoUniverse : [];
+  const enDatos = new Set(universo.map(m=>String(m.key).toUpperCase()));
+  const sinPermiso = universo.filter(m=>!codplaTabla.has(String(m.key).toUpperCase()));
+  const codsPorNumero = new Map();
+  rows.forEach(r=>{ const n = String(r.numero||"").trim(), c = String(r.codpla||"").trim().toUpperCase(); if(!n || !c) return; if(!codsPorNumero.has(n)) codsPorNumero.set(n, new Set()); codsPorNumero.get(n).add(c); });
+  const numConflicto = n => { const s = codsPorNumero.get(String(n||"").trim()); return !!s && s.size>1; };
+  const nSinCodpla = rows.filter(r=>!String(r.codpla||"").trim()).length;
+  const qn = normTxt(q);
+  const lista = rows.filter(r=>(!soloSin || !String(r.codpla||"").trim()) && (!qn || [r.codpla, r.permiso, r.numero].some(v=>normTxt(v).includes(qn))));
+  const celda = (r, k, w, extra) => ro ? <span>{r[k]||""}</span>
+    : <input type="text" value={r[k]||""} style={{width:w, fontSize:12.5, padding:"4px 6px"}} list={extra && extra.list}
+        onChange={e=>cambiar(r.id, {[k]: k==="codpla" ? e.target.value.toUpperCase() : e.target.value})} />;
+  const sel = (r, k, opts) => ro ? <span>{r[k]||""}</span>
+    : <select value={r[k]||""} onChange={e=>cambiar(r.id, {[k]:e.target.value})} style={{fontSize:12.5, padding:"4px 6px"}}>{opts.concat(r[k] && !opts.includes(r[k]) ? [r[k]] : []).map(o=>(<option key={o} value={o}>{o}</option>))}</select>;
+  const datalistCods = Array.from(new Set([...codplaTabla, ...enDatos])).sort();
+  return (
+    <div className="tabpanel">
+      <div className="card table-card">
+        <h3>Permisos de Geo ↔ CODPLA de Calipso</h3>
+        <p className="desc" style={{marginTop:0}}>
+          Cada permiso de GeoVictoria (nombre y N°) con el <b>CODPLA</b> (Id Motivo) que le corresponde en Calipso. Es la tabla que se va a usar para pasar a Calipso lo que se cargó en Geo.
+          Si Geo suma o quita un permiso, agregalo o quitalo acá. Un permiso <b>sin CODPLA</b> no se puede cargar al Radar.
+          {esAdmin ? " Los cambios se guardan solos." : " La tabla la edita el Administrador; acá solo se consulta."}
+        </p>
+        {estado==="cargando" && <div className="hint">Cargando…</div>}
+        {estado==="def" && <div className="hint">Se muestra la tabla original (todavía no se modificó): la primera vez que cambies algo se guarda completa en el servidor.</div>}
+        {estado==="sintabla" && <div className="warn-banner">Se muestra la tabla original y no se puede editar: falta correr supabase-migracion-permisos-geo.sql en el SQL Editor de Supabase.</div>}
+        {estado==="error" && <div className="warn-banner">No se pudo leer la tabla del servidor ({err}). Se muestra la original, sin poder editarla.</div>}
+        <div style={{display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap", marginTop:8}}>
+          <div className="field"><label>Buscar</label><input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Permiso, CODPLA o N°" style={{minWidth:220}} /></div>
+          <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}}><input type="checkbox" checked={soloSin} onChange={e=>setSoloSin(e.target.checked)} /> Solo los sin CODPLA ({nSinCodpla})</label>
+          <span className="hint">Mostrando {lista.length} de {rows.length}</span>
+          {!ro && <button type="button" className="btn small" onClick={agregar}>+ Agregar permiso</button>}
+          <button type="button" className="btn secondary small" onClick={descargar}>Descargar Excel</button>
+          {!ro && estado==="base" && <button type="button" className="btn secondary small" onClick={restaurar}>Volver a la tabla original</button>}
+          <span className="hint">{msg}</span>
+        </div>
+      </div>
+
+      {parsed && sinPermiso.length>0 && (
+        <div className="card table-card">
+          <h3>Códigos de Calipso sin ningún permiso de Geo ({sinPermiso.length})</h3>
+          <p className="desc" style={{marginTop:0}}>Estos Id Motivo figuran en los datos cargados en el Radar, pero ningún permiso de la tabla los usa: una ausencia con ese permiso en Geo no se podría pasar a Calipso. Revisá si falta completar el CODPLA de algún permiso (o agregar el permiso).</p>
+          <div style={{display:"flex", flexWrap:"wrap", gap:8}}>
+            {sinPermiso.map(m=>(<span key={m.key} className="hint" style={{margin:0, border:"1px solid var(--border)", borderRadius:6, padding:"3px 8px"}}><b>{m.key}</b>{String(m.label||"").replace(new RegExp("^"+m.key+"\\s*[—-]\\s*"), "") ? " — "+String(m.label).replace(new RegExp("^"+m.key+"\\s*[—-]\\s*"), "") : ""}</span>))}
+          </div>
+        </div>
+      )}
+
+      <div className="card table-card">
+        <datalist id="geo-codplas">{datalistCods.map(c=>(<option key={c} value={c} />))}</datalist>
+        <div className="overflow-x" style={{maxHeight:620, overflowY:"auto"}}>
+          <table>
+            <thead><tr><th>CODPLA</th><th>Permiso (Geo)</th><th>N° (Geo)</th><th>Goce de sueldo</th><th>Permite marcar</th><th>Estado</th>{!ro && <th></th>}</tr></thead>
+            <tbody>
+              {lista.map(r=>{
+                const cod = String(r.codpla||"").trim().toUpperCase();
+                let est = null;
+                if(!cod) est = <span style={{color:"var(--warning)", fontWeight:700}}>Sin CODPLA: no se carga</span>;
+                else if(numConflicto(r.numero)) est = <span style={{color:"var(--critical)", fontWeight:700}}>N° repetido con otro CODPLA</span>;
+                else if(parsed && universo.length && !enDatos.has(cod)) est = <span className="hint" style={{margin:0}} title="Ese Id Motivo todavía no aparece en los datos cargados en el Radar (puede ser normal si nunca se usó).">Sin uso en los datos</span>;
+                else est = <span style={{color:"var(--good)"}}>✓</span>;
+                return (
+                  <tr key={r.id} style={!cod ? {background:"color-mix(in srgb, var(--warning) 8%, transparent)"} : undefined}>
+                    <td>{celda(r, "codpla", 70, {list:"geo-codplas"})}</td>
+                    <td>{celda(r, "permiso", 280)}</td>
+                    <td>{celda(r, "numero", 60)}</td>
+                    <td>{sel(r, "goce", ["Si","No"])}</td>
+                    <td>{sel(r, "permite_marcar", ["Si","No","--:--"])}</td>
+                    <td>{est}</td>
+                    {!ro && <td><button type="button" className="btn secondary small" onClick={()=>quitar(r)}>Quitar</button></td>}
+                  </tr>
+                ); })}
+              {!lista.length && <tr><td colSpan="7" className="hint">Ningún permiso con este filtro.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Carga Geo dentro del Radar + paso a Crónicos (provisorio) ----
+   La «Carga de Novedades GeoVictoria» (carga-geo.html, con geo-shim.js) corre en un iframe y guarda en la tabla `geo_docs`.
+   De ahí el Radar arma, por empleado y día, una fila de ausentismo PROVISORIA (origen "geo") con el mismo formato que Calipso:
+   así Crónicos, Resumen, etc. se actualizan con lo que se va resolviendo en Geo, sin esperar la carga de Calipso. Cuando se carga
+   Calipso, sus filas (misma clave legajo+fecha) reemplazan a las de Geo. Nunca se pisa una fila de Calipso. */
+const GEO_DOCS_TABLE = "geo_docs";
+const geoNorm = s => normTxt(String(s==null ? "" : s).trim());
+// permisos de Geo -> CODPLA, por nombre y por N° (solo los que tienen CODPLA)
+function geoIndicePermisos(filas){
+  const porNombre = new Map(), porNumero = new Map();
+  (filas||[]).forEach(f=>{
+    const cod = String(f.codpla||"").trim().toUpperCase(); if(!cod) return;
+    const n = geoNorm(f.permiso); if(n && !porNombre.has(n)) porNombre.set(n, cod);
+    const num = String(f.numero||"").trim(); if(num && !porNumero.has(num)) porNumero.set(num, cod);
+  });
+  return {porNombre, porNumero};
+}
+// por Id Motivo: lo más frecuente que Calipso ya trae en los datos cargados (motivo, Estado, agrupador de presentismo y de presidencia)
+function geoInfoMotivos(records){
+  const cnt = new Map();
+  records.forEach(r=>{
+    if(!r.valid || !r.idMotivo) return;
+    const k = r.idMotivo.toUpperCase(), v = [r.motivo||"", r.estado||"", r.agrup||"", r.presidencia||""].join("\u0001");
+    let m = cnt.get(k); if(!m){ m = new Map(); cnt.set(k, m); }
+    m.set(v, (m.get(v)||0)+1);
+  });
+  const out = new Map();
+  cnt.forEach((m,k)=>{ let best = null, bn = 0; m.forEach((n,v)=>{ if(n>bn){ bn = n; best = v; } }); const p = best.split("\u0001"); out.set(k, {motivo:p[0], estado:p[1], agrup:p[2], presidencia:p[3]}); });
+  return out;
+}
+function geoUltimoPorLegajo(records){
+  const m = new Map();
+  records.forEach(r=>{ if(!r.valid || !r.legajo) return; const k = r.legajo.toUpperCase(), p = m.get(k); if(!p || r.ts>=p.ts) m.set(k, r); });
+  return m;
+}
+const geoTipoContrat = v => /eventual/i.test(v||"") ? "Eventual" : /pzo|plazo/i.test(v||"") ? "Cto. Pzo. Fijo" : "Propios";
+// datos del empleado (los que Calipso trae en cada fila): los de su última fila de Calipso; si no tiene, el padrón de la Carga Geo y el plantel del Radar
+function geoDescriptivos(last, x2, pl){
+  const L = last || {}, P = pl || {};
+  const v = (a, b, c) => (a!=null && a!=="") ? a : (b!=null && b!=="") ? b : (c||"");
+  return {
+    nombre: v(L.nombre, x2.Nombre, P.nombre),
+    unidad: v(L.unidad, unidadBase(x2["Unidad de Negocio"]), unidadBase(P.unidad)),
+    sector: v(L.sector, x2.Sector, P.sector), gerencia: v(L.gerencia, x2.Gerencia, P.gerencia),
+    departamento: v(L.departamento, x2.Departamento, P.departamento), empresa: v(L.empresa, x2.Empresa, P.empresa),
+    puesto: v(L.puesto, x2.Puesto, P.puesto), jefe: v(L.jefe, P.jefe), sindicato: v(L.sindicato, P.sindicato),
+    tipoContrat: v(L.tipoContrat, geoTipoContrat(x2["Tipo de Contratación"]))
+  };
+}
+// Arma las filas provisorias de un día. rows = empleados del día (docs emps de Geo), novMap = novedades {dni: {code, com, ...}}.
+function geoArmarFilas({dia, rows, novMap, permIdx, motInfo, ultimo, plantelMap, existentes}){
+  const p = dia.split("-").map(Number), anio = p[0], mes = p[1], d = p[2];
+  const ts = Date.UTC(anio, mes-1, d), monthKey = anio+"-"+pad2(mes), dateKey = monthKey+"-"+pad2(d);
+  const res = {dia, records:[], presentes:0, ausentes:0, pendientes:[], sinEquivalente:[], sinInfo:[], sinLegajo:[], descanso:0, oficiales:0, total:rows.length};
+  rows.forEach(x=>{
+    const x2 = x.x || {};
+    const legajo = String(x2.Legajo||"").trim();
+    const nom = (x.a||"")+", "+(x.n||"");
+    if(!legajo){ res.sinLegajo.push({dni:x.d, nombre:nom}); return; }
+    const st = (x.s==="ni" && /descanso/i.test(x.t||"")) ? "de" : x.s;
+    const nov = novMap[x.d];
+    const code = nov ? String(nov.code==null ? "" : nov.code).trim() : "";
+    let cod = null, razon = "";
+    if(code){
+      if(!/^0+$/.test(code)){            // 00 = «Falta fichada» (reclamo interno): cuenta como presente
+        cod = permIdx.porNumero.get(code) || null;
+        if(!cod){ res.sinEquivalente.push({legajo, nombre:nom, permiso:"N° "+code}); return; }
+        razon = String(nov.com||"").trim();
+      }
+    }
+    else if(st==="fi"){ /* presente */ }
+    else if(st==="pe"){
+      cod = permIdx.porNombre.get(geoNorm(x.p)) || null;
+      if(!cod){ res.sinEquivalente.push({legajo, nombre:nom, permiso:x.p||""}); return; }
+    }
+    else if(st==="fe"){ cod = "FER"; }
+    else if(st==="de"){ res.descanso++; return; }
+    else { res.pendientes.push({legajo, nombre:nom, grupo:x.g||"", turno:x.t||""}); return; }
+    const info = cod ? motInfo.get(cod) : null;
+    if(cod && !info){ res.sinInfo.push({legajo, nombre:nom, codpla:cod}); return; }
+    const ex = existentes.get(legajo.toUpperCase()+"|"+dateKey);
+    if(ex && ex.origen!=="geo"){ res.oficiales++; return; }          // ya cargado desde Calipso: no se toca
+    const agrup = cod ? info.agrup : "P";
+    const desc = geoDescriptivos(ultimo.get(legajo.toUpperCase()), x2, plantelMap.get(legajo.toUpperCase()));
+    res.records.push({legajo, agrup, cat:agrup||"F", ...desc, idMotivo:cod||"", motivo:cod ? info.motivo : "", estado:cod ? info.estado : "P", razon,
+      presidencia:cod ? info.presidencia : "", valid:true, dia:d, mes, anio, ts, monthKey, dateKey, origen:"geo"});
+    if(cod && agrup!=="P") res.ausentes++; else res.presentes++;
+  });
+  return res;
+}
+// lee de geo_docs los empleados y novedades de un día
+async function geoLeerDia(dia){
+  const pull = async parent => {
+    let out = [], from = 0;
+    while(true){
+      const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id,data").eq("parent", parent).order("doc_id").range(from, from+999);
+      if(error) throw error;
+      out = out.concat(data||[]);
+      if(!data || data.length<1000) break;
+      from += 1000;
+    }
+    return out;
+  };
+  const [emps, nov] = await Promise.all([pull("days/"+dia+"/emps"), pull("days/"+dia+"/nov")]);
+  const rows = [];
+  emps.forEach(dc=>((dc.data && dc.data.rows) || []).forEach(x=>rows.push(x)));
+  const novMap = {};
+  nov.forEach(dc=>Object.entries(dc.data||{}).forEach(([dni,v])=>{ if(dni.charAt(0)==="_" || typeof v!=="string") return; try{ novMap[dni] = JSON.parse(v); }catch(e){} }));
+  return {rows, novMap};
+}
+async function geoListarDias(){
+  const {data, error} = await supabaseClient.from(GEO_DOCS_TABLE).select("doc_id").eq("parent", "days").order("doc_id", {ascending:false}).range(0, 199);
+  if(error) throw error;
+  return (data||[]).map(r=>r.doc_id);
+}
+async function geoPermisosActuales(){
+  try{ const d = await slFetchAll("geo_permisos", "orden"); return d.length ? d : GEO_PERMISOS_DEF; }catch(e){ return GEO_PERMISOS_DEF; }
+}
+
+const GEO_RETENCION_DIAS = 90;   // los días de Geo más viejos se borran solos (los de Calipso quedan para siempre en el ausentismo)
+function GeoFrame({view, parsed, plantel, puedeCargar, onAplicar, limpiar}){
+  const ref = useRef(null);
+  useEffect(()=>{ if(limpiar) supabaseClient.rpc("geo_limpiar", {p_dias:GEO_RETENCION_DIAS}).then(()=>{}, ()=>{}); }, []);
+  useEffect(()=>{
+    const f = t=>{ try{ if(ref.current && ref.current.contentWindow) ref.current.contentWindow.postMessage({type:"radar-theme", theme:t}, location.origin); }catch(e){} };
+    themeListeners.add(f);
+    return ()=>{ themeListeners.delete(f); };
+  }, []);
+  return (
+    <div className="tabpanel" style={{gap:10}}>
+      {!view && puedeCargar && onAplicar && <GeoCronicosBar parsed={parsed} plantel={plantel} onAplicar={onAplicar} />}
+      <iframe ref={ref} title={view==="pres" ? "Cuadro de Presentismo diario" : "Carga de Novedades GeoVictoria"}
+        src={"carga-geo.html"+(view ? "?v="+view : "")} allow="clipboard-write"
+        style={{width:"100%", height:"calc(100vh - 210px)", minHeight:560, border:"1px solid var(--border)", borderRadius:12, background:"var(--surface)"}} />
+    </div>
+  );
+}
+
+// Barra «Paso a Crónicos»: muestra qué se pasaría del día elegido de Geo al ausentismo del Radar, y lo pasa (a mano o solo cada vez que cambia Geo)
+function GeoCronicosBar({parsed, plantel, onAplicar}){
+  const [dias, setDias] = useState([]);
+  const [dia, setDia] = useKeptState("geo.dia", "");
+  const [auto, setAuto] = useState(()=>{ try{ return localStorage.getItem("geo.auto")==="1"; }catch(e){ return false; } });
+  const [prev, setPrev] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ref = useRef({}); ref.current = {parsed, plantel, onAplicar, auto, dia};
+  const cola = useRef(Promise.resolve());
+  const diaEfectivo = dia && dias.includes(dia) ? dia : (dias[0]||"");
+  async function calcular(d, aplicar){
+    const P = ref.current.parsed;
+    if(!P) throw new Error("Primero cargá en el Radar el archivo de Calipso (hace falta para conocer los motivos y los datos de cada legajo).");
+    const [dd, permisos] = await Promise.all([geoLeerDia(d), geoPermisosActuales()]);
+    const records = P.records;
+    const plantelMap = new Map((ref.current.plantel||[]).map(x=>[String(x.legajo||"").toUpperCase(), x]));
+    const existentes = new Map();
+    records.forEach(r=>{ if(r.valid && r.dateKey===d) existentes.set((r.legajo||"").toUpperCase()+"|"+r.dateKey, r); });
+    const res = geoArmarFilas({dia:d, rows:dd.rows, novMap:dd.novMap, permIdx:geoIndicePermisos(permisos), motInfo:geoInfoMotivos(records),
+      ultimo:geoUltimoPorLegajo(records), plantelMap, existentes});
+    const m = mergeAusentismoRecords(records, res.records);
+    res.nuevos = m.nuevos; res.modificados = m.modificados; res.sinCambios = m.sinCambios;
+    if(aplicar && res.records.length && (m.nuevos+m.modificados)>0){ const r = await ref.current.onAplicar(res.records, "Geo "+d); res.aplicado = r; }
+    return res;
+  }
+  async function verDias(){ try{ const l = await geoListarDias(); setDias(l); }catch(e){ setMsg("No se pudieron leer los días de Geo ("+((e && e.message)||e)+"). ¿Corriste supabase-migracion-geo.sql?"); } }
+  useEffect(()=>{ verDias(); }, []);
+  // cada vez que la Carga Geo guarda algo, avisa; con el paso automático activado, se actualiza Crónicos
+  useEffect(()=>{
+    const h = ev=>{
+      if(ev.origin!==location.origin || !ev.data || ev.data.type!=="geo-changed") return;
+      verDias();
+      if(!ref.current.auto) return;
+      const lista = (ev.data.days||[]).slice(-3);
+      cola.current = cola.current.then(async ()=>{
+        for(const d of lista){
+          try{
+            const r = await calcular(d, true);
+            const n = (r.aplicado ? r.aplicado.nuevos+r.aplicado.modificados : 0);
+            setMsg("Crónicos actualizado con Geo "+dateKeyToLabel(d)+" ("+new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})+"): "+n+" fila"+(n===1?"":"s")+" nueva"+(n===1?"":"s")+" o modificada"+(n===1?"":"s")+". Faltan informar: "+r.pendientes.length+".");
+          }catch(e){ setMsg("No se pudo pasar a Crónicos: "+((e && e.message)||e)); }
+        }
+      });
+    };
+    window.addEventListener("message", h);
+    return ()=>window.removeEventListener("message", h);
+  }, []);
+  function cambiarAuto(v){
+    if(v && !window.confirm("Con esto, cada vez que se guarde algo en la Carga Geo, el Radar va a escribir en la base REAL filas provisorias de ese día (que después reemplaza Calipso). ¿Activarlo?")) return;
+    setAuto(v); try{ localStorage.setItem("geo.auto", v ? "1" : "0"); }catch(e){}
+  }
+  async function ver(){ if(!diaEfectivo) return; setBusy(true); setMsg(""); try{ setPrev(await calcular(diaEfectivo, false)); }catch(e){ setPrev(null); setMsg((e && e.message)||String(e)); } setBusy(false); }
+  async function pasar(){
+    if(!diaEfectivo) return;
+    if(!window.confirm("Pasar a Crónicos (base real) lo de Geo del "+dateKeyToLabel(diaEfectivo)+"? Son filas provisorias: la carga de Calipso las reemplaza. No se toca ninguna fila que ya venga de Calipso.")) return;
+    setBusy(true); setMsg("");
+    try{
+      const r = await calcular(diaEfectivo, true); setPrev(r);
+      setMsg(r.aplicado ? "Listo: "+r.aplicado.nuevos+" fila(s) nueva(s) y "+r.aplicado.modificados+" modificada(s). Crónicos ya las muestra." : "No había nada para cambiar: lo de Geo ya está en el Radar.");
+    }catch(e){ setMsg("No se pudo pasar a Crónicos: "+((e && e.message)||String(e))); }
+    setBusy(false);
+  }
+  const lista = (arr, f) => arr.slice(0, 40).map((x,i)=>(<li key={i}>{f(x)}</li>)).concat(arr.length>40 ? [<li key="m" className="hint">… y {arr.length-40} más</li>] : []);
+  return (
+    <CollapsibleCard id="geo-cronicos" title="Paso a Crónicos (filas provisorias desde Geo)"
+      summary={auto ? "Automático: ACTIVADO" : "Automático: apagado"} defaultOpen={false}>
+      <p className="desc" style={{marginTop:0}}>
+        Con lo que se va resolviendo en esta carga (fichadas, permisos y novedades), el Radar arma por empleado y día una fila <b>provisoria</b> con el mismo formato que Calipso,
+        para que Crónicos y el resto se actualicen sin esperar el archivo de Calipso. Los <b>no informados</b> sin novedad todavía no se pasan (no se sabe qué son).
+        Cuando cargues Calipso, sus filas reemplazan a las de Geo. Nunca se pisa una fila que ya viene de Calipso.
+      </p>
+      <div style={{display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap"}}>
+        <div className="field"><label>Día de Geo</label>
+          <select value={diaEfectivo} onChange={e=>{ setDia(e.target.value); setPrev(null); }} disabled={!dias.length}>
+            {!dias.length && <option value="">Sin días cargados</option>}
+            {dias.map(d=>(<option key={d} value={d}>{dateKeyToLabel(d)}</option>))}
+          </select>
+        </div>
+        <button type="button" className="btn secondary small" onClick={ver} disabled={busy || !diaEfectivo}>Ver qué se pasaría</button>
+        <button type="button" className="btn small" onClick={pasar} disabled={busy || !diaEfectivo}>Pasar a Crónicos ahora</button>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", fontSize:13}} title="Escribe en la base real cada vez que cambie algo en la Carga Geo">
+          <input type="checkbox" checked={auto} onChange={e=>cambiarAuto(e.target.checked)} /> Pasar automáticamente a Crónicos cada vez que cambie Geo
+        </label>
+        {busy && <span className="hint">Procesando…</span>}
+      </div>
+      {msg && <p className="hint" style={{marginTop:8}}>{msg}</p>}
+      {prev && (
+        <div style={{marginTop:10}}>
+          <p style={{margin:"0 0 6px"}}>
+            <b>{dateKeyToLabel(prev.dia)}</b>: {prev.total} empleados en Geo · {prev.presentes} presentes y {prev.ausentes} ausentes se pasarían ·
+            {" "}<b>{prev.nuevos}</b> filas nuevas, <b>{prev.modificados}</b> modificadas, {prev.sinCambios} sin cambios ·
+            {" "}{prev.oficiales} ya vienen de Calipso (no se tocan) · {prev.descanso} en descanso (no se pasan)
+          </p>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))", gap:10}}>
+            <details open={prev.pendientes.length>0}><summary><b style={{color:prev.pendientes.length ? "var(--warning)" : "var(--good)"}}>{prev.pendientes.length}</b> no informados sin novedad (no se pasan)</summary><ul>{lista(prev.pendientes, x=>x.legajo+" "+x.nombre+" · "+x.grupo)}</ul></details>
+            <details open={prev.sinEquivalente.length>0}><summary><b style={{color:prev.sinEquivalente.length ? "var(--critical)" : "var(--good)"}}>{prev.sinEquivalente.length}</b> con permiso de Geo sin CODPLA (completalo en «Permisos Geo»)</summary><ul>{lista(prev.sinEquivalente, x=>x.legajo+" "+x.nombre+" · "+x.permiso)}</ul></details>
+            <details open={prev.sinInfo.length>0}><summary><b style={{color:prev.sinInfo.length ? "var(--critical)" : "var(--good)"}}>{prev.sinInfo.length}</b> con un CODPLA que nunca vino de Calipso (no se sabe su agrupador)</summary><ul>{lista(prev.sinInfo, x=>x.legajo+" "+x.nombre+" · "+x.codpla)}</ul></details>
+            <details open={prev.sinLegajo.length>0}><summary><b style={{color:prev.sinLegajo.length ? "var(--warning)" : "var(--good)"}}>{prev.sinLegajo.length}</b> sin legajo (no están en el padrón de la Carga Geo)</summary><ul>{lista(prev.sinLegajo, x=>x.dni+" "+x.nombre)}</ul></details>
+          </div>
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
+
+/* ---- Historial de sanciones (Excel SANCION del sistema) y carga de mails ---- */
+function SlHistorial({hist, setHist, esAdmin, mails, setMails, say, motivosEstado, setMotivos, setMotivosEstado}){
+  const [prog, setProg] = useState("");
+  const [resumen, setResumen] = useState(null);
+  const inp = useRef(null);
+  const corte = slAddDays(localISO(Date.now()), -SL_HIST_DIAS);
+  const fechas = hist.map(h=>h.fecha_creado).filter(Boolean).sort();
+  async function onFile(e){
+    const file = e.target.files && e.target.files[0]; e.target.value = ""; if(!file) return;
+    setResumen(null); setProg("Leyendo "+file.name+"…");
+    try{
+      const hojas = await slLeerHojas(file);
+      let sanRows = null, mailRows = null, motRows = null;
+      hojas.forEach(aoa=>{
+        if(!sanRows){ const t = slTabla(aoa, H=>H.has("idsancion") || (H.has("aplicada") && (H.has("diasdesuspencion") || H.has("diasdesuspension")))); if(t) sanRows = t; }
+        if(!mailRows){ const t = slTabla(aoa, H=>H.has("gerencia") && (H.has("mails") || H.has("mail")) && !H.has("legajo")); if(t) mailRows = t; }
+        if(!motRows){ const t = slTabla(aoa, H=>H.has("nombre") && H.has("codigo") && H.has("cuadro") && !H.has("legajo")); if(t) motRows = t; }
+      });
+      if(!sanRows && !mailRows && !motRows){ setProg(""); say("No encontré una hoja de sanciones (columna «Id Sancion»), de mails (Gerencia | Mails | CC) ni la tabla de motivos (TABLAS) en "+file.name+"."); return; }
+      const out = {};
+      if(sanRows){
+        const actual = new Map(hist.map(h=>[h.id_sancion, h]));
+        const campos = ["legajo","empleado","nombre","sancion","motivo","fecha_creado","dias","fecha_sancion","nivel","sector","fecha_firma","aplicada"];
+        let viejas = 0, nuevas = 0, cambiadas = 0, iguales = 0, desdeEmpleado = 0, sinLegajo = 0; const subir = [];
+        sanRows.forEach(r=>{
+          // sin columna Legajo (o vacía): el legajo son los números del principio de «Empleado» ("9284 GIMENEZ. CRISTIAN", "009284-GIMENEZ", "9284GIMENEZ")
+          // y el nombre, lo que sigue; si hay columnas Legajo / Nombre con dato, mandan esas
+          const emp = slTxt(slG(r,"empleado"));
+          const me = emp.match(/^\s*0*(\d+)\s*[-–—.,:;|]?\s*(.*)$/);
+          const legCol = slLeg(slG(r,"legajo"));
+          const legajo = /^\d+$/.test(legCol) ? legCol : (me ? String(parseInt(me[1],10)) : legCol);
+          if(!/^\d+$/.test(legCol) && me) desdeEmpleado++;
+          const o = {legajo, empleado:emp, nombre:slTxt(slG(r,"nombre")) || (me ? me[2].trim() : ""), sancion:slTxt(slG(r,"sancion")), motivo:slTxt(slG(r,"motivo")),
+            fecha_creado:slIso(slG(r,"fechacreado")), dias:Number(String(slG(r,"diasdesuspencion","diasdesuspension")).replace(",","."))||0, fecha_sancion:slIso(slG(r,"fechasancion")),
+            nivel:slTxt(slG(r,"niveldegravedad")), sector:slTxt(slG(r,"sector")), fecha_firma:slIso(slG(r,"fechafirma")), aplicada:slTxt(slG(r,"aplicada"))};
+          if(!o.legajo){ sinLegajo++; return; }
+          o.id_sancion = slTxt(slG(r,"idsancion")) || (o.legajo+"|"+(o.fecha_creado||"")+"|"+slNorm(o.sancion));
+          if(o.fecha_creado && o.fecha_creado<corte){ viejas++; return; }
+          const prev = actual.get(o.id_sancion);
+          if(!prev) nuevas++;
+          else if(campos.some(k=>String(prev[k]==null?"":prev[k])!==String(o[k]==null?"":o[k]))) cambiadas++;
+          else { iguales++; return; }
+          subir.push({...o, updated_at:new Date().toISOString()});
+        });
+        if(subir.length){ setProg("Guardando "+subir.length+" sanciones…"); await upsertInBatches(SL_T.hist, subir, "id_sancion", (d,t)=>setProg("Guardando sanciones… "+d+"/"+t)); }
+        const {error:eDel} = await supabaseClient.from(SL_T.hist).delete().lt("fecha_creado", corte); if(eDel) throw eDel;
+        const todas = await slFetchAll(SL_T.hist, "id_sancion"); setHist(todas);
+        Object.assign(out, {leidas:sanRows.length, nuevas, cambiadas, iguales, viejas, total:todas.length, desdeEmpleado, sinLegajo});
+      }
+      if(mailRows){
+        const filas = mailRows.map(r=>({gerencia:slTxt(slG(r,"gerencia")), mails:slTxt(slG(r,"mails","mail","emails")), cc:slTxt(slG(r,"cc")), updated_at:new Date().toISOString()})).filter(r=>r.gerencia);
+        if(filas.length){ const {error} = await supabaseClient.from(SL_T.mails).upsert(filas); if(error) throw error; setMails(await slFetchAll(SL_T.mails, "gerencia")); }
+        out.mails = filas.length;
+      }
+      // tabla de motivos (hoja TABLAS): reemplaza la tabla completa
+      if(motRows && motivosEstado!=="sintabla"){
+        const now = new Date().toISOString();
+        const filas = motRows.map(r=>({nombre:slTxt(slG(r,"nombre")), codigo:slTxt(slG(r,"codigo")).toUpperCase(), concepto:slTxt(slG(r,"concepto")), dia_pago:slTxt(slG(r,"diapago")), cuadro:slTxt(slG(r,"cuadro"))}))
+          .filter(m=>m.nombre || m.codigo).map((m,i)=>({...m, nombre:m.nombre.replace("Inundaci¾"+"n","Inundación"), id:"T"+String(i+1).padStart(3,"0"), orden:i+1, updated_at:now}));
+        if(filas.length){
+          const {error:eD} = await supabaseClient.from(SL_T.motivos).delete().neq("id", ""); if(eD) throw eD;
+          const {error:eI} = await supabaseClient.from(SL_T.motivos).insert(filas); if(eI) throw eI;
+          setMotivos(filas); setMotivosEstado("base");
+        }
+        out.motivos = filas.length;
+      }
+      if(motRows && motivosEstado==="sintabla") out.motivosSinTabla = true;
+      setResumen(out); setProg("");
+      say("Carga terminada");
+    }catch(err){ setProg(""); say("No se pudo cargar: "+((err&&err.message)||err)); }
+  }
+  return (
+    <CollapsibleCard id="sl-historial" title="Historial de sanciones (para la sugerencia y el tope de 30 días)"
+      summary={hist.length ? hist.length+" sanciones guardadas"+(fechas.length ? " · del "+isoToDMY(fechas[0])+" al "+isoToDMY(fechas[fechas.length-1]) : "") : "todavía sin cargar"}>
+      <div className="caption" style={{marginTop:0}}>
+        Es el Excel SANCION del sistema (columnas Id Sancion, Empleado, Sancion, Motivo, Fecha creado, Dias de Suspencion, Aplicada, Legajo…). Se guardan solo los últimos 2 años (desde el {isoToDMY(corte)}); lo anterior se descarta.
+        Al subir una actualización, se agregan las nuevas y se reemplazan las que cambiaron (por Id Sancion). El mismo archivo puede traer una hoja de mails por gerencia (Gerencia | Mails | CC).
+        Para el escalamiento cuenta la última sanción con Aplicada = Si y Motivo que empiece con «Ausencia»; para el tope suman los días de suspensión con Aplicada = Si de los últimos 12 meses.
+      </div>
+      {esAdmin ? (
+        <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+          <button type="button" className="btn small" onClick={()=>inp.current && inp.current.click()} disabled={!!prog}>{prog ? "Cargando…" : "Subir historial / actualización"}</button>
+          <input ref={inp} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onFile} />
+          <span className="hint">{prog}</span>
+        </div>
+      ) : <div className="hint">El historial lo actualiza el Administrador.</div>}
+      {resumen && (
+        <div className="hint" style={{color:"var(--ink)"}}>
+          {resumen.leidas!=null && <div>Sanciones leídas: <b>{fmt(resumen.leidas)}</b> · nuevas <b>{fmt(resumen.nuevas)}</b> · reemplazadas por cambios <b>{fmt(resumen.cambiadas)}</b> · sin cambios {fmt(resumen.iguales)} · descartadas por tener más de 2 años {fmt(resumen.viejas)} · total guardado <b>{fmt(resumen.total)}</b></div>}
+          {resumen.desdeEmpleado>0 && <div>Legajo tomado de los números del principio de «Empleado» en <b>{fmt(resumen.desdeEmpleado)}</b> sanciones (el archivo no trae la columna Legajo o venía vacía).</div>}
+          {resumen.sinLegajo>0 && <div style={{color:"var(--critical)"}}><b>{fmt(resumen.sinLegajo)}</b> filas no se cargaron porque no tienen legajo (ni columna Legajo ni número al principio de «Empleado»).</div>}
+          {resumen.mails!=null && <div>Mails por gerencia cargados: <b>{resumen.mails}</b></div>}
+          {resumen.motivos!=null && <div>Tabla de motivos reemplazada: <b>{resumen.motivos}</b> motivos (ver «Tipos de ausencia que se sancionan»)</div>}
+          {resumen.motivosSinTabla && <div style={{color:"var(--critical)"}}>El archivo trae la hoja TABLAS, pero no se cargó: falta correr supabase-migracion-sanciones-lote-motivos.sql.</div>}
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+}
+
+function SimuladorTab({rankingUnits, objetivo}){
+  const [unit, setUnit] = useState(rankingUnits[0] ? rankingUnits[0].name : "");
+  const [dotacion, setDotacion] = useState(0);
+  const [dias, setDias] = useState(0);
+  const [ausencias, setAusencias] = useState(0);
+
+  useEffect(()=>{
+    if(!rankingUnits.length) return;
+    if(!rankingUnits.find(u=>u.name===unit)) setUnit(rankingUnits[0].name);
+  }, [rankingUnits]);
+
+  const loadDefaults = useCallback(()=>{
+    const u = rankingUnits.find(x=>x.name===unit);
+    if(!u) return;
+    setDotacion(u.dotacion);
+    setDias(u.dotacion>0 ? Math.round(u.base/u.dotacion) : 0);
+    setAusencias(u.ausencias);
+  }, [rankingUnits, unit]);
+
+  useEffect(()=>{ loadDefaults(); }, [unit, rankingUnits]);
+
+  const base = dotacion*dias;
+  const pct = base>0 ? ausencias/base*100 : 0;
+  const sem = semaforo(pct, objetivo);
+  const semColor = sem.level==="good"?"var(--good)":sem.level==="warn"?"var(--warning)":"var(--critical)";
+  const perDay = base>0 ? (1/base*100) : 0;
+  const diasParaObjetivo = base>0 ? Math.floor(base*objetivo/100) : 0;
+
+  if(!rankingUnits.length) return <div className="tabpanel"><div className="card chart-card"><p className="desc">Sin datos para simular con estos filtros.</p></div></div>;
+
+  return (
+    <div className="tabpanel">
+      <div className="card chart-card">
+        <h3>Simulador de impacto</h3>
+        <p className="desc">Ajustá dotación, días o ausencias de una unidad y mirá cómo se mueve el % respecto del objetivo.</p>
+        <div className="sim-grid">
+          <div>
+            <div className="sim-field">
+              <label>Unidad de negocio</label>
+              <select value={unit} onChange={e=>setUnit(e.target.value)}>
+                {rankingUnits.map(u=>(<option key={u.name} value={u.name}>{u.name}</option>))}
+              </select>
+            </div>
+            <div className="sim-field">
+              <label>Dotación</label>
+              <input type="number" min="0" value={dotacion} onChange={e=>setDotacion(+e.target.value||0)} />
+            </div>
+            <div className="sim-field">
+              <label>Días del período</label>
+              <input type="number" min="0" value={dias} onChange={e=>setDias(+e.target.value||0)} />
+            </div>
+            <div className="sim-field">
+              <label>Filas de ausencia contabilizadas</label>
+              <input type="number" min="0" value={ausencias} onChange={e=>setAusencias(+e.target.value||0)} />
+            </div>
+            <button className="btn secondary small" onClick={loadDefaults}>Volver a los datos reales</button>
+          </div>
+          <div className="sim-result">
+            <div className="card kpi-tile" style={{display:"inline-flex", flexDirection:"row", alignItems:"center", gap:14, width:"fit-content"}}>
+              <div>
+                <div className="kpi-label">Ausentismo simulado</div>
+                <div className="sim-big" style={{color:semColor}}>{fmtPct(pct,2)}</div>
+              </div>
+              <SemChip pct={pct} objetivo={objetivo} />
+            </div>
+            <div className="sim-note">
+              Con una dotación de <b>{fmt(dotacion)}</b> y <b>{fmt(dias)}</b> días, cada fila de ausencia adicional mueve el ausentismo <b>{fmtPct(perDay,3)}</b> puntos.<br/>
+              Para quedar exactamente en el objetivo, esta unidad podría acumular hasta <b>{fmt(diasParaObjetivo)}</b> filas de ausencia en el período (tiene {fmt(ausencias)}).
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== app ===================== */
+function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
+  const perms = ROLES[rol] || ROLES.gerencias;
+  // lo que la Carga Geo (iframe, mismo sitio) toma del Radar: la conexión a Supabase y quién es el usuario
+  window.__RADAR = {supabase: supabaseClient, userId, email: userEmail, rol, theme: effectiveTheme()};
+  // Visor: solo se trabaja con las filas de su(s) Unidad(es) de Negocio (el servidor ya no le manda las demás; acá se vuelve a filtrar por seguridad)
+  // y su caché local es aparte (por usuario y por unidades), para que nunca mezcle datos de otros perfiles del mismo navegador.
+  const unidadesSet = perms.visor ? new Set((unidades||[]).map(unidadBase).filter(Boolean)) : null;
+  const enAlcance = row => !unidadesSet || unidadesSet.has(unidadBase(row.unidad));
+  const cachePrefix = unidadesSet ? "v:"+userId+":"+Array.from(unidadesSet).sort().join("|")+":" : "";
+  const visorSinUnidad = !!unidadesSet && unidadesSet.size===0;
+  const verResumen = perms.tabs.includes("resumen"); // las tarjetas de ausentismo de arriba pertenecen al Resumen
+  const [fileName, setFileName] = useState(null);
+  const [error, setError] = useState(null);
+  const [parsedRaw, setParsed] = useState(null);
+  const parsedRef = useRef(null);
+  parsedRef.current = parsedRaw;
+  const [sel, setSel] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const [activeTab, setActiveTab] = useState(perms.tabs[0]);
+  const shownTab = perms.tabs.includes(activeTab) ? activeTab : perms.tabs[0]; // nunca se muestra un menú que el perfil no tiene
+  // sanción / intervención por día de ausencia (para los informes de detalle): solo quien ve sanciones; se relee al cambiar de menú
+  const [sancIdx, setSancIdx] = useState(null);
+  useEffect(()=>{
+    if(!perms.sancionar) return;
+    let vivo = true;
+    cargarSancionesIdx().then(m=>{ if(vivo) setSancIdx(m); }).catch(()=>{});
+    return ()=>{ vivo = false; };
+  }, [shownTab]);
+  const [objetivo, setObjetivo] = useState(3);
+  const [FILTERS, setFiltersState] = useState({mes:null, departamento:null, gerencia:null, sector:null});
+  const [empresaIncluded, setEmpresaIncluded] = useState(null);
+  const [excludedMotivos, setExcludedMotivos] = useState(new Set());
+  const [rankingIdIncluded, setRankingIdIncluded] = useState(new Set());
+  const [rankingPresIncluded, setRankingPresIncluded] = useState(new Set());
+  const [plantel, setPlantel] = useState([]);
+  const [plantelHistorial, setPlantelHistorial] = useState([]);
+  const [plantelUpdatedAt, setPlantelUpdatedAt] = useState(null);
+  const plantelActive = plantel.length>0;
+  // datos de ausentismo con el nombre de empresa unificado según el plantel (ver withCanonEmpresa)
+  const parsed = useMemo(()=> withCanonEmpresa(parsedRaw, plantel), [parsedRaw, plantel]);
+  // Unidades de Negocio existentes (para que el Administrador asigne las de cada Visor)
+  const unidadesDisponibles = useMemo(()=>{
+    if(!perms.esAdmin) return [];
+    const s = new Set();
+    if(parsedRaw) parsedRaw.records.forEach(r=>{ const u = unidadBase(r.unidad); if(u) s.add(u); });
+    plantel.forEach(pl=>{ const u = unidadBase(pl.unidad); if(u) s.add(u); });   // sin el "(o)" del plantel: es la misma unidad
+    return Array.from(s).sort((a,b)=>a.localeCompare(b, "es"));
+  }, [parsedRaw, plantel]);
+  const [cuatriSel, setCuatriSel] = useState("");
+  const [ausUpdatePreview, setAusUpdatePreview] = useState(null);
+  const [cloudLoading, setCloudLoading] = useState(true);
+  const [cloudError, setCloudError] = useState(null);
+  // estado de la descarga desde el servidor: "pending" (bajando), "ok" (terminó) o "error" (falló; se reintenta sola)
+  const [serverState, setServerState] = useState("pending");
+  const [dlRows, setDlRows] = useState(0);        // registros de ausentismo descargados hasta ahora (primer ingreso)
+  const [retryInfo, setRetryInfo] = useState(0);  // cantidad de reintentos automáticos hechos
+  const loadRef = useRef(null);
+  const [uploadNotice, setUploadNotice] = useState(null); // aviso no bloqueante de la última carga (ej. columna opcional faltante)
+  const [syncStatus, setSyncStatus] = useState(null); // {label, done, total} | null
+
+  // espacio usado de la base de datos: se consulta al abrir y cada vez que termina una carga
+  const [dbUsage, setDbUsage] = useState(null);
+  const [dbUsageError, setDbUsageError] = useState(null);
+  const [dbChecking, setDbChecking] = useState(false);
+  const checkDb = useCallback(async ()=>{
+    setDbChecking(true);
+    try{
+      const {data, error} = await supabaseClient.rpc("estado_base");
+      if(error) throw error;
+      setDbUsage(data); setDbUsageError(null);
+    }catch(err){
+      setDbUsageError("No se pudo consultar el estado de la base" + (err && err.message ? " ("+err.message+")" : "") + ". ¿Ya corriste supabase-estado-base.sql en el SQL Editor de Supabase?");
+    }
+    setDbChecking(false);
+  }, []);
+  const syncActive = !!syncStatus;
+  useEffect(()=>{ if(!syncActive && perms.plantelCompleto) checkDb(); }, [syncActive]); // el estado de la base lo ve solo el Administrador
+  const dbRowsPerMonth = useMemo(()=> rowsPerMonthOf(parsed), [parsed]);
+
+  // la barra de pestañas queda fija arriba al bajar; su alto se guarda en --tabs-h para que la barra de scroll horizontal de las tablas se fije justo debajo
+  const tabsRef = useRef(null);
+  useEffect(()=>{
+    const el = tabsRef.current;
+    if(!el || typeof ResizeObserver==="undefined") return;
+    const setH = ()=> document.documentElement.style.setProperty("--tabs-h", el.offsetHeight+"px");
+    setH();
+    const ro = new ResizeObserver(setH);
+    ro.observe(el);
+    return ()=>{ ro.disconnect(); document.documentElement.style.removeProperty("--tabs-h"); };
+  }, [!!parsed]);
+  const dbPct = dbUsagePct(dbUsage);
+
+  // Servicio médico: la empresa queda fija en "Propios" (el filtro no se muestra) y Crónicos / Detalle trabajan solo con esos legajos
+  const propiosName = parsed ? (parsed.empresas.find(n=>normTxt(n)==="propios") || null) : null;
+  useEffect(()=>{
+    if(!perms.soloPropios || !propiosName) return;
+    setEmpresaIncluded(prev=> (prev && prev.size===1 && prev.has(propiosName)) ? prev : new Set([propiosName]));
+  }, [propiosName]);
+  const parsedVista = useMemo(()=>{
+    if(!perms.soloPropios || !parsed || !empresaIncluded) return parsed;
+    return {...parsed, records: parsed.records.filter(r=>!r.empresa || empresaIncluded.has(r.empresa))};
+  }, [parsed, empresaIncluded]);
+
+  // si cambia la escritura de una empresa (p. ej. al cargar el plantel), el filtro de Empresa ya elegido se adapta a los nombres vigentes
+  const empresasSig = parsed ? parsed.empresas.join("|") : "";
+  useEffect(()=>{
+    if(!empresaIncluded || !parsed) return;
+    const vigentes = new Map(parsed.empresas.map(n=>[normTxt(n), n]));
+    let cambio = false;
+    const next = new Set();
+    empresaIncluded.forEach(n=>{
+      const v = vigentes.get(normTxt(n));
+      if(v!==n) cambio = true;
+      if(v) next.add(v);
+    });
+    if(cambio) setEmpresaIncluded(next.size===parsed.empresas.length ? null : next);
+  }, [empresasSig]);
+
+  const setFilterDim = (dim, val) => setFiltersState(prev => ({...prev, [dim]: val}));
+
+  function applyParsedRecords(records, fileNameLabel, hasMotivo){
+    const next = buildParsedAggregates(records, fileNameLabel, hasMotivo);
+    const motivoDefaultExcluded = new Set(next.motivoUniverse.filter(m=>isDefaultExcludedMotivoKey(m.key)).map(m=>m.key));
+    const rankingIdDefault = new Set(next.idMotivoUniverse.filter(m=>isDefaultIncludedMotivoCode(m.key)).map(m=>m.key));
+    const rankingPresDefault = new Set(next.presidenciaUniverse.filter(v=>RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)));
+    let defaultYear=null, defaultMonth=null;
+    if(next.monthKeys.length){
+      const lastKey = next.monthKeys[next.monthKeys.length-1];
+      const [y,m] = lastKey.split("-");
+      defaultYear = parseInt(y,10); defaultMonth = parseInt(m,10);
+    }
+    setParsed(next);
+    setSel(defaultYear && defaultMonth ? {year:defaultYear, month:defaultMonth} : null);
+    setFileName(next.fileName);
+    setExcludedMotivos(motivoDefaultExcluded);
+    setRankingIdIncluded(rankingIdDefault);
+    setRankingPresIncluded(rankingPresDefault);
+  }
+
+  useEffect(()=>{
+    let cancelled = false;
+    let retryTimer = null;
+    // Si la descarga falla (por ejemplo una conexión de celular que se corta), se reintenta sola unas veces; nunca se le pide a la
+    // persona que suba el archivo (eso lo tiene solo el administrador).
+    async function run(attempt){
+      setCloudLoading(true);
+      setCloudError(null);
+      setServerState("pending");
+      setDlRows(0);
+      try{
+        // 1) primero, lo que ya quedó guardado en este navegador de la vez pasada — se ve al instante, sin red.
+        const [cachedAusRows, cachedAusSync, cachedPlantelRows, cachedPlantelSync] = await Promise.all([
+          idbGet(cachePrefix+"ausentismo_rows"), idbGet(cachePrefix+"ausentismo_lastSync"), idbGet(cachePrefix+"plantel_rows"), idbGet(cachePrefix+"plantel_lastSync")
+        ]);
+        if(cancelled) return;
+        let ausRows = cachedAusRows || [];
+        let plantelRows = cachedPlantelRows || [];
+        let prevAggregate = null;
+        plantelRows = plantelRows.filter(enAlcance);
+        ausRows = ausRows.filter(enAlcance);
+        if(plantelRows.length){
+          setPlantel(plantelRows.map(plantelRowToRecord));
+          setPlantelUpdatedAt(new Date());
+        }
+        if(ausRows.length){
+          const records = ausRows.map(ausRowToRecord);
+          const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
+          prevAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
+          // en un reintento con datos ya en pantalla no se vuelven a aplicar (no se pierden los filtros que la persona ya eligió)
+          if(!(attempt>0 && parsedRef.current)) applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+        }
+        setCloudLoading(false);
+
+        // 2) después, en segundo plano, solo lo nuevo/modificado desde la última vez (no vuelve a bajar todo).
+        const [newPlantelRows, newAusRows] = await Promise.all([
+          fetchRowsSince(PLANTEL_TABLE, cachedPlantelSync, null, "legajo"),
+          fetchRowsSince(AUSENTISMO_TABLE, cachedAusSync, n=>{ if(!cancelled) setDlRows(n); }, "id")
+        ]);
+        if(cancelled) return;
+
+        if(newPlantelRows.filter(enAlcance).length){
+          plantelRows = mergeRawRowsById(plantelRows, newPlantelRows.filter(enAlcance), "legajo");
+          setPlantel(plantelRows.map(plantelRowToRecord));
+          setPlantelUpdatedAt(new Date());
+          idbSet(cachePrefix+"plantel_rows", plantelRows);
+          idbSet(cachePrefix+"plantel_lastSync", maxUpdatedAt(newPlantelRows, cachedPlantelSync));
+        }
+        if(newAusRows.filter(enAlcance).length){
+          ausRows = mergeRawRowsById(ausRows, newAusRows.filter(enAlcance), "id");
+          const records = ausRows.map(ausRowToRecord);
+          const hasMotivo = records.some(r=>r.idMotivo || r.motivo);
+          const nextAggregate = buildParsedAggregates(records, "Datos guardados en el servidor", hasMotivo);
+          if(prevAggregate){
+            // ya había datos en caché: solo sumar lo nuevo, sin resetear filtros/selecciones que el usuario ya haya tocado
+            setExcludedMotivos(prev => {
+              const out = new Set(prev);
+              nextAggregate.motivoUniverse.forEach(m=>{ if(!prevAggregate.motivoUniverse.some(om=>om.key===m.key) && isDefaultExcludedMotivoKey(m.key)) out.add(m.key); });
+              return out;
+            });
+            setRankingIdIncluded(prev => {
+              const out = new Set(prev);
+              nextAggregate.idMotivoUniverse.forEach(m=>{ if(!prevAggregate.idMotivoUniverse.some(om=>om.key===m.key) && isDefaultIncludedMotivoCode(m.key)) out.add(m.key); });
+              return out;
+            });
+            setRankingPresIncluded(prev => {
+              const out = new Set(prev);
+              nextAggregate.presidenciaUniverse.forEach(v=>{ if(!prevAggregate.presidenciaUniverse.includes(v) && RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)) out.add(v); });
+              return out;
+            });
+            setParsed(nextAggregate);
+            setFileName(nextAggregate.fileName);
+          } else {
+            applyParsedRecords(records, "Datos guardados en el servidor", hasMotivo);
+          }
+          idbSet(cachePrefix+"ausentismo_rows", ausRows);
+          idbSet(cachePrefix+"ausentismo_lastSync", maxUpdatedAt(newAusRows, cachedAusSync));
+        }
+        if(!cancelled){ setServerState("ok"); setRetryInfo(0); }
+      }catch(err){
+        if(cancelled) return;
+        setServerState("error");
+        setCloudError("No se pudieron cargar los datos guardados en el servidor: " + (err && err.message ? err.message : String(err)));
+        const esperas = [4000, 10000, 20000, 40000];
+        if(attempt < esperas.length){ setRetryInfo(attempt+1); retryTimer = setTimeout(()=>run(attempt+1), esperas[attempt]); }
+      }
+      if(!cancelled) setCloudLoading(false);
+    }
+    loadRef.current = ()=>{ if(retryTimer) clearTimeout(retryTimer); run(0); };
+    run(0);
+    return ()=>{ cancelled = true; if(retryTimer) clearTimeout(retryTimer); };
+  }, []);
+
+  const handleFile = useCallback((file) => {
+    setLoading(true);
+    setError(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try{
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, {type:"array", cellDates:false});
+        const ws = wb.Sheets["Sheet1"] || wb.Sheets[wb.SheetNames[0]];
+        const rows2d = XLSX.utils.sheet_to_json(ws, {header:1, defval:"", raw:true});
+        const parsedRows = parseAusentismoRows(rows2d);
+        if(parsedRows.error){
+          setError(parsedRows.error);
+          setLoading(false);
+          setFileName(file.name);
+          setParsed(null);
+          return;
+        }
+        // si ya hay datos cargados, solo se sube lo nuevo o modificado (no las ~200.000 filas enteras):
+        // ahorra datos de subida y evita que todos los usuarios tengan que volver a bajar toda la base.
+        const prevRecords = parsedRef.current ? parsedRef.current.records : null;
+        const validRecords = parsedRows.records.filter(r=>r.valid);
+        const recordsToUpload = prevRecords ? mergeAusentismoRecords(prevRecords, validRecords).changedRows : validRecords;
+        applyParsedRecords(parsedRows.records, file.name, parsedRows.hasMotivoCol);
+        setUploadNotice(parsedRows.missingTipoContrat);
+        setActiveTab("resumen");
+        setObjetivo(3);
+        setFiltersState({mes:null, departamento:null, gerencia:null, sector:null});
+        setEmpresaIncluded(null);
+        setAusUpdatePreview(null);
+        setLoading(false);
+        const validRows = recordsToUpload.map(ausRecordToRow);
+        setCloudError(null);
+        setSyncStatus({label:"Guardando en el servidor", done:0, total:validRows.length});
+        upsertInBatches(AUSENTISMO_TABLE, validRows, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor", done, total}))
+          .then(()=> setSyncStatus(null))
+          .catch(err=>{ setSyncStatus(null); setCloudError("No se pudo guardar en el servidor: " + (err && err.message ? err.message : String(err))); });
+      }catch(err){
+        setError("No se pudo leer el archivo: " + (err && err.message ? err.message : String(err)));
+        setParsed(null);
+        setLoading(false);
+      }
+    };
+    reader.onerror = () => { setError("No se pudo leer el archivo."); setLoading(false); };
+    reader.readAsArrayBuffer(file);
+  }, []);
+
+  const handleUpdateFile = useCallback((file) => {
+    if(!parsed){ handleFile(file); return; }
+    setLoading(true);
+    setError(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try{
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, {type:"array", cellDates:false});
+        const ws = wb.Sheets["Sheet1"] || wb.Sheets[wb.SheetNames[0]];
+        const rows2d = XLSX.utils.sheet_to_json(ws, {header:1, defval:"", raw:true});
+        const parsedRows = parseAusentismoRows(rows2d);
+        if(parsedRows.error){
+          setError(parsedRows.error);
+          setLoading(false);
+          return;
+        }
+        const {merged, nuevos, modificados, sinCambios, nuevosInvalidos, changedRows} = mergeAusentismoRecords(parsed.records, parsedRows.records);
+        const hasMotivo = parsed.hasMotivo || parsedRows.hasMotivoCol;
+        setUploadNotice(parsedRows.missingTipoContrat);
+        const nextParsed = buildParsedAggregates(merged, file.name, hasMotivo);
+        setAusUpdatePreview({
+          fileName: file.name,
+          encontrados: parsedRows.records.length,
+          nuevos, modificados, sinCambios, nuevosInvalidos, changedRows,
+          nextParsed
+        });
+      }catch(err){
+        setError("No se pudo leer el archivo: " + (err && err.message ? err.message : String(err)));
+      }
+      setLoading(false);
+    };
+    reader.onerror = () => { setError("No se pudo leer el archivo."); setLoading(false); };
+    reader.readAsArrayBuffer(file);
+  }, [parsed, handleFile]);
+
+  // Pasar filas de Geo (provisorias) a la base del Radar: las suma/actualiza igual que "Actualizar datos" y las guarda en Supabase.
+  // Devuelve {nuevos, modificados, sinCambios}. Las filas oficiales (Calipso) las filtra antes `geoArmarFilas`: acá no se pisa nada.
+  async function aplicarMergeAus(records, nombre){
+    const prev = parsedRef.current;
+    if(!prev) throw new Error("Todavía no hay datos de ausentismo cargados en el Radar.");
+    const m = mergeAusentismoRecords(prev.records, records);
+    if(m.changedRows.length){
+      const next = buildParsedAggregates(m.merged, nombre || prev.fileName, prev.hasMotivo);
+      commitAusParsed(prev, next);
+      setCloudError(null);
+      const rows = m.changedRows.map(ausRecordToRow);
+      setSyncStatus({label:"Guardando en el servidor (Geo)", done:0, total:rows.length});
+      try{ await upsertInBatches(AUSENTISMO_TABLE, rows, "id", (done,total)=>setSyncStatus({label:"Guardando en el servidor (Geo)", done, total})); }
+      finally{ setSyncStatus(null); }
+    }
+    return {nuevos:m.nuevos, modificados:m.modificados, sinCambios:m.sinCambios};
+  }
+  // altas de motivos/agrupadores nuevos en los filtros y estado nuevo de los datos (lo comparten "Actualizar datos" y "Geo")
+  function commitAusParsed(prevParsed, next){
+    setExcludedMotivos(prevSet => {
+      const out = new Set(prevSet);
+      next.motivoUniverse.forEach(m=>{ if(!prevParsed.motivoUniverse.some(om=>om.key===m.key) && isDefaultExcludedMotivoKey(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingIdIncluded(prevSet => {
+      const out = new Set(prevSet);
+      next.idMotivoUniverse.forEach(m=>{ if(!prevParsed.idMotivoUniverse.some(om=>om.key===m.key) && isDefaultIncludedMotivoCode(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingPresIncluded(prevSet => {
+      const out = new Set(prevSet);
+      next.presidenciaUniverse.forEach(v=>{ if(!prevParsed.presidenciaUniverse.includes(v) && RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)) out.add(v); });
+      return out;
+    });
+    parsedRef.current = next;   // ya (sin esperar al próximo dibujo): si se aplican dos días seguidos, el segundo parte de lo del primero
+    setParsed(next);
+    setFileName(next.fileName);
+  }
+  function confirmAusUpdate(){
+    if(!ausUpdatePreview || !parsed) return;
+    const next = ausUpdatePreview.nextParsed;
+    setExcludedMotivos(prev => {
+      const out = new Set(prev);
+      next.motivoUniverse.forEach(m=>{ if(!parsed.motivoUniverse.some(om=>om.key===m.key) && isDefaultExcludedMotivoKey(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingIdIncluded(prev => {
+      const out = new Set(prev);
+      next.idMotivoUniverse.forEach(m=>{ if(!parsed.idMotivoUniverse.some(om=>om.key===m.key) && isDefaultIncludedMotivoCode(m.key)) out.add(m.key); });
+      return out;
+    });
+    setRankingPresIncluded(prev => {
+      const out = new Set(prev);
+      next.presidenciaUniverse.forEach(v=>{ if(!parsed.presidenciaUniverse.includes(v) && RANKING_DEFAULT_PRESIDENCIA_INCLUDE.has(v)) out.add(v); });
+      return out;
+    });
+    setParsed(next);
+    setFileName(next.fileName);
+    const changedRows = (ausUpdatePreview.changedRows||[]).map(ausRecordToRow);
+    setAusUpdatePreview(null);
+    if(changedRows.length){
+      setCloudError(null);
+      setSyncStatus({label:"Guardando cambios en el servidor", done:0, total:changedRows.length});
+      upsertInBatches(AUSENTISMO_TABLE, changedRows, "id", (done,total)=>setSyncStatus({label:"Guardando cambios en el servidor", done, total}))
+        .then(()=> setSyncStatus(null))
+        .catch(err=>{ setSyncStatus(null); setCloudError("No se pudo guardar la actualización en el servidor: " + (err && err.message ? err.message : String(err))); });
+    }
+  }
+  function cancelAusUpdate(){ setAusUpdatePreview(null); }
+
+  const onInputChange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if(f) handleFile(f);
+    e.target.value = "";
+  };
+  const onUpdateInputChange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if(f) handleUpdateFile(f);
+    e.target.value = "";
+  };
+
+  const rangoDesde = parsed && parsed.minTs!=null ? new Date(parsed.minTs) : null;
+  const rangoHasta = parsed && parsed.maxTs!=null ? new Date(parsed.maxTs) : null;
+
+  /* ---- Dashboard nuevo — con filtros ---- */
+  const scopeRecords = useMemo(() => {
+    if(!parsed) return [];
+    return parsed.records.filter(r => r.valid && passesFilters(r, FILTERS, empresaIncluded, true));
+  }, [parsed, FILTERS, empresaIncluded]);
+  // Comité de ausentismo: mismos filtros (gerencia, departamento, sector, empresa) pero SIN el de Mes, porque analiza varios meses seguidos
+  const comiteRecords = useMemo(() => {
+    if(!parsed) return [];
+    return parsed.records.filter(r => r.valid && passesFilters(r, FILTERS, empresaIncluded, false));
+  }, [parsed, FILTERS, empresaIncluded]);
+  const scopeEmpleados = useMemo(() => new Set(scopeRecords.map(r=>r.legajo.toUpperCase())).size, [scopeRecords]);
+  const scopeUnitsMap = useMemo(() => buildUnitsMap(scopeRecords), [scopeRecords]);
+  const scopeMotivoUniverse = useMemo(() => {
+    if(!parsed || !parsed.hasMotivo) return [];
+    const counts = new Map();
+    scopeRecords.forEach(r => {
+      if(!isCountedCat(r.cat)) return;
+      const k = motivoKeyOf(r);
+      counts.set(k, (counts.get(k)||0)+1);
+    });
+    return parsed.motivoUniverse.map(m => ({...m, count: counts.get(m.key)||0}));
+  }, [parsed, scopeRecords]);
+
+  /* ---- Plantel (dotación por días activos) ---- */
+  const scopeMonthKeys = useMemo(() => {
+    if(FILTERS.mes) return Array.from(FILTERS.mes);
+    return parsed ? parsed.monthKeys : [];
+  }, [FILTERS.mes, parsed]);
+  const scopeMonthLabel = useMemo(() => {
+    if(!scopeMonthKeys.length) return "—";
+    if(scopeMonthKeys.length===1) return monthLabel(scopeMonthKeys[0]);
+    return scopeMonthKeys.length + " meses (" + scopeMonthKeys.map(monthLabel).join(", ") + ")";
+  }, [scopeMonthKeys]);
+  const scopePlantel = useMemo(() => plantel.filter(p => passesPlantelFilters(p, FILTERS, empresaIncluded)), [plantel, FILTERS, empresaIncluded]);
+  const cutoffTs = parsed ? parsed.maxTs : null; // último día con datos: el mes en curso cuenta solo hasta ahí
+  const globalPlantelStats = useMemo(() => {
+    if(!plantelActive) return null;
+    return plantelScopeStats(scopePlantel, scopeMonthKeys, cutoffTs);
+  }, [plantelActive, scopePlantel, scopeMonthKeys, cutoffTs]);
+
+  const rankingUnits = useMemo(() => {
+    const base = Array.from(scopeUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
+    if(plantelActive){
+      base.forEach(u=>{
+        const employees = scopePlantel.filter(p => (p.unidad||"(Sin unidad)")===u.name);
+        const st = plantelScopeStats(employees, scopeMonthKeys, cutoffTs);
+        u.jornalesDotacion = st.jornalesDotacion;
+        u.dotacionEquivalente = st.dotacionEquivalente;
+        u.empleadosConsiderados = st.empleadosConsiderados;
+        u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
+      });
+    }
+    return base.sort((a,b)=> unitOrderIndex(a.name)-unitOrderIndex(b.name) || b.pct-a.pct);
+  }, [scopeUnitsMap, excludedMotivos, plantelActive, scopePlantel, scopeMonthKeys, cutoffTs]);
+  const compositionData = useMemo(() => rankingUnits.map(u=>({name:u.name, ausC:u.ausencias, ausX:u.excluded})), [rankingUnits]);
+  const apAnpData = useMemo(() => rankingUnits.map(u=>({name:u.name, ap:u.apContado, anp:u.anpContado})), [rankingUnits]);
+  const motivoEntries = useMemo(() => {
+    if(!parsed || !parsed.hasMotivo) return [];
+    const map = new Map();
+    scopeRecords.forEach(r => {
+      if(!isCountedCat(r.cat)) return;
+      if(excludedMotivos.has(motivoKeyOf(r))) return;
+      const label = motivoLabelOf(r);
+      map.set(label, (map.get(label)||0)+1);
+    });
+    const entries = Array.from(map.entries()).map(([label,count])=>({label,count})).sort((a,b)=>b.count-a.count);
+    if(entries.length<=15) return entries;
+    const top = entries.slice(0,14);
+    const restCount = entries.slice(14).reduce((a,e)=>a+e.count,0);
+    top.push({label:"Otros motivos", count:restCount});
+    return top;
+  }, [scopeRecords, parsed, excludedMotivos]);
+
+  const evoRecords = useMemo(() => {
+    if(!parsed) return [];
+    return parsed.records.filter(r => r.valid && passesFilters(r, FILTERS, empresaIncluded, false));
+  }, [parsed, FILTERS, empresaIncluded]);
+  const evoMonths = useMemo(() => {
+    const s = new Set(); evoRecords.forEach(r=>s.add(r.monthKey)); return Array.from(s).sort();
+  }, [evoRecords]);
+  const evoUnitsMap = useMemo(() => buildUnitsMap(evoRecords), [evoRecords]);
+  const evoSeries = useMemo(() => {
+    return Array.from(evoUnitsMap.entries()).map(([name,rows],i)=>{
+      const byMonth = new Map();
+      rows.forEach(r=>{ if(!byMonth.has(r.monthKey)) byMonth.set(r.monthKey, []); byMonth.get(r.monthKey).push(r); });
+      const employees = plantelActive ? scopePlantel.filter(p => (p.unidad||"(Sin unidad)")===name) : null;
+      const pts = evoMonths.map(mk => {
+        const st = unitStats(byMonth.get(mk)||[], excludedMotivos);
+        if(!plantelActive) return st.pct;
+        const pStats = plantelScopeStats(employees, [mk], cutoffTs);
+        return pStats.jornalesDotacion>0 ? st.ausencias/pStats.jornalesDotacion*100 : 0;
+      });
+      return {name, color: SERIES_COLOR[i % SERIES_COLOR.length], pts};
+    });
+  }, [evoUnitsMap, evoMonths, excludedMotivos, plantelActive, scopePlantel, cutoffTs]);
+
+  const scopeAgg = useMemo(() => {
+    const totals = {presentes:0, ausencias:0, excluded:0, vac:0, franco:0, ap:0, anp:0, apContado:0, anpContado:0, baja:0, ce:0};
+    rankingUnits.forEach(u=>{
+      totals.presentes+=u.presentes; totals.ausencias+=u.ausencias; totals.excluded+=u.excluded;
+      totals.vac+=u.vac; totals.franco+=u.franco; totals.ap+=u.ap; totals.anp+=u.anp;
+      totals.apContado+=u.apContado; totals.anpContado+=u.anpContado; totals.baja+=u.baja; totals.ce+=u.ce;
+    });
+    const total = scopeRecords.length;
+    const base = total - totals.excluded;
+    let pct = base>0 ? totals.ausencias/base*100 : 0;
+    if(plantelActive && globalPlantelStats && globalPlantelStats.jornalesDotacion>0){
+      pct = totals.ausencias/globalPlantelStats.jornalesDotacion*100;
+    }
+    return {...totals, total, base, pct};
+  }, [rankingUnits, scopeRecords, plantelActive, globalPlantelStats]);
+  const plantelConsistencia = useMemo(() => {
+    if(!plantelActive || !globalPlantelStats) return null;
+    return {...globalPlantelStats, ap:scopeAgg.apContado, anp:scopeAgg.anpContado, pct:scopeAgg.pct};
+  }, [plantelActive, globalPlantelStats, scopeAgg]);
+  const unidadesFuera = rankingUnits.filter(u=>u.pct>objetivo).length;
+
+  /* ---- Fila adicional: solo filtro Cuatrimestre, independiente del resto de filtros ---- */
+  const cuatriMonths = useMemo(() => (CUATRI_OPTIONS.find(c=>c.value===cuatriSel)||CUATRI_OPTIONS[0]).months, [cuatriSel]);
+  const cuatriRecords = useMemo(() => {
+    if(!parsed) return [];
+    const monthsSet = new Set(cuatriMonths);
+    return parsed.records.filter(r => r.valid && monthsSet.has(r.mes));
+  }, [parsed, cuatriMonths]);
+  const cuatriEmpleados = useMemo(() => new Set(cuatriRecords.map(r=>r.legajo.toUpperCase())).size, [cuatriRecords]);
+  const cuatriUnitsMap = useMemo(() => buildUnitsMap(cuatriRecords), [cuatriRecords]);
+  const cuatriMonthKeys = useMemo(() => {
+    if(!parsed) return [];
+    const monthsSet = new Set(cuatriMonths);
+    return parsed.monthKeys.filter(mk => monthsSet.has(+mk.split("-")[1]));
+  }, [parsed, cuatriMonths]);
+  const cuatriPlantelStats = useMemo(() => {
+    if(!plantelActive) return null;
+    return plantelScopeStats(plantel, cuatriMonthKeys, cutoffTs);
+  }, [plantelActive, plantel, cuatriMonthKeys, cutoffTs]);
+  const cuatriRankingUnits = useMemo(() => {
+    const base = Array.from(cuatriUnitsMap.entries()).map(([name,rows])=>({name, ...unitStats(rows, excludedMotivos)}));
+    if(plantelActive){
+      base.forEach(u=>{
+        const employees = plantel.filter(p => (p.unidad||"(Sin unidad)")===u.name);
+        const st = plantelScopeStats(employees, cuatriMonthKeys, cutoffTs);
+        u.jornalesDotacion = st.jornalesDotacion;
+        u.dotacionEquivalente = st.dotacionEquivalente;
+        u.pct = st.jornalesDotacion>0 ? u.ausencias/st.jornalesDotacion*100 : 0;
+      });
+    }
+    return base.sort((a,b)=> unitOrderIndex(a.name)-unitOrderIndex(b.name) || b.pct-a.pct);
+  }, [cuatriUnitsMap, excludedMotivos, plantelActive, plantel, cuatriMonthKeys, cutoffTs]);
+  const cuatriScopeAgg = useMemo(() => {
+    const totals = {presentes:0, ausencias:0, excluded:0, vac:0, franco:0, ap:0, anp:0, apContado:0, anpContado:0, baja:0, ce:0};
+    cuatriRankingUnits.forEach(u=>{
+      totals.presentes+=u.presentes; totals.ausencias+=u.ausencias; totals.excluded+=u.excluded;
+      totals.vac+=u.vac; totals.franco+=u.franco; totals.ap+=u.ap; totals.anp+=u.anp;
+      totals.apContado+=u.apContado; totals.anpContado+=u.anpContado; totals.baja+=u.baja; totals.ce+=u.ce;
+    });
+    const total = cuatriRecords.length;
+    const base = total - totals.excluded;
+    let pct = base>0 ? totals.ausencias/base*100 : 0;
+    if(plantelActive && cuatriPlantelStats && cuatriPlantelStats.jornalesDotacion>0){
+      pct = totals.ausencias/cuatriPlantelStats.jornalesDotacion*100;
+    }
+    return {...totals, total, base, pct};
+  }, [cuatriRankingUnits, cuatriRecords, plantelActive, cuatriPlantelStats]);
+  const cuatriDotacionDisplay = plantelActive && cuatriPlantelStats ? Math.round(cuatriPlantelStats.dotacionEquivalente) : cuatriEmpleados;
+  const cuatriUnidadesFuera = cuatriRankingUnits.filter(u=>u.pct>objetivo).length;
+
+  const mesOptions = useMemo(() => parsed ? parsed.monthKeys.map(mk=>({value:mk,label:monthLabel(mk)})) : [], [parsed]);
+  const deptOptions = useMemo(() => parsed ? parsed.departamentos.map(v=>({value:v,label:v})) : [], [parsed]);
+  const gerOptions = useMemo(() => parsed ? parsed.gerencias.map(v=>({value:v,label:v})) : [], [parsed]);
+  const secOptions = useMemo(() => parsed ? parsed.sectores.map(v=>({value:v,label:v})) : [], [parsed]);
+
+  const TABS = [
+    {key:"resumen", label:"Resumen", color:"#2f80ed"},
+    {key:"resumen_gerencia", label:"Resumen por Gerencia", color:"#12a594"},
+    {key:"cuadro_diario", label:"Cuadro Diario", color:"#f2771a"},
+    {key:"evolucion", label:"Evolución mensual", color:"#2fa84f"},
+    {key:"tipos", label:"Tipos de ausencia", color:"#8e63e6"},
+    {key:"cronicos", label:"Crónicos", color:"#e5484d"},
+    {key:"medicina_laboral", label:"Medicina Laboral", color:"#b4724a"},
+    {key:"sanciones", label:"Sanciones", color:"#c0392b"},
+    {key:"sanciones_lote", label:"Sanciones por lote", color:"#7a2a8c"},
+    {key:"ranking", label:"Ranking", color:"#e5a000"},
+    {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
+    {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
+    {key:"carga_geo", label:"Carga Geo", color:"#1f8a70"},
+    {key:"presentismo", label:"Presentismo diario", color:"#e8590c"},
+    {key:"permisos_geo", label:"Permisos Geo", color:"#3a8f8f"},
+    {key:"usuarios", label:"Usuarios y permisos", color:"#7b8794"}
+  ];
+  const dotacionDisplay = plantelActive && globalPlantelStats ? Math.round(globalPlantelStats.dotacionEquivalente) : scopeEmpleados;
+
+  return (
+    <PlantelAuditCtx.Provider value={plantelIndexOf(plantel)}>
+    <SancionAuditCtx.Provider value={sancIdx}>
+    <div className="app">
+      <div className="masthead no-print">
+        <div className="masthead-text">
+          <div className="eyebrow">Indicador de Ausentismo / Presentismo</div>
+          <h1>Radar de ausentismo por unidad de negocio</h1>
+          <p className="sub">Lee el export tal como sale del sistema (hoja Sheet1) y usa "Agrupador cuadro presentismo" + "Entrada" (DD/MM/AAAA) como única fuente de verdad para todo el cálculo.</p>
+          {parsed && perms.tabs.includes("plantel") && (
+            <p className="hint" style={{marginTop:2}}>
+              {plantelActive
+                ? <React.Fragment>Plantel: actualizado {plantelUpdatedAt ? plantelUpdatedAt.toLocaleString("es-AR") : ""} · {fmt(plantel.length)} legajos — dotación calculada por días activos.</React.Fragment>
+                : <React.Fragment>Sin plantel cargado — dotación calculada contando filas del Excel.</React.Fragment>}
+              {" "}<button type="button" className="cell-link" onClick={()=>setActiveTab("plantel")}>{perms.plantelCompleto ? "Gestionar plantel" : "Actualizar plantel"}</button>
+            </p>
+          )}
+        </div>
+        <div className="hint" style={{display:"flex", alignItems:"center", gap:8}}>
+          {perms.plantelCompleto && dbUsage && dbPct>=DB_WARN_PCT && (
+            <button type="button" className={"schip "+dbUsageLevel(dbPct)} style={{border:"none", cursor:"pointer", fontSize:11}}
+              title={"La base de datos usa "+fmt(dbUsage.db_bytes/MB)+" de "+fmt(DB_LIMIT_MB)+" MB. Tocá para ver el detalle."}
+              onClick={()=>setActiveTab("plantel")}>
+              <span className="dot"></span>Base de datos {fmt(dbPct)} %
+            </button>
+          )}
+          <span title={perms.desc}>{userEmail} · <b>{perms.label}</b></span>
+          <InstallButton />
+          <ThemeToggle />
+          <ChangePasswordButton userEmail={userEmail} />
+          <button type="button" className="btn secondary" onClick={onSignOut}>Cerrar sesion</button>
+        </div>
+        {parsed && perms.objetivo && (
+          <div className="objetivo-box">
+            <label htmlFor="objetivoInput">Objetivo</label>
+            <input id="objetivoInput" type="number" step="0.1" min="0" value={objetivo} onChange={e=>{ const v=parseFloat(e.target.value); setObjetivo(isNaN(v)?3:v); }} />
+            <span className="pct">%</span>
+          </div>
+        )}
+      </div>
+
+      {visorSinUnidad && <div className="warn-banner no-print">Tu usuario es Visor pero todavía no tiene una Unidad de Negocio asignada: no se muestran datos. Pedile al Administrador que te asigne una (menú «Usuarios y permisos»).</div>}
+      {permisosSinActivar && <div className="warn-banner no-print">Los permisos por perfil todavía no están activados: ejecutá <b>supabase-permisos-roles.sql</b> en el SQL Editor de Supabase. Mientras tanto todos los usuarios tienen acceso total.</div>}
+      {cloudError && <div className="warn-banner no-print">{cloudError}</div>}
+      {uploadNotice &&<div className="warn-banner no-print">{uploadNotice}</div>}
+      {syncStatus && (
+        <div className="chip ok no-print" style={{alignSelf:"flex-start"}}>
+          <span className="dot"></span>{syncStatus.label}… {fmt(syncStatus.done)}/{fmt(syncStatus.total)}
+        </div>
+      )}
+
+      {/* Primer ingreso en este dispositivo: todavía no hay datos guardados acá y se están bajando del servidor. Hasta que termine NO se
+          ofrece subir el archivo (eso lo hace solo el administrador); se explica que en breve se podrá ver la información. */}
+      {!parsed && !error && (cloudLoading || serverState==="pending") && (
+        <div className="upload-card" style={{flexDirection:"column", alignItems:"flex-start", gap:8}}>
+          <div style={{fontWeight:700, fontSize:15}}>Es su primer ingreso desde este dispositivo</div>
+          <div className="hint" style={{fontSize:13}}>Se están descargando los datos del servidor. <b>En breve va a poder visualizar la información</b>: no hace falta que haga nada ni que cargue ningún archivo. Esto pasa solo la primera vez; las próximas veces se abre al instante.</div>
+          <div className="chip ok"><span className="dot"></span>{dlRows>0 ? "Registros descargados: "+fmt(dlRows) : "Conectando con el servidor…"}</div>
+        </div>
+      )}
+      {!parsed && !error && !cloudLoading && serverState==="error" && (
+        <div className="upload-card" style={{flexDirection:"column", alignItems:"flex-start", gap:8}}>
+          <div style={{fontWeight:700, fontSize:15}}>Todavía no se pudieron descargar los datos</div>
+          <div className="hint" style={{fontSize:13}}>Seguramente sea la conexión. Se reintenta automáticamente{retryInfo>0 && retryInfo<=4 ? " (reintento "+retryInfo+" de 4)" : ""}; en cuanto llegue la información se va a mostrar sola. No hace falta cargar ningún archivo.</div>
+          <button type="button" className="btn secondary" onClick={()=>{ if(loadRef.current) loadRef.current(); }}>Reintentar ahora</button>
+        </div>
+      )}
+      {!cloudLoading && serverState==="ok" && !parsed && !error && !perms.cargar && (
+        <div className="upload-card"><div className="hint">Todavía no hay datos cargados en el servidor. Cuando RRHH o el Administrador los carguen vas a poder verlos acá.</div></div>
+      )}
+      {!cloudLoading && serverState==="ok" && !parsed && !error && perms.cargar && (
+        <div className="upload-card">
+          <div className="upload-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2Z"/></svg>
+          </div>
+          <div>
+            <div style={{fontWeight:700, fontSize:15}}>Subir archivo .xlsx</div>
+            <div className="hint" style={{marginTop:4}}>Exportación de asistencia, hoja "Sheet1" — se guarda en el servidor, no hace falta volver a subirlo la próxima vez.</div>
+          </div>
+          <label className="btn" htmlFor="fileInput">{loading ? "Leyendo…" : "Elegir archivo"}</label>
+          <input id="fileInput" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+        </div>
+      )}
+
+      {error && (
+        <React.Fragment>
+          <div className="error-card">
+            <h2>No se pudo procesar el archivo</h2>
+            <p>{error}</p>
+          </div>
+          {perms.cargar && (
+            <div>
+              <label className="btn secondary" htmlFor="fileInputRetry">Elegir otro archivo</label>
+              <input id="fileInputRetry" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+            </div>
+          )}
+        </React.Fragment>
+      )}
+
+      {parsed && (
+        <React.Fragment>
+          <div className="card filebar no-print">
+            <div className="name">{parsed.fileName}</div>
+            <div className="meta">{fmt(parsed.totalRows)} filas leídas</div>
+            <div className="meta">Entrada: {rangoDesde ? fmtDate(rangoDesde.getUTCDate(), rangoDesde.getUTCMonth()+1, rangoDesde.getUTCFullYear()) : "—"} – {rangoHasta ? fmtDate(rangoHasta.getUTCDate(), rangoHasta.getUTCMonth()+1, rangoHasta.getUTCFullYear()) : "—"}</div>
+            <div className="spacer"></div>
+            {perms.cargar && (
+              <React.Fragment>
+                <label className="btn secondary" htmlFor="fileInputUpdate">{loading ? "Leyendo…" : "Actualizar archivo"}</label>
+                <input id="fileInputUpdate" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onUpdateInputChange} />
+              </React.Fragment>
+            )}
+            {perms.reemplazar && (
+              <React.Fragment>
+                <label className="btn secondary" htmlFor="fileInputSwap">{loading ? "Leyendo…" : "Cambiar archivo"}</label>
+                <input id="fileInputSwap" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onInputChange} />
+              </React.Fragment>
+            )}
+          </div>
+
+          {perms.cargar && ausUpdatePreview && (
+            <div className="card table-card no-print">
+              <h3>Resumen de la actualización — {ausUpdatePreview.fileName}</h3>
+              <p className="hint">Se fusiona con el archivo actual por Legajo + Fecha de Entrada. Nada de lo ya cargado se borra: las filas nuevas se agregan y las que ya existían con esa combinación se actualizan si cambiaron.</p>
+              <div className="kpi-grid">
+                <KpiTile label="Filas encontradas" value={ausUpdatePreview.encontrados} />
+                <KpiTile label="Filas nuevas" value={ausUpdatePreview.nuevos} />
+                <KpiTile label="Filas modificadas" value={ausUpdatePreview.modificados} />
+                <KpiTile label="Sin cambios" value={ausUpdatePreview.sinCambios} />
+              </div>
+              <p className="hint">Total de filas después de actualizar: <b>{fmt(ausUpdatePreview.nextParsed.totalRows)}</b> (antes: {fmt(parsed.totalRows)}).</p>
+              <div style={{display:"flex", gap:10, marginTop:6}}>
+                <button className="btn" onClick={confirmAusUpdate}>Confirmar actualización</button>
+                <button className="btn secondary" onClick={cancelAusUpdate}>Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          {perms.filtros && (
+            <React.Fragment>
+              <div className="filters-bar no-print">
+                <MultiSelect label="Mes" options={mesOptions} selected={FILTERS.mes} onChange={v=>setFilterDim("mes",v)} allLabel="Todos los meses" />
+                <MultiSelect label="Gerencia" options={gerOptions} selected={FILTERS.gerencia} onChange={v=>setFilterDim("gerencia",v)} allLabel="Todos" />
+                <MultiSelect label="Departamento" options={deptOptions} selected={FILTERS.departamento} onChange={v=>setFilterDim("departamento",v)} allLabel="Todos" />
+                <MultiSelect label="Sector" options={secOptions} selected={FILTERS.sector} onChange={v=>setFilterDim("sector",v)} allLabel="Todos" />
+              </div>
+
+              {!perms.soloPropios && (
+                <div className="no-print">
+                  <EmpresaChecklist options={parsed.empresas} included={empresaIncluded} onChange={setEmpresaIncluded} />
+                </div>
+              )}
+            </React.Fragment>
+          )}
+
+          {verResumen && (
+            <React.Fragment>
+              <KpiGroups plantelActive={plantelActive} dotacion={dotacionDisplay} plantelStats={globalPlantelStats} agg={scopeAgg} />
+              <p className="kgroup-caption no-print">
+                Objetivo <b>{fmtPct(objetivo,1)}</b> · {plantelActive ? "Dotación equivalente (plantel) en el alcance actual" : "Empleados únicos en el alcance actual"}: <b>{fmt(dotacionDisplay)}</b> · <b>{unidadesFuera} / {rankingUnits.length}</b> unidades fuera de objetivo
+                {" "}<SemChip pct={scopeAgg.pct} objetivo={objetivo} />
+                {" "}· {plantelActive ? "Desvío = (AP+ANP) / Jornales de dotación del plantel (ver Gestión de Plantel)" : "Excluye CE + BAJA y los motivos sin tildar (ver Resumen) del denominador"}
+              </p>
+
+              {perms.filtros && (
+                <React.Fragment>
+                  <div className="filters-bar no-print">
+                    <div className="field">
+                      <label>Cuatrimestre</label>
+                      <select value={cuatriSel} onChange={e=>setCuatriSel(e.target.value)}>
+                        {CUATRI_OPTIONS.map(c=>(<option key={c.value} value={c.value}>{c.label}</option>))}
+                      </select>
+                    </div>
+                  </div>
+                  <p className="hint no-print" style={{marginTop:-8}}>Esta fila de tarjetas depende únicamente del filtro de Cuatrimestre — no se ve afectada por Mes, Departamento, Gerencia, Sector ni Empresa. El período en curso se calcula sobre los días transcurridos (hasta el último día cargado), no sobre el cuatrimestre completo.</p>
+                </React.Fragment>
+              )}
+              <KpiGroups plantelActive={plantelActive} dotacion={cuatriDotacionDisplay} plantelStats={cuatriPlantelStats} agg={cuatriScopeAgg} />
+              <p className="kgroup-caption no-print">
+                Cuatrimestre: <b>{(CUATRI_OPTIONS.find(c=>c.value===cuatriSel)||CUATRI_OPTIONS[0]).label}</b> · {plantelActive ? "Dotación equivalente (plantel)" : "Empleados únicos"}: <b>{fmt(cuatriDotacionDisplay)}</b> · <b>{cuatriUnidadesFuera} / {cuatriRankingUnits.length}</b> unidades fuera de objetivo
+                {" "}<SemChip pct={cuatriScopeAgg.pct} objetivo={objetivo} />
+              </p>
+            </React.Fragment>
+          )}
+
+          <nav className="tabs no-print" ref={tabsRef}>
+            {TABS.filter(t=>perms.tabs.includes(t.key)).map(t=>(
+              <button key={t.key} className={shownTab===t.key?"active":""} style={{"--tab-color":t.color}} onClick={()=>setActiveTab(t.key)}><span className="tdot"></span>{t.label}</button>
+            ))}
+          </nav>
+
+          {shownTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} verFiltros={perms.filtros} />}
+          {shownTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} verFiltros={perms.filtros} />}
+          {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} soloUnidades={unidadesSet} />}
+          {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
+          {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
+          {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} soloRanking={!!perms.visor} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} />}
+          {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
+          {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="carga_geo" && <GeoFrame key="geo-full" view="" parsed={parsedRaw} plantel={plantel} puedeCargar={!!perms.cargar} onAplicar={aplicarMergeAus} limpiar={!!perms.esAdmin} />}
+          {shownTab==="presentismo" && <GeoFrame key="geo-pres" view="pres" />}
+          {shownTab==="permisos_geo" && <GeoPermisosTab parsed={parsed} esAdmin={!!perms.esAdmin} />}
+          {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
+        </React.Fragment>
+      )}
+    </div>
+    </SancionAuditCtx.Provider>
+    </PlantelAuditCtx.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<AuthGate />);
+
+if("serviceWorker" in navigator && (location.protocol==="https:" || location.hostname==="localhost")){
+  const registerSW = ()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); };
+  if(document.readyState==="complete") registerSW(); else window.addEventListener("load", registerSW);
+}
