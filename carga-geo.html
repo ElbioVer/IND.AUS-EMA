@@ -347,7 +347,7 @@ table.pres td.zero{color:var(--muted)}
     </section>
     <section class="panel" id="panelPMap" hidden>
       <h2>Clasificación de permisos</h2>
-      <p class="note">Cada permiso de Geo, y cada novedad que cargues acá, se cuenta en una columna del cuadro: P presente, AP ausente pago, ANP ausente no pago, V vacaciones, CE sin tareas, o "No contar". Quien fichó cuenta como P. Los feriados sin fichada no se cuentan. Los cambios se guardan en este navegador.</p>
+      <p class="note">Cada permiso de Geo, y cada novedad que cargues acá, se cuenta en una columna del cuadro: P presente, AP ausente pago, ANP ausente no pago, V vacaciones, CE sin tareas, o "No contar". Quien fichó cuenta como P. Los feriados sin fichada no se cuentan. Los cambios se guardan en la base compartida y los ven todos los usuarios.</p>
       <div class="pmap" id="pmapList"></div>
       <div class="bar"><button type="button" class="btn" id="pmapAll">Ver todos los permisos</button><button type="button" class="btn" id="pmapReset">Restaurar clasificación original</button></div>
     </section>
@@ -427,7 +427,7 @@ table.pres td.zero{color:var(--muted)}
 
   <section class="panel" id="panelCat" hidden>
     <h2>Tipos de permiso</h2>
-    <p class="note">Estos códigos aparecen como sugerencia al cargar y su nombre se muestra junto al ID. Los marcados con <b>🕒 Horas</b> habilitan Hora inicio y Hora fin en la tabla (de entrada, el 19 JRP); en los demás esas columnas no se muestran. El Excel para Geo sale igual que siempre. Los cambios se guardan en este navegador.</p>
+    <p class="note">Estos códigos aparecen como sugerencia al cargar y su nombre se muestra junto al ID. Los marcados con <b>🕒 Horas</b> habilitan Hora inicio y Hora fin en la tabla (de entrada, el 19 JRP); en los demás esas columnas no se muestran. El Excel para Geo sale igual que siempre. Los cambios se guardan en la base compartida y los ven todos los usuarios.</p>
     <div class="bar">
       <input type="number" id="catCode" placeholder="ID" style="width:90px">
       <input type="text" id="catName" class="grow" placeholder="Descripción (ej. Enfermedad)">
@@ -971,14 +971,20 @@ document.addEventListener("keydown",e=>{if(!acIn||e.target!==acIn)return;const p
 $("acPop").addEventListener("mousedown",e=>{e.preventDefault();const d=e.target.closest("[data-i]");if(d)acPick(+d.dataset.i)});
 document.addEventListener("mousedown",e=>{if(acIn&&e.target!==acIn&&!$("acPop").contains(e.target))acHide()});
 window.addEventListener("scroll",e=>{if(e.target!==$("acPop")&&acIn&&!$("acPop").hidden)acShow(acIn)},true);
+// [Radar] Clasificación de permisos, empresas subcontratistas y tipos de permiso: en la base compartida (shared/clasif) para que todos vean el mismo cuadro
+function saveClasif(...keys){if(!CL.on)return;const data={at:Date.now(),by:CL.uid};keys.forEach(k=>{data[k]=JSON.parse(JSON.stringify(S[k]))});
+  upsert(CL.db.doc("shared/clasif"),data).catch(writeErr)}
+function applyClasif(d){let ch=false;const put=(k,v)=>{if(v!==undefined&&JSON.stringify(S[k])!==JSON.stringify(v)){S[k]=v;ch=true}};
+  put("pmap",d.pmap);put("pemp",d.pemp);if(Array.isArray(d.cat))put("cat",d.cat);
+  if(ch){store.set("cn.pmap",S.pmap);store.set("cn.pemp",S.pemp);store.set("cn.cat3",S.cat);renderCat();renderPMap();renderPEmp();render();renderPres()}}
 $("catAdd").addEventListener("click",()=>{const code=$("catCode").value.trim(),name=$("catName").value.trim();
   if(!/^-?\d+$/.test(code)||!name){toast("Completá un ID numérico y una descripción.");return}
-  const prevC=S.cat.find(c=>String(c.code)===code);S.cat=S.cat.filter(c=>String(c.code)!==code);const cv=isFF(code)?FF:+code;S.cat.push(prevC&&prevC.h?{code:cv,name,h:true}:{code:cv,name});store.set("cn.cat3",S.cat);$("catCode").value="";$("catName").value="";renderCat()});
+  const prevC=S.cat.find(c=>String(c.code)===code);S.cat=S.cat.filter(c=>String(c.code)!==code);const cv=isFF(code)?FF:+code;S.cat.push(prevC&&prevC.h?{code:cv,name,h:true}:{code:cv,name});store.set("cn.cat3",S.cat);saveClasif("cat");$("catCode").value="";$("catName").value="";renderCat()});
 $("catList").addEventListener("click",e=>{const hb=e.target.closest("button[data-h]");
-  if(hb){const c=S.cat[+hb.dataset.h];if(!c)return;c.h=!c.h;if(!c.h)delete c.h;store.set("cn.cat3",S.cat);renderCat();render();
+  if(hb){const c=S.cat[+hb.dataset.h];if(!c)return;c.h=!c.h;if(!c.h)delete c.h;store.set("cn.cat3",S.cat);saveClasif("cat");renderCat();render();
     toast(c.h?`${c.code} · ${c.name}: ahora habilita Hora inicio y Hora fin.`:`${c.code} · ${c.name}: ya no usa horas.`);return}
-  const b=e.target.closest("button[data-i]");if(!b)return;S.cat.splice(+b.dataset.i,1);store.set("cn.cat3",S.cat);renderCat()});
-$("catReset").addEventListener("click",()=>{S.cat=DEFAULT_CAT.map(c=>({...c}));markHrsDefault();store.set("cn.cat3",S.cat);renderCat();toast("Restauré la lista original de permisos.")});
+  const b=e.target.closest("button[data-i]");if(!b)return;S.cat.splice(+b.dataset.i,1);store.set("cn.cat3",S.cat);saveClasif("cat");renderCat()});
+$("catReset").addEventListener("click",()=>{S.cat=DEFAULT_CAT.map(c=>({...c}));markHrsDefault();store.set("cn.cat3",S.cat);saveClasif("cat");renderCat();toast("Restauré la lista original de permisos.")});
 renderCat();
 
 // Pestañas
@@ -1163,10 +1169,10 @@ function renderPMap(){if($("panelPMap").hidden)return;
 function renderPEmp(){if($("panelPEmp").hidden)return;const emps=presCells?[...presCells.emps.entries()]:[];
   $("pempList").innerHTML=emps.sort((a,b)=>b[1]-a[1]).map(([e,n])=>{const v=S.pemp[nrm(e)]??"";
     return `<label><span>${esc(e)}<small>${n}</small></span><select data-pe="${esc(nrm(e))}"><option value=""${v===""?" selected":""}>Según la UN</option>${PROWS.map((r,i)=>`<option value="${i}"${String(v)===String(i)?" selected":""}>${r.lab}</option>`).join("")}<option value="no"${v==="no"?" selected":""}>No es subcontratista</option></select></label>`}).join("")||'<span class="note">No hay empleados de empresas subcontratistas en la base del día.</span>'}
-$("pmapList").addEventListener("change",e=>{const s=e.target.closest("[data-pm]");if(!s)return;S.pmap[s.dataset.pm]=s.value;store.set("cn.pmap",S.pmap);renderPres()});
-$("pempList").addEventListener("change",e=>{const s=e.target.closest("[data-pe]");if(!s)return;S.pemp[s.dataset.pe]=s.value;store.set("cn.pemp",S.pemp);renderPres()});
+$("pmapList").addEventListener("change",e=>{const s=e.target.closest("[data-pm]");if(!s)return;S.pmap[s.dataset.pm]=s.value;store.set("cn.pmap",S.pmap);saveClasif("pmap");renderPres()});
+$("pempList").addEventListener("change",e=>{const s=e.target.closest("[data-pe]");if(!s)return;S.pemp[s.dataset.pe]=s.value;store.set("cn.pemp",S.pemp);saveClasif("pemp");renderPres()});
 $("pmapAll").addEventListener("click",()=>{pmapAll=!pmapAll;renderPMap()});
-$("pmapReset").addEventListener("click",()=>{S.pmap={};store.set("cn.pmap",S.pmap);renderPres();toast("Restauré la clasificación original de permisos.")});
+$("pmapReset").addEventListener("click",()=>{S.pmap={};store.set("cn.pmap",S.pmap);saveClasif("pmap");renderPres();toast("Restauré la clasificación original de permisos.")});
 $("btnPMap").addEventListener("click",()=>{$("panelPMap").hidden=!$("panelPMap").hidden;renderPMap()});
 $("btnPEmp").addEventListener("click",()=>{$("panelPEmp").hidden=!$("panelPEmp").hidden;renderPEmp()});
 $("presExport").addEventListener("click",async()=>{if(!S.geo||!S.pad)return;const R=presCompute();
@@ -1355,13 +1361,16 @@ async function onAccess(){
 }
 async function renderWho(){let nm="";try{nm=await CL.user.name()}catch(e){}
   const w=$("who");w.hidden=false;w.innerHTML=`${esc(nm||"Usuario")} · <b>${esc(CL.access.name)}</b>`+(CL.access.admin||CL.access.mode==="all"?"":` <span class="sync">(arranca en: ${esc(CL.access.mode==="except"?"todas menos "+(CL.access.uns||[]).join(", "):(CL.access.uns||[]).join(", "))})</span>`)}
-function stopAll(){["days","art","emps","nov","exps","mail"].forEach(k=>{if(CL.subs[k]){CL.subs[k]();delete CL.subs[k]}});CL.started=false;CL.day=null}
+function stopAll(){["days","art","emps","nov","exps","mail","clasif"].forEach(k=>{if(CL.subs[k]){CL.subs[k]();delete CL.subs[k]}});CL.started=false;CL.day=null}
 function startShared(){const db=CL.db;
   CL.subs.days=db.collection("days").orderBy("id","desc").limit(120).onSnapshot(s=>{
     CL.days=s.docs.map(d=>({...d.data()}));renderDaySel();if(CL.rowsAll)padStamp();if(!$("viewHist").hidden)renderHist();
     if(!CL.day&&CL.days.length)openDay(CL.days[0].id)},e=>toast("No pude leer las fechas guardadas ("+(e&&e.code)+")."));
   CL.subs.art=db.doc("shared/art").onSnapshot(s=>{const it=s.exists&&s.data().items;S.art=Array.isArray(it)?JSON.parse(JSON.stringify(it)):[];
     CL.artLoaded=true;renderArt();maybeApplyArt()},()=>{});
+  CL.subs.clasif=db.doc("shared/clasif").onSnapshot(s=>{
+    if(!s.exists){if(CL.access&&CL.access.admin&&!CL.clasifSeeded){CL.clasifSeeded=true;saveClasif("pmap","pemp","cat")}return}
+    applyClasif(s.data())},()=>{});
   CL.subs.mail=db.doc("shared/mail").onSnapshot(s=>{if(s.exists){MAILCFG={...s.data()};if(!$("panelPMail").hidden&&!$("panelPMail").contains(document.activeElement))fillMail()}},()=>{});
 }
 function renderDaySel(){const sel=$("daySel");sel.hidden=!CL.days.length;
