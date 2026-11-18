@@ -7928,8 +7928,9 @@ const geoIsoAdd = (iso, n) => { const q = iso.split("-").map(Number), t = new Da
 // Días (AAAA-MM-DD, hasta el día de Geo) que cubre una novedad: arranca en «desde» (si es anterior al día; vacío = el día) y dura «ext» días corridos
 function geoDiasNovedad(nov, dia){
   const okIso = s => /^\d{4}-\d{2}-\d{2}$/.test(s||"");
-  const ini = (nov && okIso(nov.desde) && nov.desde < dia && nov.desde >= geoIsoAdd(dia, -GEO_DESDE_MAX_ATRAS)) ? nov.desde : dia;
   const n = Math.max(1, parseInt(nov && nov.ext, 10) || 1), out = [];
+  // «desde» solo vale si la licencia dura más de un día (con Ext. = 1 arranca el día de Geo, aunque haya quedado un «desde» guardado)
+  const ini = (nov && n>1 && okIso(nov.desde) && nov.desde < dia && nov.desde >= geoIsoAdd(dia, -GEO_DESDE_MAX_ATRAS)) ? nov.desde : dia;
   for(let i=0; i<n; i++){ const k = geoIsoAdd(ini, i); if(k>dia) break; out.push(k); }
   return out;
 }

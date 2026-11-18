@@ -441,7 +441,7 @@ table.pres td.zero{color:var(--muted)}
     <span><b id="selCount">0</b> seleccionados</span>
     <input type="text" id="bCode" class="in-code" data-ac="codes" autocomplete="off" placeholder="ID">
     <input type="number" id="bExt" class="in-ext" value="1" min="1" title="Cantidad de días">
-    <input type="date" id="bDesde" class="in-desde" title="Desde (vacío = el día de la base)" aria-label="Desde">
+    <input type="date" id="bDesde" class="in-desde" title="Desde (vacío = el día de la base)" aria-label="Desde" hidden>
     <input type="text" id="bCom" placeholder="Comentario" style="width:220px">
     <button class="btn primary" id="bApply">Aplicar a seleccionados</button>
     <button class="btn" id="bClear">Quitar novedad</button>
@@ -625,7 +625,12 @@ const baseIso=()=>S.date?`${S.date.y}-${p2(S.date.m)}-${p2(S.date.d)}`:"";
 const isoAdd=(iso,n)=>{const[y,m,d]=iso.split("-").map(Number),t=new Date(Date.UTC(y,m-1,d+n));return`${t.getUTCFullYear()}-${p2(t.getUTCMonth()+1)}-${p2(t.getUTCDate())}`};
 const desdeMin=()=>baseIso()?isoAdd(baseIso(),-DESDE_MAX_ATRAS):"";
 const desdeOk=iso=>/^\d{4}-\d{2}-\d{2}$/.test(iso||"")&&!!baseIso()&&iso<=baseIso()&&iso>=desdeMin();
-const desdeOf=n=>n&&desdeOk(n.desde)?n.desde:baseIso();   // inicio efectivo de la licencia
+const extOf=n=>Math.max(1,parseInt(n&&n.ext,10)||1);
+// «Desde» solo se usa (y se muestra) cuando la licencia dura más de un día; con 1 día arranca el día de la base
+const needDesde=n=>!!n&&!empty(n.code)&&extOf(n)>1;
+// «Compensación» solo se muestra cuando hay un Día a Compensar (48) o un Día Compensado (49)
+const needComp=n=>{const c=codeOf(n);return c===DAC||c===DC};
+const desdeOf=n=>n&&extOf(n)>1&&desdeOk(n.desde)?n.desde:baseIso();   // inicio efectivo de la licencia
 const codeOf=n=>String(n&&n.code||"").trim();
 function compCell(n){const c=codeOf(n);if(c!==DAC&&c!==DC)return '<span class="note">—</span>';
   return `<input type="date" data-f="cdate" value="${esc(n.cdate||"")}"${n.cext?" disabled":""} aria-label="${c===DAC?"Fecha del Día Compensado":"Fecha del Día a Compensar"}">`
@@ -804,12 +809,14 @@ function render(){
   if(S.sel.size){const vis=new Set(rows.map(r=>r.dni));[...S.sel].forEach(d=>{if(!vis.has(d))S.sel.delete(d)})}
   // Hora inicio/fin: solo se muestran si alguna fila tiene un permiso que usa horas (o ya tiene horas cargadas)
   const showH=S.showH=rows.some(r=>needH(S.nov[r.dni]));
+  // Desde: solo si alguna fila tiene Ext. mayor a 1; Compensación: solo si alguna fila tiene Día a Compensar / Día Compensado
+  const showD=S.showD=rows.some(r=>needDesde(S.nov[r.dni])),showC=S.showC=rows.some(r=>needComp(S.nov[r.dni]));
   $("thead").innerHTML=`<tr><th class="nos sk s0"><input type="checkbox" id="selAll" aria-label="Seleccionar todos"></th>
     <th data-k="p:Legajo" class="sk s1">Legajo${arrow("p:Legajo")}${cfBtn("p:Legajo")}</th><th data-k="nombre" class="sk s2">Apellido y nombre${arrow("nombre")}${cfBtn("nombre")}</th><th data-k="grupo" class="sk s3 last">Grupo${arrow("grupo")}${cfBtn("grupo")}</th>
     <th data-k="p:Unidad de Negocio">UN${arrow("p:Unidad de Negocio")}${cfBtn("p:Unidad de Negocio")}</th><th data-k="p:Sector">Sector${arrow("p:Sector")}${cfBtn("p:Sector")}</th>
     <th data-k="dni">DNI${arrow("dni")}${cfBtn("dni")}</th><th class="nos">Turno${cfBtn("turno")}</th><th data-k="estado">Estado${arrow("estado")}${cfBtn("estado")}</th>
     ${S.extraCols.map(c=>`<th data-k="p:${esc(c)}">${esc(c)}${arrow("p:"+c)}${cfBtn("p:"+c)}</th>`).join("")}
-    <th class="nos nov">ID Tipo Permiso${cfBtn("code")}</th><th class="nos nov" title="Cantidad de días de la licencia, contados desde la fecha «Desde»">Ext.${cfBtn("ext")}</th><th class="nos nov" title="Inicio de la licencia. Vacío = el día de la base. Se puede poner una fecha anterior (hasta ${DESDE_MAX_ATRAS} días atrás), por ejemplo un certificado que empezó ayer.">Desde${cfBtn("desde")}</th><th class="nos nov" title="Para Día a Compensar (48) o Día Compensado (49)">Compensación${cfBtn("comp")}</th><th class="nos nov">Comentario${cfBtn("com")}</th>${showH?`<th class="nos nov" title="Solo para permisos marcados con Horas en Tipos de permiso">Hora inicio${cfBtn("hi")}</th><th class="nos nov">Hora fin${cfBtn("hf")}</th>`:""}<th class="nos nov">Asignación${cfBtn("asg")}</th></tr>`;
+    <th class="nos nov">ID Tipo Permiso${cfBtn("code")}</th><th class="nos nov" title="Cantidad de días de la licencia. Con más de 1 aparece la columna «Desde».">Ext.${cfBtn("ext")}</th>${showD?`<th class="nos nov" title="Inicio de la licencia. Vacío = el día de la base. Se puede poner una fecha anterior (hasta ${DESDE_MAX_ATRAS} días atrás), por ejemplo un certificado que empezó ayer.">Desde${cfBtn("desde")}</th>`:""}${showC?`<th class="nos nov" title="Fecha del Día a Compensar (48) o del Día Compensado (49)">Compensación${cfBtn("comp")}</th>`:""}<th class="nos nov">Comentario${cfBtn("com")}</th>${showH?`<th class="nos nov" title="Solo para permisos marcados con Horas en Tipos de permiso">Hora inicio${cfBtn("hi")}</th><th class="nos nov">Hora fin${cfBtn("hf")}</th>`:""}</tr>`;
   const html=rows.map(r=>{const n=S.nov[r.dni]||{};const p=padOf(r);
     const estado=(r.st==="fe"?`<span class="pill fe">Feriado</span>`:r.st==="de"?`<span class="pill de" title="Tiene turno Descanso en ${esc(diaTxt())}: no se cuenta como No informado. Revisá si el turno está bien asignado.">Descanso ⚠</span>`:r.st==="pe"?`<span class="pill pe">${esc(r.perm)}</span>`:r.st==="fi"?`<span class="pill fi" title="${esc(r.marks.join(" · "))}">Fichó ${esc(r.marks[0])}</span>`:`<span class="pill ni">No informado</span>`)+(n.src==="art"?`<span class="pill art" title="Cargado desde el menú ART">ART</span>`:"");
     const pv=c=>p?esc(p[c]):'<span class="miss">sin padrón</span>';
@@ -820,12 +827,11 @@ function render(){
       <td class="mono">${r.dni}</td><td class="mono">${esc(r.turno)}</td><td>${estado}</td>${extra}
       <td class="nov"><input type="text" inputmode="numeric" class="in-code" data-f="code" data-ac="codes" autocomplete="off" value="${esc(n.code||"")}" aria-label="ID Tipo Permiso"> <span class="cname">${esc(n.code?catName(n.code):"")}</span></td>
       <td class="nov"><input type="number" class="in-ext" data-f="ext" min="1" value="${esc(n.ext||1)}" aria-label="Extensión"></td>
-      <td class="nov"><input type="date" class="in-desde" data-f="desde" min="${esc(desdeMin())}" max="${esc(baseIso())}" value="${esc(desdeOk(n.desde)?n.desde:"")}" aria-label="Desde (inicio de la licencia)" title="Vacío = ${esc(baseTxt())} (el día de la base)"></td>
-      <td class="nov compc">${compCell(n)}</td>
+      ${showD?`<td class="nov">${needDesde(n)?`<input type="date" class="in-desde" data-f="desde" min="${esc(desdeMin())}" max="${esc(baseIso())}" value="${esc(desdeOk(n.desde)?n.desde:"")}" aria-label="Desde (inicio de la licencia)" title="Vacío = ${esc(baseTxt())} (el día de la base)">`:'<span class="note">—</span>'}</td>`:""}
+      ${showC?`<td class="nov compc">${compCell(n)}</td>`:""}
       <td class="nov"><input type="text" class="in-com" data-f="com" value="${esc(n.com||"")}" aria-label="Comentario"></td>
-      ${showH?hrsCells(n):""}
-      <td class="nov"><input type="text" class="in-asg" data-f="asg" value="${esc(n.asg||"")}" aria-label="Asignación"></td></tr>`}).join("");
-  $("tbody").innerHTML=html||`<tr><td colspan="${(showH?17:15)+S.extraCols.length}" class="note" style="padding:24px;text-align:center">Ningún empleado coincide con los filtros.</td></tr>`;
+      ${showH?hrsCells(n):""}</tr>`}).join("");   // la columna «Asignación» no se muestra; sigue yendo (vacía) en el Excel de exportación
+  $("tbody").innerHTML=html||`<tr><td colspan="${(showH?14:12)+(showD?1:0)+(showC?1:0)+S.extraCols.length}" class="note" style="padding:24px;text-align:center">Ningún empleado coincide con los filtros.</td></tr>`;
   const ncf=Object.keys(S.cf).length;$("cfReset").hidden=!ncf;$("cfReset").textContent=`Quitar filtros de columnas (${ncf})`;
   $("foot").textContent=(allRows.length>MAXR?`Muestro ${MAXR} de ${allRows.length} filas: usá los filtros o la búsqueda para ver el resto`:`${rows.length} filas visibles`)+(ncf?` · ${ncf} filtro${ncf>1?"s":""} de columna activo${ncf>1?"s":""}`:"")+(S.pad?"":" · cargá el padrón para ver legajo, ingreso, sector y UN")+(S.expNote?" · "+S.expNote:"");
   $("selAll").checked=rows.length>0&&rows.every(r=>S.sel.has(r.dni));
@@ -857,24 +863,30 @@ $("tbody").addEventListener("change",e=>{const tr=e.target.closest("tr[data-dni]
   if(e.target.classList.contains("sel")){e.target.checked?S.sel.add(dni):S.sel.delete(dni);updateBulk();return}});
 $("tbody").addEventListener("input",e=>{const f=e.target.dataset.f;if(!f)return;const dni=e.target.closest("tr").dataset.dni;
   const tr=e.target.closest("tr");
+  const antes={d:needDesde(S.nov[dni]),c:needComp(S.nov[dni])};   // para saber si hay que mostrar/ocultar las columnas Desde y Compensación
   const n=S.nov[dni]||(S.nov[dni]={ext:1});n[f]=e.target.type==="checkbox"?e.target.checked:e.target.value;delete n.src;
   if(f==="desde"&&!empty(n.desde)&&!desdeOk(n.desde)){   // posterior al día de la base o demasiado atrás: no se acepta
     toast(n.desde>baseIso()?`El inicio no puede ser posterior al día de la base (${baseTxt()}).`:`El inicio puede ser hasta ${DESDE_MAX_ATRAS} días antes del día de la base.`);n.desde="";e.target.value=""}
   if(f==="code"||f==="cdate"||f==="cext"){autoCom(n);const ci=tr.querySelector('[data-f="com"]');if(ci)ci.value=n.com||"";
-    if(f!=="cdate")tr.querySelector(".compc").innerHTML=compCell(n)}
+    const cc=tr.querySelector(".compc");if(cc&&f!=="cdate")cc.innerHTML=compCell(n)}
   if(f==="code"){const ok=empty(n.code)||/^-?\d+$/.test(n.code.trim())&&!!catName(n.code);e.target.classList.toggle("bad",!ok);
     const sp=e.target.parentElement.querySelector(".cname");if(sp)sp.textContent=empty(n.code)?"":(catName(n.code)||"Código no está en la lista")}
   if(Object.entries(n).every(([k,v])=>k==="desde"||empty(v)||v==1)&&empty(n.code)&&empty(n.com)&&empty(n.hi)&&empty(n.hf)&&empty(n.asg))delete S.nov[dni];
   saveNov();updateStats();
+  // Ext. mayor a 1 → aparece «Desde»; código 48/49 → aparece «Compensación» (y al revés): se vuelve a dibujar la tabla dejando el foco en el mismo casillero
+  if((f==="code"||f==="ext")&&(antes.d!==needDesde(S.nov[dni])||antes.c!==needComp(S.nov[dni]))){
+    const open=!$("acPop").hidden;render();const i=document.querySelector(`#tbody tr[data-dni="${dni}"] [data-f="${f}"]`);
+    if(i){acMute=!open;i.focus();acMute=false;try{const L=i.value.length;i.setSelectionRange(L,L)}catch(_){}}return}
   if(f==="code"){const hc=tr.querySelectorAll(".hic"),want=needH(S.nov[dni]),has=!!tr.querySelector('.hic input');
     if(want&&!S.showH){const open=!$("acPop").hidden;render();const i=document.querySelector(`#tbody tr[data-dni="${dni}"] [data-f="code"]`);if(i){acMute=!open;i.focus();acMute=false;const L=i.value.length;try{i.setSelectionRange(L,L)}catch(_){}}}
     else if(S.showH&&hc.length===2&&want!==has){const t=document.createElement("tbody");t.innerHTML=`<tr>${hrsCells(S.nov[dni])}</tr>`;const nw=t.querySelectorAll("td");hc[0].replaceWith(nw[0]);hc[1].replaceWith(nw[1])}}});
 $("bApply").addEventListener("click",()=>{const code=$("bCode").value.trim();if(!/^-?\d+$/.test(code)){toast("Escribí un ID Tipo Permiso numérico para aplicar.");return}
-  const ext=Math.max(1,parseInt($("bExt").value,10)||1),com=$("bCom").value,desde=$("bDesde").value;
+  const ext=Math.max(1,parseInt($("bExt").value,10)||1),com=$("bCom").value,desde=ext>1?$("bDesde").value:"";   // «Desde» solo cuenta con más de 1 día
   if(desde&&!desdeOk(desde)){toast(`El inicio debe ser entre ${isoTxt(desdeMin())} y ${baseTxt()} (el día de la base).`);return}
   S.sel.forEach(dni=>{const n=S.nov[dni]||(S.nov[dni]={});n.code=code;n.ext=ext;n.desde=desde;delete n.src;
     if(code===DAC&&!n.cdate)n.cext=true;autoCom(n);if(com)n.com=com});
   saveNov();toast(`Novedad ${code} aplicada a ${S.sel.size} empleados.`);S.sel.clear();render()});
+$("bExt").addEventListener("input",()=>{const m=(parseInt($("bExt").value,10)||1)>1;$("bDesde").hidden=!m;if(!m)$("bDesde").value=""});   // el «Desde» del bloque solo aparece con más de 1 día
 // Limpiar respeta los filtros de UN, sector y grupo (sin filtros: todas las del día)
 function clearTargets(){const g=S.geo?new Map(S.geo.map(r=>[r.dni,r])):new Map();
   return Object.keys(S.nov).filter(d=>{const n=S.nov[d],r=g.get(d);return n&&(!empty(n.code)||!empty(n.com))&&(!r||ddPass(r))&&(r||!ddScope())})}
