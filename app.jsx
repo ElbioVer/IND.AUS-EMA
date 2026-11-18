@@ -372,6 +372,69 @@ const ROLES = {
     tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, soloMes:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
 };
 
+// Matriz «qué puede ver y hacer cada perfil»: se arma sola a partir de ROLES (misma fuente que usa la app para mostrar u ocultar), así nunca queda desactualizada.
+const PERMISOS_TABS_LABEL = {resumen:"Resumen", resumen_gerencia:"Resumen por Gerencia", cuadro_diario:"Cuadro Diario", evolucion:"Evolución mensual", tipos:"Tipos de ausencia", cronicos:"Crónicos",
+  medicina_laboral:"Medicina Laboral", sanciones:"Sanciones", sanciones_lote:"Sanciones por lote", ranking:"Ranking (incluye Comité de ausentismo)", detalle_empleados:"Detalle Empleados", plantel:"Gestión de Plantel",
+  carga_geo:"Carga Geo", presentismo:"Presentismo diario", permisos_geo:"Permisos Geo", usuarios:"Usuarios y permisos"};
+const PERMISOS_MATRIZ = [
+  {grupo:"Menús que ve", filas:Object.keys(PERMISOS_TABS_LABEL).map(k=>({label:PERMISOS_TABS_LABEL[k], ok:p=>p.tabs.includes(k)}))},
+  {grupo:"Filtros y alcance de los datos", filas:[
+    {label:"Filtros globales: Mes, Gerencia, Departamento, Sector y Empresa", ok:p=>!!p.filtros},
+    {label:"Solo el filtro de Mes", ok:p=>!p.filtros && !!p.soloMes},
+    {label:"Elegir qué motivos cuentan para el % de ausentismo", ok:p=>!!p.filtros && !p.motivosPorDefecto},
+    {label:"Ve todas las empresas (no solo «Propios»)", ok:p=>!p.soloPropios},
+    {label:"Ve todas las Unidades de Negocio (no solo las asignadas)", ok:p=>!p.visor}]},
+  {grupo:"Cargas y configuración", filas:[
+    {label:"Actualizar los archivos de Ausentismo (Calipso) y de Plantel", ok:p=>!!p.cargar},
+    {label:"Reemplazar un archivo completo", ok:p=>!!p.reemplazar},
+    {label:"Cambiar el objetivo de ausentismo (%)", ok:p=>!!p.objetivo},
+    {label:"Gestión de Plantel completa (historial y estado de la base)", ok:p=>!!p.plantelCompleto},
+    {label:"Editar las equivalencias de «Permisos Geo»", ok:p=>!!p.esAdmin}]},
+  {grupo:"Crónicos", filas:[
+    {label:"Editar todo el caso (inicio, opinión médica, táctico, acción)", ok:p=>!!p.cronicosEditar},
+    {label:"Editar teléfono, Notificar Res. Puesto, Posible alta y observaciones", ok:p=>!!(p.cronicosEditar || p.cronicosParcial)},
+    {label:"Citar a Medicina Laboral (casilla «Citar»)", ok:p=>!!p.citar},
+    {label:"Marcar «Sancionar»", ok:p=>!!p.sancionar}]},
+  {grupo:"Medicina Laboral", filas:[
+    {label:"Atender, anotar y citar (la Dra.)", ok:p=>!!p.medicinaEditar},
+    {label:"Cargar resultados del Control Laboral Cons. Ext.", ok:p=>!!p.medicinaExt},
+    {label:"Eliminar citaciones", ok:p=>!!p.eliminarCita}]},
+  {grupo:"Sanciones", filas:[
+    {label:"Definir y emitir sanciones (PDF) — RRHH solo las marcadas", ok:p=>!!p.sancionDefinir},
+    {label:"Editar lo ya definido, quitar sanciones y borrar lotes", ok:p=>!!p.esAdmin},
+    {label:"Ver la columna «Sanción» en Detalle Empleados e informes", ok:p=>!!p.sancionar}]},
+  {grupo:"Administración", filas:[
+    {label:"Gestionar usuarios y perfiles", ok:p=>p.tabs.includes("usuarios")}]}
+];
+function PermisosMatriz(){
+  const claves = Object.keys(ROLES);
+  return (
+    <div className="card table-card">
+      <h3>Qué puede ver y hacer cada perfil (tabla)</h3>
+      <div className="caption">✓ = permitido · — = no permitido. Se arma sola con la configuración de perfiles de la app. Para cambiar lo que puede hacer un perfil hay que modificar la app (y las reglas del servidor); desde acá solo se elige el perfil de cada usuario.</div>
+      <div className="overflow-x">
+        <table>
+          <thead><tr><th>Acción / menú</th>{claves.map(k=>(<th key={k} style={{textAlign:"center"}}>{ROLES[k].label}</th>))}</tr></thead>
+          <tbody>
+            {PERMISOS_MATRIZ.map(g=>(
+              <React.Fragment key={g.grupo}>
+                <tr><td colSpan={claves.length+1} style={{background:"rgba(127,127,127,.14)", fontWeight:700}}>{g.grupo}</td></tr>
+                {g.filas.map(f=>(
+                  <tr key={f.label}>
+                    <td>{f.label}</td>
+                    {claves.map(k=>(<td key={k} style={{textAlign:"center"}}>{f.ok(ROLES[k]) ? <span style={{color:"var(--good)", fontWeight:800, fontSize:16}} title="Permitido">✓</span> : <span style={{color:"var(--muted)"}} title="No permitido">—</span>}</td>))}
+                  </tr>
+                ))}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="hint" style={{margin:0}}>Notas: en <b>Carga Geo</b> además hace falta tener un rol dentro de la propia Carga Geo (el Administrador se lo asigna a RRHH). El perfil <b>Visor</b> solo ve las Unidades de Negocio que le asigna el Administrador. El <b>Servicio médico</b> ve solo la empresa Propios.</p>
+    </div>
+  );
+}
+
 function RoleGate({userId, userEmail, onSignOut}){
   const [perfil, setPerfil] = useState(undefined); // undefined=cargando | {rol} | {rol,legacy} | null=sin perfil | {error}
   const load = useCallback(async ()=>{
@@ -501,6 +564,7 @@ function UsuariosTab({userId, unidadesDisponibles}){
         {msg && <p className="hint" style={{margin:0}}>{msg}</p>}
         <p className="hint" style={{margin:0}}>Para dar de alta a una persona nueva: en Supabase → Authentication → Users → Add user. Entra con el perfil <b>Gerencias</b> (el más acotado) y desde acá se lo cambiás.</p>
       </div>
+      <PermisosMatriz />
       <div className="card table-card">
         <h3>Qué puede hacer cada perfil</h3>
         <div className="overflow-x">
