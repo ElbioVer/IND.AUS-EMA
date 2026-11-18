@@ -368,8 +368,8 @@ const ROLES = {
   // Visor: solo mira, y solo la(s) Unidad(es) de Negocio que le asigna el Administrador (tabla perfiles, columna `unidades`).
   visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Evolución mensual, Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
     tabs:["resumen","cuadro_diario","evolucion","ranking","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
-  gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, sin filtros), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
-    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
+  gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, con el filtro de Mes), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
+    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, soloMes:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
 };
 
 function RoleGate({userId, userEmail, onSignOut}){
@@ -9192,6 +9192,11 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
             </div>
           )}
 
+          {!perms.filtros && perms.soloMes && (
+            <div className="filters-bar no-print">
+              <MultiSelect label="Mes" options={mesOptions} selected={FILTERS.mes} onChange={v=>setFilterDim("mes",v)} allLabel="Todos los meses" />
+            </div>
+          )}
           {perms.filtros && (
             <React.Fragment>
               <div className="filters-bar no-print">
