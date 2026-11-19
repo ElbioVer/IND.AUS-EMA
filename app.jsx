@@ -361,15 +361,15 @@ const ROLES = {
     tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
   rrhh: {label:"RRHH", desc:"Actualiza la base de ausentismo y el plantel (sin reemplazar ni borrar). Lee todos los menús con sus filtros; imprime Detalle de empleados y Crónicos. En Crónicos actualiza teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución, cita a Medicina Laboral (Consulta Médica Planta o Control Laboral Cons. Ext.) y marca «Sancionar»; en Sanciones define e imprime (sin editar lo definido ni quitar); en Medicina Laboral ve la ficha, busca y carga los resultados del Control Laboral Cons. Ext. Gestión de Plantel solo con la carga.",
     tabs:TABS_DE_ANALISIS, filtros:true, cargar:true, reemplazar:false, objetivo:true, cronicosEditar:false, cronicosParcial:true, plantelCompleto:false, medicinaEditar:false, medicinaExt:true, citar:true, sancionar:true, sancionDefinir:true},
-  medico: {label:"Servicio médico", desc:"Medicina Laboral (atiende, anota, cita e imprime el reporte de la jornada), Crónicos (editable), Ranking y Detalle de empleados, con sus filtros e impresión. Ve solo la empresa Propios y los motivos por defecto.",
-    tabs:["medicina_laboral","cronicos","ranking","detalle_empleados"], filtros:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:true, plantelCompleto:false, medicinaEditar:true, medicinaExt:true, citar:true,
+  medico: {label:"Servicio médico", desc:"Medicina Laboral (atiende, anota, cita e imprime el reporte de la jornada), Crónicos (solo lectura; solo edita el teléfono de contacto) y Detalle de empleados, con impresión. Sin filtros globales ni Ranking. Ve solo la empresa Propios y los motivos por defecto.",
+    tabs:["medicina_laboral","cronicos","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, cronicosSoloTelefono:true, plantelCompleto:false, medicinaEditar:true, medicinaExt:true, citar:true,
     // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
     soloPropios:true, motivosPorDefecto:true},
   // Visor: solo mira, y solo la(s) Unidad(es) de Negocio que le asigna el Administrador (tabla perfiles, columna `unidades`).
   visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Evolución mensual, Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
     tabs:["resumen","cuadro_diario","evolucion","ranking","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
-  gerencias: {label:"Gerencias", desc:"Resumen (gráficos y detalles, con el filtro de Mes), Resumen por Gerencia (gráfico y cumplimiento del objetivo), Cuadro Diario, Evolución mensual y Tipos de ausencia (AP vs ANP y Motivo).",
-    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos"], filtros:false, soloMes:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
+  gerencias: {label:"Gerencias", desc:"Resumen, Resumen por Gerencia, Cuadro Diario, Evolución mensual, Tipos de ausencia, Ranking, Detalle de empleados y Crónicos, con los filtros globales (Mes, Gerencia, Departamento, Sector, Empresa y motivos). Solo lectura. En Crónicos ven el listado de casos con opinión médica (diagnóstico), táctico, posible alta y notificar, sin observaciones, acciones, citaciones, teléfono ni sanciones; en Detalle de empleados no ven el historial de Crónicos.",
+    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","ranking","detalle_empleados"], filtros:true, sinCronicos:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
 };
 
 // Matriz «qué puede ver y hacer cada perfil»: se arma sola a partir de ROLES (misma fuente que usa la app para mostrar u ocultar), así nunca queda desactualizada.
@@ -392,7 +392,10 @@ const PERMISOS_MATRIZ = [
     {label:"Editar las equivalencias de «Permisos Geo»", ok:p=>!!p.esAdmin}]},
   {grupo:"Crónicos", filas:[
     {label:"Editar todo el caso (inicio, opinión médica, táctico, acción)", ok:p=>!!p.cronicosEditar},
-    {label:"Editar teléfono, Notificar Res. Puesto, Posible alta y observaciones", ok:p=>!!(p.cronicosEditar || p.cronicosParcial)},
+    {label:"Editar Notificar Res. Puesto, Posible alta y observaciones", ok:p=>!!(p.cronicosEditar || p.cronicosParcial)},
+    {label:"Editar el teléfono de contacto", ok:p=>!!(p.cronicosEditar || p.cronicosParcial || p.cronicosSoloTelefono)},
+    {label:"Ver los casos con los datos médicos (opinión, observaciones, acciones, citaciones)", ok:p=>p.tabs.includes("cronicos") && !p.sinCronicos},
+    {label:"Ver Crónicos solo lectura: opinión médica, táctico, posible alta y notificar (sin observaciones, acciones, citaciones ni teléfono)", ok:p=>p.tabs.includes("cronicos") && !!p.sinCronicos},
     {label:"Citar a Medicina Laboral (casilla «Citar»)", ok:p=>!!p.citar},
     {label:"Marcar «Sancionar»", ok:p=>!!p.sancionar}]},
   {grupo:"Medicina Laboral", filas:[
@@ -3346,7 +3349,7 @@ const ANUAL_GRID_CSS = `
 .ygrid-leg span{display:inline-flex;align-items:center;gap:6px;}
 .ygrid-leg i{display:inline-block;width:20px;height:14px;border:1px solid #777;}
 `;
-function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones, soloFicha}){
+function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSanciones, soloFicha, sinCronicos}){
   // soloFicha (Visor): solo la ficha del empleado, el calendario anual y el detalle (sin gráfico, sin historial de Crónicos ni nada de Medicina Laboral)
   const employeeOptions = useMemo(()=>{
     const map = new Map();
@@ -3370,6 +3373,8 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
   const [periodoVal, setPeriodoVal] = useKeptState("de.periodo", "todos");
   const [customMonths, setCustomMonths] = useKeptState("de.meses", () => new Set([1,2,3,4,5,6,7,8,9,10,11,12]));
   const [conCronicos, setConCronicos] = useKeptState("de.conCronicos", false);
+  // el historial de Crónicos (datos de salud) solo lo ven quienes tienen acceso a Crónicos: no el Visor (soloFicha) ni Gerencias (sinCronicos)
+  const verCron = !soloFicha && !sinCronicos;
   const [agrupar, setAgrupar] = useKeptState("de.agrupar", true);   // días seguidos con el mismo motivo -> un renglón con inicio y fin
   const [anioSel, setAnioSel] = useKeptState("de.anio", () => availableYearsAll.length ? availableYearsAll[availableYearsAll.length-1] : null);
   const motivosSig = parsed.idMotivoUniverse.map(m=>m.key).join(",");
@@ -3586,7 +3591,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
   // muestra al final de la hoja; ese mismo bloque (`de-print-block`) es el que sale en la impresión, sin volver a leerlo.
   const [cronHist, setCronHist] = useState({key:"", estado:"idle", html:"", error:""});
   const [cronHistReload, setCronHistReload] = useState(0);
-  const cronHistKey = (conCronicos && !soloFicha && legajoSel) ? String(legajoSel)+"|"+cronHistReload : "";
+  const cronHistKey = (conCronicos && verCron && legajoSel) ? String(legajoSel)+"|"+cronHistReload : "";
   useEffect(()=>{
     if(!cronHistKey){ setCronHist(h=> h.estado==="idle" ? h : {key:"", estado:"idle", html:"", error:""}); return; }
     let vivo = true;
@@ -3634,7 +3639,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
       alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo.");
       return;
     }
-    if(conCronicos && !soloFicha && !yaIncluido){
+    if(conCronicos && verCron && !yaIncluido){
       win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Detalle Empleados</title></head><body style="font-family:Arial,sans-serif;margin:24px">Preparando el historial de Crónicos…</body></html>');
       try{
         html += "\n" + await historialCronicosHtml();
@@ -3681,7 +3686,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
           <input type="checkbox" checked={agrupar} onChange={e=>setAgrupar(e.target.checked)} />
           Agrupar días consecutivos (inicio y fin)
         </label>
-        {!soloFicha && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Muestra al final de la hoja (en pantalla y al imprimir) lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
+        {verCron && <label className="motivo-check" style={{alignSelf:"flex-end", paddingBottom:8}} title="Muestra al final de la hoja (en pantalla y al imprimir) lo registrado en Crónicos (observaciones y acciones) durante los últimos 12 meses">
           <input type="checkbox" checked={conCronicos} onChange={e=>setConCronicos(e.target.checked)} />
           Incluir historial de Crónicos (últimos 12 meses)
         </label>}
@@ -3857,7 +3862,7 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
         )}
       </div>
 
-      {conCronicos && !soloFicha && (
+      {conCronicos && verCron && (
         cronHistListo ? (
           <div>
             <div className="no-print" style={{display:"flex", justifyContent:"flex-end", marginBottom:6}}>
@@ -4549,7 +4554,11 @@ function ObservacionesHistory({c, field, labelCol, editingObs, setEditingObs, on
     </table>
   );
 }
-function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar, parcial, esAdmin}){
+// «Motivo - Razón» sin la razón (texto libre del ausentismo): para quien ve Crónicos solo como listado
+function motivoSinRazon(c){ const l = c.motivoLabel||"", r = c.razon ? " - "+c.razon : ""; return r && l.endsWith(r) ? l.slice(0, l.length-r.length) : l; }
+// Columnas que ve quien mira Crónicos solo como listado (Gerencias): nada de datos de salud ni de lo guardado por Medicina (todo eso lo bloquea además el servidor)
+const CRONICO_COLUMNAS_LISTADO = new Set(["legajo","nombre","grupo","sindicato","gerencia","codpla","tipo","inicio","dias","motivo","fechaIngreso","notificar","opinionMedica","tactoEmpleado","posibleAlta"]);
+function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFijos, puedeCitar, puedeSancionar, parcial, esAdmin, soloTelefono, soloListado}){
   const [dbReady, setDbReady] = useState(false);
   // Filtro de motivos: cada vez que se abre la app arranca en "Por defecto". Los cambios (ej. sumar VAC) son de esta pantalla:
   // se conservan mientras se navega entre menús, pero no se guardan en el servidor ni cambian lo que ven los demás.
@@ -4573,6 +4582,10 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   // RRHH (`parcial`) solo modifica: teléfono de contacto, Notificar Res. Puesto, Posible alta y Observación / Evolución (lo demás queda bloqueado)
   const puedeGuardar = puedeEditar || !!parcial;
   const lockedP = !dbReady || !puedeGuardar;
+  // Servicio médico (`soloTelefono`): Crónicos en solo lectura, pero el teléfono de contacto se sigue pudiendo editar
+  const puedeTel = puedeGuardar || !!soloTelefono;
+  const lockedTel = !dbReady || !puedeTel;
+  const puedeMedico = puedeEditar || !!soloTelefono;   // la Dra.: carga sola la «Razón» de salud y puede anular citas que ella hizo
   const permisosEntrada = {admin: !!esAdmin, soloPropias: !puedeEditar && !!parcial};
   const [citaElegir, setCitaElegir] = useState(null);   // caso para el que se está eligiendo el tipo de control al citar
   const aliveRef = useRef(true);
@@ -4592,6 +4605,20 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
 
   // Lee de Supabase todos los casos (lo guardado por cualquier usuario) y las citaciones a Medicina Laboral.
   async function loadFromServer(){
+    if(soloListado){
+      // Gerencias: el servidor NO les deja leer la tabla de Crónicos (tiene observaciones, acciones y teléfono). Leen solo opinión médica, táctico,
+      // posible alta, notificar, tipo e inicio por la función cronicos_resumen() (supabase-migracion-cronicos-gerencias.sql).
+      const {data:res, error:resErr} = await supabaseClient.rpc("cronicos_resumen");
+      if(!aliveRef.current) return;
+      if(resErr){
+        setSaveStatus(/cronicos_resumen|PGRST202|42883|schema cache/i.test((resErr.message||"")+" "+(resErr.code||"")) ? "Opinión médica, táctico, posible alta y notificar todavía no están disponibles (falta correr supabase-migracion-cronicos-gerencias.sql en Supabase)" : "Error al leer Supabase: "+resErr.message);
+        return false;
+      }
+      const m = new Map();
+      (res||[]).forEach(row=> m.set(row.id, casoRowToManual(row)));
+      manualRef.current = m; setCasesManual(m);
+      return true;
+    }
     const {data:casos, error:casosErr} = await supabaseClient.from(CRONICOS_CASOS_TABLE).select("*");
     if(!aliveRef.current) return;
     if(casosErr){ setSaveStatus("Error al leer Supabase: "+casosErr.message); return false; }
@@ -4661,7 +4688,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
     injustificadas.forEach(ct=>{ const k = String(ct.legajo).toUpperCase(); if(!m.has(k)) m.set(k, ct); });
     return m;
   }, [injustificadas]);
-  const columnasVisibles = CRONICO_COLUMNS.filter(c=>(puedeSancionar || c.key!=="sancion") && (colsExtra || !c.extra));
+  const columnasVisibles = CRONICO_COLUMNS.filter(c=>(puedeSancionar || c.key!=="sancion") && (colsExtra || !c.extra) && (!soloListado || CRONICO_COLUMNAS_LISTADO.has(c.key)));
   const nCols = columnasVisibles.length;
   // Marcar con una tilde a quien corresponde sancionar por ausencias injustificadas (RRHH y Administrador). Queda "marcada" y figura en el menú
   // Sanciones, donde el Administrador define el tipo de sanción y emite la nota. Las fechas de las ausencias salen del caso (si son más de 10, solo la última;
@@ -4821,7 +4848,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   // seguidos del mismo caso se hacen uno después del otro. `patch` es un objeto, o una función
   // (estadoActual) => objeto cuando el cambio depende de lo que ya hay (agregar/editar/borrar observaciones).
   function saveCase(caseObj, patch){
-    if(!puedeGuardar) return;
+    if(!puedeTel) return;
     const run = async ()=>{
       setSaveStatus("Guardando...");
       let m;
@@ -4842,6 +4869,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   }
 
   function commitField(caseObj, field, value){
+    if(!puedeGuardar && field!=="telefonoContacto") return;   // el Servicio médico solo guarda el teléfono
     saveCase(caseObj, {[field]: value});
   }
 
@@ -4903,7 +4931,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
   // Ausencias por motivos de salud (AT, ET, EN, CAE...): la "Razón" que viene en el ausentismo se carga sola, una única vez,
   // como primera información del historial del caso (Observación / Evolución). Solo la hace quien puede editar.
   useEffect(()=>{
-    if(!puedeEditar || !dbReady) return;
+    if(!puedeMedico || !dbReady) return;
     casesFull.forEach(c=>{
       if(!c.razon || !CRONICOS_CODIGOS_SALUD.has(c.codpla)) return;
       if(c.razonSembrada || c.observaciones.length) return;
@@ -4917,7 +4945,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
         };
       });
     });
-  }, [casesFull, dbReady, puedeEditar]);
+  }, [casesFull, dbReady, puedeMedico]);
 
   function handlePrint(){
     // Hoja horizontal. La Acción y la Última observación van en una línea propia debajo de cada caso, usando TODO el ancho de la hoja
@@ -5086,11 +5114,12 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
             </select>
             <MultiSelect label="Unidad de negocio" options={unidadOptions} selected={unidadSel} onChange={setUnidadSel} allLabel="Todas las unidades" />
             <button type="button" className="btn secondary" onClick={()=>setColsExtra(v=>!v)} aria-expanded={colsExtra} title="Muestra u oculta juntas las columnas Grupo, Codpla y Notificar Res. Puesto">{colsExtra ? "[−] Ocultar Grupo · Codpla · Notif. Res. Puesto" : "[+] Mostrar Grupo · Codpla · Notif. Res. Puesto"}</button>
-            <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>
-            <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>
+            {!soloListado && <button type="button" className="btn secondary print-btn" onClick={handlePrint}>Imprimir</button>}
+            {!soloListado && <button type="button" className="btn secondary" onClick={()=>printHistoria(sorted)} disabled={!sorted.length}>Historias clínicas ({sorted.length})</button>}
             <button type="button" className="btn secondary" title="Vuelve a leer del servidor lo que guardaron los demás usuarios" onClick={refreshFromServer} disabled={!dbReady}>Actualizar datos</button>
             <span className="hint">{filtered.length} de {casesFull.length} casos activos y vigentes{saveStatus?" · "+saveStatus:""}</span>
           </div>
+          {soloListado && <div className="hint" style={{marginTop:6}}>Vista de solo lectura: se ve el listado de casos con la opinión médica (diagnóstico), el táctico, la posible alta y la fecha de notificar. Las observaciones, acciones, citaciones, teléfono y sanciones no están disponibles para este perfil.</div>}
           <TopScrollSync targetRef={scrollRef} />
           <StickyTableHead targetRef={scrollRef} columns={columnasVisibles} sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <div className="overflow-x" ref={scrollRef}>
@@ -5111,18 +5140,18 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                     <tr className={notifStatus ? "cronico-row-"+notifStatus : undefined}>
                       <td className="fz fz1" style={{width:CRONICO_FZ_W, minWidth:CRONICO_FZ_W, maxWidth:CRONICO_FZ_W}}>{c.legajo}</td>
                       <td className="fz fz2" style={{fontWeight:600}}><div style={{maxWidth:132, overflowWrap:"anywhere"}}>{c.nombre||"—"}</div></td>
-                      <td>
-                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={lockedP}
+                      {!soloListado && <td>
+                        <input key={c.id+"-tel-"+(c.telefonoContacto||"")} type="tel" data-case={c.id} data-field="telefonoContacto" defaultValue={c.telefonoContacto} placeholder="Sin teléfono" disabled={lockedTel}
                           onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                           onBlur={e=>{ const v = e.target.value.trim(); if(v!==(c.telefonoContacto||"")) commitField(c,"telefonoContacto", v); }}
                           style={{width:122, fontSize:12.5, padding:"5px 6px"}} />
                         {c.telefonoEditado && (
-                          <div className="hint" style={puedeGuardar ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeGuardar ? ()=>commitField(c,"telefonoContacto","") : undefined}
+                          <div className="hint" style={puedeTel ? {cursor:"pointer", marginTop:2} : {marginTop:2}} onClick={puedeTel ? ()=>commitField(c,"telefonoContacto","") : undefined}
                             title={c.telefonoPlantel ? "Celular del plantel: "+c.telefonoPlantel : "El plantel no tiene celular cargado"}>
-                            {puedeGuardar ? "distinto al plantel · restablecer" : "distinto al plantel"}
+                            {puedeTel ? "distinto al plantel · restablecer" : "distinto al plantel"}
                           </div>
                         )}
-                      </td>
+                      </td>}
                       {colsExtra && <td><div style={{maxWidth:82, overflowWrap:"anywhere"}}>{c.grupo||"—"}</div></td>}
                       <td>{c.sindicato||"—"}</td>
                       <td>{c.gerencia||"—"}</td>
@@ -5139,7 +5168,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         )}
                       </td>
                       <td className="num">{fmt(cronicoDias(c.inicioTs))}</td>
-                      <td><div style={{maxWidth:162, overflowWrap:"anywhere"}}>{motivoSinCodigo(c.motivoLabel)||"—"}</div></td>
+                      <td><div style={{maxWidth:162, overflowWrap:"anywhere"}}>{motivoSinCodigo(soloListado ? motivoSinRazon(c) : c.motivoLabel)||"—"}</div></td>
                       <td>{c.fechaIngresoTs!=null ? fmtDateFromTs(c.fechaIngresoTs) : "—"}</td>
                       {colsExtra && <td>
                         <input key={c.id+"-notif-"+(c.notificar||"")} type="date" data-case={c.id} data-field="notificar" defaultValue={c.notificar||""} disabled={lockedP}
@@ -5152,6 +5181,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         onChange={e=>fechaDMAOnInput(e.target)}
                         onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
                         onBlur={e=>{ clearTimeout(e.target._autoYear); commitPosibleAlta(c, e.target); }} disabled={lockedP} /></td>
+                      {!soloListado && <React.Fragment>
                       <td style={{minWidth:200}}>
                         {c.observaciones.length>0 && (
                           <div className="hint" style={{cursor:"pointer", marginBottom:4}} onClick={()=>setExpandedId(expandedId===c.id?null:c.id)}>
@@ -5203,7 +5233,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         ) : c.cita ? (
                           <div>
                           <label style={{cursor:puedeCitar?"pointer":"default", display:"flex", gap:6, alignItems:"center"}} title={"Citado "+(c.cita.origen==="medicina"?"por la Dra.":"desde Crónicos")+" — destildar para anular"}>
-                            <input type="checkbox" checked onChange={()=>anularCita(c)} disabled={!puedeCitar || citaBusy===c.id || (c.cita.origen==="medicina" && !puedeEditar)} />
+                            <input type="checkbox" checked onChange={()=>anularCita(c)} disabled={!puedeCitar || citaBusy===c.id || (c.cita.origen==="medicina" && !puedeMedico)} />
                             <span style={{fontWeight:700}}>Citado {dateKeyToLabel(c.cita.fecha).slice(0,5)}{c.cita.tipoControl ? " · "+TIPOS_CONTROL[c.cita.tipoControl].corto : ""}</span>
                           </label>
                           {(c.cita.hora || c.cita.modalidad==="telefonica" || (c.cita.tipoControl==="externa" && c.cita.centro)) && <div className="hint" style={{marginTop:2, fontWeight:700}}>{[c.cita.tipoControl==="externa" && c.cita.centro ? c.cita.centro : "", c.cita.hora ? c.cita.hora+" hs" : "", c.cita.modalidad==="telefonica" ? modalidadCorto("telefonica") : ""].filter(Boolean).join(" · ")}</div>}
@@ -5215,6 +5245,7 @@ function CronicosTab({parsed, plantel, idMotivoUniverse, puedeEditar, motivosFij
                         ) : "—"}
                         {puedeCitar && c.cita && citaElegir!==c.id && <div style={{marginTop:2}}><button type="button" className="cell-link" onClick={()=>{ setCitaForm(f=>({...f, fecha:fechaCita, hora:""})); setCitaElegir(c.id); }}>+ citar otra fecha</button></div>}
                       </td>
+                      </React.Fragment>}
                       {puedeSancionar && (
                         <td style={{whiteSpace:"nowrap", fontSize:12.5}}>
                           {c.sancionReg && c.sancionReg.estado!=="marcada" ? (
@@ -9320,9 +9351,9 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} soloRanking={!!perms.visor} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
-          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} />}
+          {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} sinCronicos={!!perms.sinCronicos} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
-          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} />}
+          {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} soloTelefono={!!perms.cronicosSoloTelefono} soloListado={!!perms.sinCronicos} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
