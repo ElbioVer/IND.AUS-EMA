@@ -61,6 +61,14 @@ input:focus-visible,select:focus-visible,button:focus-visible,.drop:focus-visibl
 .bulk b{font-variant-numeric:tabular-nums}
 .bsep{width:1px;align-self:stretch;background:var(--accent);opacity:.4;margin:0 4px}
 .tablebox{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:auto;max-height:70vh}
+/* Novedades del día: barra de desplazamiento lateral también ARRIBA, dentro del mismo cuadro (se sincroniza con la de abajo) */
+.tablewrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.tablewrap>.tablebox{border:0;border-radius:0}
+.topscroll{overflow-x:auto;overflow-y:hidden;height:16px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+.topscroll>div{height:1px}
+/* Columnas angostas: Turno, fechas del padrón, ID Tipo Permiso y Desde */
+th.nar{white-space:normal;line-height:1.15;max-width:96px}
+td.nar{white-space:normal;max-width:104px;padding-left:6px;padding-right:6px;font-size:11.5px;line-height:1.2}
 table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
 th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap}
 th{position:sticky;top:0;background:var(--surface-2);z-index:2;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);cursor:pointer;user-select:none}
@@ -119,7 +127,8 @@ td.wrapc{white-space:normal;min-width:160px;max-width:260px}
 .dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .miss{color:var(--bad);font-size:.78rem}
 td input{padding:4px 6px}
-.in-code{width:78px}.in-ext{width:56px}.in-desde{width:136px}.in-com{width:200px}.in-asg{width:110px}
+.in-code{width:62px}.in-ext{width:56px}.in-desde{width:114px;font-size:12px;padding:3px 4px}.in-com{width:200px}.in-asg{width:110px}
+td.nov .cname{max-width:96px;white-space:nowrap}
 .in-code.bad{border-color:var(--bad)}
 /* Lista de códigos: una línea por código */
 .acpop{position:fixed;z-index:40;min-width:260px;max-width:min(380px,calc(100vw - 32px));max-height:260px;overflow:auto;background:var(--surface);border:1px solid var(--accent);border-radius:6px;box-shadow:0 12px 32px rgba(0,0,0,.25);padding:4px 0}
@@ -450,6 +459,8 @@ table.pres td.zero{color:var(--muted)}
     <button class="btn" id="bXls" title="Descarga un Excel con los seleccionados">Excel de seleccionados</button>
   </section>
 
+  <div class="tablewrap" id="twrap">
+  <div class="topscroll" id="topScroll" hidden aria-hidden="true"><div id="topIn"></div></div>
   <div class="tablebox" id="tbox">
     <div class="empty" id="empty">
       <b>Todavía no hay datos del día</b>
@@ -461,6 +472,7 @@ table.pres td.zero{color:var(--muted)}
       </ol>
     </div>
     <table id="tbl" hidden><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+  </div>
   </div>
   <div class="footrow"><p class="note" id="foot"></p><button type="button" class="linkdanger" id="btnClearNov" disabled>Limpiar novedades del día</button></div>
   <dialog id="clrDlg" class="dlg" aria-labelledby="clrT">
@@ -702,6 +714,7 @@ Object.keys(DD).forEach(k=>{const d=DD[k],el=ddEl(k),body=el.querySelector(".gdd
 document.addEventListener("click",e=>{const path=e.composedPath();if(!Object.keys(DD).some(k=>path.includes(ddEl(k))))openDD(null,false)});
 document.addEventListener("keydown",e=>{if(e.key!=="Escape")return;const k=Object.keys(DD).find(k=>!ddEl(k).querySelector(".gdd-panel").hidden);if(k){openDD(k,false);ddEl(k).querySelector(".gdd-btn").focus()}});
 
+const NAR_COLS=new Set(["Fecha de Ingreso","Fecha fin contrato"]);   // columnas del padrón que se muestran angostas (fechas)
 // Filtros por columna: S.cf[clave] = Set de valores permitidos ("" = vacías). Sin clave = todo.
 S.cf={};let cfOpen=null;
 const CF_LAB={"p:Legajo":"Legajo",nombre:"Apellido y nombre",grupo:"Grupo","p:Unidad de Negocio":"UN","p:Sector":"Sector",dni:"DNI",turno:"Turno",estado:"Estado",code:"ID Tipo Permiso",ext:"Ext.",desde:"Desde",comp:"Compensación",com:"Comentario",hi:"Hora inicio",hf:"Hora fin",asg:"Asignación"};
@@ -801,7 +814,7 @@ const ST_LABEL={ni:"No informado",fi:"Con fichada",pe:"Con permiso"};
 function render(){
   const has=!!S.geo;$("tbl").hidden=!has;$("empty").hidden=has;
   updateStats();
-  if(!has)return;
+  if(!has){syncTopScroll();return}
   const arrow=k=>S.sortKey===k?(S.sortDir>0?" ▲":" ▼"):"";
   // Tope de filas dibujadas para que la página no se trabe; el resto se alcanza con filtros o búsqueda
   const allRows=visibleRows(),MAXR=1200,rows=allRows.slice(0,MAXR);
@@ -814,18 +827,18 @@ function render(){
   $("thead").innerHTML=`<tr><th class="nos sk s0"><input type="checkbox" id="selAll" aria-label="Seleccionar todos"></th>
     <th data-k="p:Legajo" class="sk s1">Legajo${arrow("p:Legajo")}${cfBtn("p:Legajo")}</th><th data-k="nombre" class="sk s2">Apellido y nombre${arrow("nombre")}${cfBtn("nombre")}</th><th data-k="grupo" class="sk s3 last">Grupo${arrow("grupo")}${cfBtn("grupo")}</th>
     <th data-k="p:Unidad de Negocio">UN${arrow("p:Unidad de Negocio")}${cfBtn("p:Unidad de Negocio")}</th><th data-k="p:Sector">Sector${arrow("p:Sector")}${cfBtn("p:Sector")}</th>
-    <th data-k="dni">DNI${arrow("dni")}${cfBtn("dni")}</th><th class="nos">Turno${cfBtn("turno")}</th><th data-k="estado">Estado${arrow("estado")}${cfBtn("estado")}</th>
-    ${S.extraCols.map(c=>`<th data-k="p:${esc(c)}">${esc(c)}${arrow("p:"+c)}${cfBtn("p:"+c)}</th>`).join("")}
-    <th class="nos nov">ID Tipo Permiso${cfBtn("code")}</th><th class="nos nov" title="Cantidad de días de la licencia. Con más de 1 aparece la columna «Desde».">Ext.${cfBtn("ext")}</th>${showD?`<th class="nos nov" title="Inicio de la licencia. Vacío = el día de la base. Se puede poner una fecha anterior (hasta ${DESDE_MAX_ATRAS} días atrás), por ejemplo un certificado que empezó ayer.">Desde${cfBtn("desde")}</th>`:""}${showC?`<th class="nos nov" title="Fecha del Día a Compensar (48) o del Día Compensado (49)">Compensación${cfBtn("comp")}</th>`:""}<th class="nos nov">Comentario${cfBtn("com")}</th>${showH?`<th class="nos nov" title="Solo para permisos marcados con Horas en Tipos de permiso">Hora inicio${cfBtn("hi")}</th><th class="nos nov">Hora fin${cfBtn("hf")}</th>`:""}</tr>`;
+    <th data-k="dni">DNI${arrow("dni")}${cfBtn("dni")}</th><th class="nos nar">Turno${cfBtn("turno")}</th><th data-k="estado">Estado${arrow("estado")}${cfBtn("estado")}</th>
+    ${S.extraCols.map(c=>`<th data-k="p:${esc(c)}"${NAR_COLS.has(c)?' class="nar"':''}>${esc(c)}${arrow("p:"+c)}${cfBtn("p:"+c)}</th>`).join("")}
+    <th class="nos nov nar">ID Tipo Permiso${cfBtn("code")}</th><th class="nos nov" title="Cantidad de días de la licencia. Con más de 1 aparece la columna «Desde».">Ext.${cfBtn("ext")}</th>${showD?`<th class="nos nov nar" title="Inicio de la licencia. Vacío = el día de la base. Se puede poner una fecha anterior (hasta ${DESDE_MAX_ATRAS} días atrás), por ejemplo un certificado que empezó ayer.">Desde${cfBtn("desde")}</th>`:""}${showC?`<th class="nos nov" title="Fecha del Día a Compensar (48) o del Día Compensado (49)">Compensación${cfBtn("comp")}</th>`:""}<th class="nos nov">Comentario${cfBtn("com")}</th>${showH?`<th class="nos nov" title="Solo para permisos marcados con Horas en Tipos de permiso">Hora inicio${cfBtn("hi")}</th><th class="nos nov">Hora fin${cfBtn("hf")}</th>`:""}</tr>`;
   const html=rows.map(r=>{const n=S.nov[r.dni]||{};const p=padOf(r);
     const estado=(r.st==="fe"?`<span class="pill fe">Feriado</span>`:r.st==="de"?`<span class="pill de" title="Tiene turno Descanso en ${esc(diaTxt())}: no se cuenta como No informado. Revisá si el turno está bien asignado.">Descanso ⚠</span>`:r.st==="pe"?`<span class="pill pe">${esc(r.perm)}</span>`:r.st==="fi"?`<span class="pill fi" title="${esc(r.marks.join(" · "))}">Fichó ${esc(r.marks[0])}</span>`:`<span class="pill ni">No informado</span>`)+(n.src==="art"?`<span class="pill art" title="Cargado desde el menú ART">ART</span>`:"");
     const pv=c=>p?esc(p[c]):'<span class="miss">sin padrón</span>';
-    const extra=S.extraCols.map(c=>`<td>${pv(c)}</td>`).join("");
+    const extra=S.extraCols.map(c=>`<td${NAR_COLS.has(c)?' class="nar"':''}>${pv(c)}</td>`).join("");
     return `<tr data-dni="${r.dni}"><td class="sk s0"><input type="checkbox" class="sel"${S.sel.has(r.dni)?" checked":""} aria-label="Seleccionar ${esc(r.ape)}"></td>
       <td class="sk s1 mono">${pv("Legajo")}</td><td class="sk s2 name">${esc(r.ape)}, ${esc(r.nom)}</td><td class="sk s3 last">${esc(r.grupo)}</td>
       <td class="wrapc">${pv("Unidad de Negocio")}</td><td class="wrapc">${pv("Sector")}</td>
-      <td class="mono">${r.dni}</td><td class="mono">${esc(r.turno)}</td><td>${estado}</td>${extra}
-      <td class="nov"><input type="text" inputmode="numeric" class="in-code" data-f="code" data-ac="codes" autocomplete="off" value="${esc(n.code||"")}" aria-label="ID Tipo Permiso"> <span class="cname">${esc(n.code?catName(n.code):"")}</span></td>
+      <td class="mono">${r.dni}</td><td class="mono nar">${esc(r.turno)}</td><td>${estado}</td>${extra}
+      <td class="nov"><input type="text" inputmode="numeric" class="in-code" data-f="code" data-ac="codes" autocomplete="off" value="${esc(n.code||"")}" aria-label="ID Tipo Permiso"> <span class="cname" title="${esc(n.code?catName(n.code):"")}">${esc(n.code?catName(n.code):"")}</span></td>
       <td class="nov"><input type="number" class="in-ext" data-f="ext" min="1" value="${esc(n.ext||1)}" aria-label="Extensión"></td>
       ${showD?`<td class="nov">${needDesde(n)?`<input type="date" class="in-desde" data-f="desde" min="${esc(desdeMin())}" max="${esc(baseIso())}" value="${esc(desdeOk(n.desde)?n.desde:"")}" aria-label="Desde (inicio de la licencia)" title="Vacío = ${esc(baseTxt())} (el día de la base)">`:'<span class="note">—</span>'}</td>`:""}
       ${showC?`<td class="nov compc">${compCell(n)}</td>`:""}
@@ -836,7 +849,7 @@ function render(){
   $("foot").textContent=(allRows.length>MAXR?`Muestro ${MAXR} de ${allRows.length} filas: usá los filtros o la búsqueda para ver el resto`:`${rows.length} filas visibles`)+(ncf?` · ${ncf} filtro${ncf>1?"s":""} de columna activo${ncf>1?"s":""}`:"")+(S.pad?"":" · cargá el padrón para ver legajo, ingreso, sector y UN")+(S.expNote?" · "+S.expNote:"");
   $("selAll").checked=rows.length>0&&rows.every(r=>S.sel.has(r.dni));
   const ths=$("thead").querySelectorAll("th.sk");let x=0;ths.forEach((th,i)=>{if(i)$("tbl").style.setProperty("--l"+i,x+"px");x+=th.getBoundingClientRect().width});
-  updateBulk();renderDDs();
+  updateBulk();renderDDs();syncTopScroll();
 }
 function updateStats(){
   const g=S.geo||[];const c={all:g.length,ni:0,fi:0,pe:0,fe:0,de:0,nov:0,pend:0};
@@ -870,7 +883,7 @@ $("tbody").addEventListener("input",e=>{const f=e.target.dataset.f;if(!f)return;
   if(f==="code"||f==="cdate"||f==="cext"){autoCom(n);const ci=tr.querySelector('[data-f="com"]');if(ci)ci.value=n.com||"";
     const cc=tr.querySelector(".compc");if(cc&&f!=="cdate")cc.innerHTML=compCell(n)}
   if(f==="code"){const ok=empty(n.code)||/^-?\d+$/.test(n.code.trim())&&!!catName(n.code);e.target.classList.toggle("bad",!ok);
-    const sp=e.target.parentElement.querySelector(".cname");if(sp)sp.textContent=empty(n.code)?"":(catName(n.code)||"Código no está en la lista")}
+    const sp=e.target.parentElement.querySelector(".cname");if(sp){sp.textContent=empty(n.code)?"":(catName(n.code)||"Código no está en la lista");sp.title=sp.textContent}}
   if(Object.entries(n).every(([k,v])=>k==="desde"||empty(v)||v==1)&&empty(n.code)&&empty(n.com)&&empty(n.hi)&&empty(n.hf)&&empty(n.asg))delete S.nov[dni];
   saveNov();updateStats();
   // Ext. mayor a 1 → aparece «Desde»; código 48/49 → aparece «Compensación» (y al revés): se vuelve a dibujar la tabla dejando el foco en el mismo casillero
@@ -886,6 +899,28 @@ $("bApply").addEventListener("click",()=>{const code=$("bCode").value.trim();if(
   S.sel.forEach(dni=>{const n=S.nov[dni]||(S.nov[dni]={});n.code=code;n.ext=ext;n.desde=desde;delete n.src;
     if(code===DAC&&!n.cdate)n.cext=true;autoCom(n);if(com)n.com=com});
   saveNov();toast(`Novedad ${code} aplicada a ${S.sel.size} empleados.`);S.sel.clear();render()});
+// Barra de desplazamiento lateral ARRIBA de la tabla (la de abajo es la propia del cuadro): las dos se mueven juntas; solo se muestra si la tabla es más ancha que el cuadro
+function syncTopScroll(){const t=$("tbl"),top=$("topScroll");if(!top)return;if(t.hidden){top.hidden=true;return}
+  const sw=t.offsetWidth,cw=$("tbox").clientWidth;$("topIn").style.width=sw+"px";top.hidden=!(sw>cw+1);if(!top.hidden)top.scrollLeft=$("tbox").scrollLeft}
+$("topScroll").addEventListener("scroll",()=>{const b=$("tbox"),t=$("topScroll");if(b.scrollLeft!==t.scrollLeft)b.scrollLeft=t.scrollLeft});
+$("tbox").addEventListener("scroll",()=>{const b=$("tbox"),t=$("topScroll");if(t.scrollLeft!==b.scrollLeft)t.scrollLeft=b.scrollLeft});
+window.addEventListener("resize",syncTopScroll);
+if(window.ResizeObserver)new ResizeObserver(()=>syncTopScroll()).observe($("tbl"));
+// Teclado en la tabla: Tab pasa al casillero de la DERECHA (al final de la fila, al primero de la fila de abajo; Shift+Tab al revés) y Enter en «ID Tipo Permiso» baja a ese mismo casillero de la fila de abajo
+function campoVisible(el){const box=$("tbox"),rb=box.getBoundingClientRect(),r=el.getBoundingClientRect();
+  const sk=$("thead").querySelectorAll("th.sk"),ult=sk[sk.length-1],borde=ult?ult.getBoundingClientRect().right:rb.left;   // las columnas fijas de la izquierda tapan lo que queda debajo
+  if(r.left<borde+6)box.scrollLeft-=borde+6-r.left;else if(r.right>rb.right-6)box.scrollLeft+=r.right-(rb.right-6);
+  const hb=$("thead").getBoundingClientRect().bottom;if(r.top<hb+2)box.scrollTop-=hb+2-r.top}
+function irACampo(el){if(!el)return false;el.focus();try{if(/^(text|number|tel|search)$/.test(el.type))el.select()}catch(_){}campoVisible(el);return true}
+const camposDe=tr=>tr?Array.from(tr.querySelectorAll("input[data-f]")).filter(i=>!i.disabled):[];
+$("tbody").addEventListener("keydown",e=>{const t=e.target;if(!t||!t.matches||!t.matches("input[data-f]"))return;const tr=t.closest("tr[data-dni]");if(!tr)return;
+  if(e.key==="Tab"&&!e.ctrlKey&&!e.altKey&&!e.metaKey){const L=camposDe(tr),i=L.indexOf(t);if(i<0)return;
+    let dest=null;
+    if(!e.shiftKey)dest=L[i+1]||camposDe(tr.nextElementSibling)[0]||null;
+    else{const pv=camposDe(tr.previousElementSibling);dest=L[i-1]||pv[pv.length-1]||null}
+    if(dest){e.preventDefault();irACampo(dest)}}
+  else if(e.key==="Enter"&&t.dataset.f==="code"){e.preventDefault();const dni=tr.dataset.dni;   // si el desplegable tenía un código marcado, ya lo tomó (acPick); después se baja de fila
+    setTimeout(()=>{const cur=$("tbody").querySelector(`tr[data-dni="${dni}"]`),nx=cur&&cur.nextElementSibling;if(nx)irACampo(nx.querySelector('input[data-f="code"]'))},0)}});
 $("bExt").addEventListener("input",()=>{const m=(parseInt($("bExt").value,10)||1)>1;$("bDesde").hidden=!m;if(!m)$("bDesde").value=""});   // el «Desde» del bloque solo aparece con más de 1 día
 // Limpiar respeta los filtros de UN, sector y grupo (sin filtros: todas las del día)
 function clearTargets(){const g=S.geo?new Map(S.geo.map(r=>[r.dni,r])):new Map();
