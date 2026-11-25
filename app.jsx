@@ -6755,12 +6755,19 @@ async function slCopiar(htmlStr, text){
 
 /* ---- selector de gerencias (una, varias, todas o ninguna) ---- */
 // sin la columna motivo_omision (falta supabase-migracion-sanciones-lote-omision.sql) se guarda igual todo lo demás
-let slSinColOmision = false;
+// lo mismo con impreso_ts / impreso_por (falta supabase-migracion-sanciones-lote-impresa.sql): lo impreso queda marcado en pantalla pero no se guarda en el servidor
+let slSinColOmision = false, slSinColImpreso = false;
 async function slUpsertItems(rows){
-  const limpiar = rs => rs.map(r=>{ const {motivo_omision, ...x} = r; return x; });
-  let {error} = await supabaseClient.from(SL_T.items).upsert(slSinColOmision ? limpiar(rows) : rows);
-  if(error && /motivo_omision/i.test((error.message||"")+" "+(error.details||""))){ slSinColOmision = true; ({error} = await supabaseClient.from(SL_T.items).upsert(limpiar(rows))); }
-  return {error, sinColumna: slSinColOmision && rows.some(r=>r.motivo_omision)};
+  const limpiar = rs => rs.map(r=>{ const x = {...r}; if(slSinColOmision) delete x.motivo_omision; if(slSinColImpreso){ delete x.impreso_ts; delete x.impreso_por; } return x; });
+  let {error} = await supabaseClient.from(SL_T.items).upsert(limpiar(rows));
+  for(let k=0; k<2 && error; k++){
+    const t = (error.message||"")+" "+(error.details||"");
+    if(!slSinColOmision && /motivo_omision/i.test(t)) slSinColOmision = true;
+    else if(!slSinColImpreso && /impreso_/i.test(t)) slSinColImpreso = true;
+    else break;
+    ({error} = await supabaseClient.from(SL_T.items).upsert(limpiar(rows)));
+  }
+  return {error, sinColumna: slSinColOmision && rows.some(r=>r.motivo_omision), sinImpreso: slSinColImpreso && rows.some(r=>r.impreso_ts)};
 }
 // motivo por el que no se sanciona (al quitar la tilde): campo para escribirlo y, una vez cargado, texto en rojo como «dado de baja»
 function SlOmision({it, onSave}){
@@ -6822,6 +6829,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   const [motivosEstado, setMotivosEstado] = useState("def");   // "base" = guardada en el servidor · "def" = por defecto, sin guardar · "sintabla" = falta el SQL
   const [loteId, setLoteId] = useKeptState("sl.lote", "");
   const [vista, setVista] = useKeptState("sl.vista", "evaluar");
+  const [soloNum, setSoloNum] = useKeptState("sl.soloNum", true);   // Cartas, exportación y envíos solo con las que ya tienen N° interno (las «definidas»)
   const [nuevoDesde, setNuevoDesde] = useKeptState("sl.desde", "");
   const [nuevoHasta, setNuevoHasta] = useKeptState("sl.hasta", "");
   const [omitidas, setOmitidas] = useState(null);
@@ -6879,16 +6887,18 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     const now = new Date().toISOString();
     const rows = itemsRef.current.filter(x=>ids.includes(x.id)).map(x=>({...x, editado_por:userRef.current, updated_at:now}));
     if(!rows.length) return;
-    const {error, sinColumna} = await slUpsertItems(rows);
+    const {error, sinColumna, sinImpreso} = await slUpsertItems(rows);
     if(error){ ids.forEach(i=>dirty.current.add(i)); if(aliveRef.current) say("No se pudo guardar: "+error.message); }
-    else if(aliveRef.current) say(sinColumna ? "Cambios guardados, salvo el motivo de la omisión: falta correr supabase-migracion-sanciones-lote-omision.sql en Supabase." : "Cambios guardados");
+    else if(aliveRef.current) say(sinColumna ? "Cambios guardados, salvo el motivo de la omisión: falta correr supabase-migracion-sanciones-lote-omision.sql en Supabase." : sinImpreso ? "Cambios guardados, salvo lo impreso: falta correr supabase-migracion-sanciones-lote-impresa.sql en Supabase." : "Cambios guardados");
   }
   // guarda ya (sin esperar) un grupo de cambios — se usa al marcar envíos
   async function guardarItemsYa(patches){
     const now = new Date().toISOString();
     const rows = itemsRef.current.filter(x=>patches[x.id]).map(x=>({...x, ...patches[x.id], editado_por:userRef.current, updated_at:now}));
-    if(rows.length){ const {error} = await slUpsertItems(rows); if(error) throw error; }
+    let sinImpreso = false;
+    if(rows.length){ const r = await slUpsertItems(rows); if(r.error) throw r.error; sinImpreso = !!r.sinImpreso; }
     setItems(list=>list.map(x=>patches[x.id] ? {...x, ...patches[x.id]} : x));
+    return {sinImpreso};
   }
   const loteDirty = useRef(null); const loteT = useRef(null);
   function updLote(patch){
@@ -7066,6 +7076,13 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   const justificadasInfo = useMemo(()=>{ const out = []; filasTodas.forEach(f=>{ if(f.baja && !f.it.enviado_ts) return; f.justificadas.forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); out.push({legajo:f.it.legajo, nombre:f.it.nombre, fecha:d, cod:fi.sinDato ? "sin dato" : fi.cod, motivo:fi.motivo}); }); }); return out; }, [filasTodas]);
   const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
   const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
+  // Qué sale en Cartas / exportación / envíos: lo tildado que ya está DEFINIDO (con N° interno; se puede desactivar) y todavía NO se imprimió.
+  // Al imprimir una carta queda marcada como impresa y se saca de esas listas (se ve aparte, para reimprimirla o volverla a pendiente).
+  const definida = f => !soloNum || !!f.it.n_interno;
+  const impresas = enLote.filter(f=>f.it.impreso_ts);
+  const pendientes = enLote.filter(f=>!f.it.impreso_ts && definida(f));
+  const sinNumOcultas = soloNum ? enLote.filter(f=>!f.it.impreso_ts && !f.it.n_interno).length : 0;
+  const paraEnviar = enLote.filter(f=>f.it.impreso_ts || definida(f));   // las impresas siguen en Envíos (falta mandarlas por mail)
   const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
     suspDesde: lote && lote.completar_fechas ? (f.it.susp_desde||"") : "", suspHasta: lote && lote.completar_fechas ? (f.it.susp_hasta||"") : "", suspRetoma: lote && lote.completar_fechas ? (f.it.susp_retoma||"") : "",
     nInterno:f.it.n_interno||"", lugar:"Florida", fechaEmision:(lote && lote.fecha_emision) || hoy});
@@ -7083,7 +7100,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   function loteRows(){
     const H = ["Id Sancion","Empleado","Sancion","Motivo","Fecha creado","Dias de Suspencion","Fecha Sancion","Nivel de gravedad","Sector","Fecha Firma","Aplicada","Legajo","Nombre","Gerencia","Fechas ausencia","Nº Interno","Sugerida","Cant Suspensión","Texto Especial","IDSancion"];
     const fe = isoToDMY((lote && lote.fecha_emision) || hoy);
-    return [H, ...enLote.map(f=>{ const it = f.it;
+    return [H, ...pendientes.map(f=>{ const it = f.it;
       return ["", it.legajo+" "+it.nombre, slExportNombre(it.sancion), "Ausencia injustificada", fe, slDias(it), fe, "", it.sector, "", "", it.legajo, it.nombre, it.gerencia,
         (it.fechas||[]).map(isoToDMY).join("; "), it.n_interno||"", slExportNombre(SL_ESC.includes(it.sancion) ? it.sancion : f.sug.sancion), slDias(it)||0, textoEsp, SL_COD[it.sancion]||""]; })];
   }
@@ -7098,7 +7115,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   }
 
   /* ---- salida de notas ---- */
-  const enLoteOrden = enLote; // ya ordenado por gerencia, sector y nombre
+  const enLoteOrden = pendientes; // ya ordenado por gerencia, sector y nombre
   async function pdfUno(f){ setBusy("pdf"); try{ const doc = await slPdf([notaDe(f)]); slDescargar(archivoDe(f), doc.output("blob")); say("Descargado "+archivoDe(f)); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
   async function pdfTodas(){ setBusy("pdfall"); try{ const doc = await slPdf(enLoteOrden.map(notaDe)); slDescargar("Sanciones_"+nombreBase()+".pdf", doc.output("blob")); say("PDF combinado descargado ("+enLoteOrden.length+" notas)"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
   async function zipDe(lista){
@@ -7107,7 +7124,23 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
     return z.generateAsync({type:"blob"});
   }
   async function zipTodas(){ setBusy("zip"); try{ slDescargar("Sanciones_por_sector_"+nombreBase()+".zip", await zipDe(enLoteOrden)); say("ZIP descargado"); }catch(err){ say("Error: "+errTxt(err)); } setBusy(""); }
-  function imprimir(lista){ if(!lista.length) return; slAbrirNotas(lista.length===1 ? lista[0].it.legajo+" "+lista[0].it.nombre+" - "+lista[0].it.sancion : "Sanciones "+slLoteNombre(lote), lista.map(notaDe)); }
+  function imprimir(lista){
+    if(!lista.length) return;
+    const abrio = slAbrirNotas(lista.length===1 ? lista[0].it.legajo+" "+lista[0].it.nombre+" - "+lista[0].it.sancion : "Sanciones "+slLoteNombre(lote), lista.map(notaDe));
+    if(abrio) marcarImpresas(lista);   // si el navegador bloqueó la ventana no se marca nada
+  }
+  // al imprimir quedan marcadas como impresas (fecha y quién) y salen de Cartas / exportación; lo ya impreso no cambia su fecha
+  async function marcarImpresas(lista){
+    const ts = Date.now(), p = {};
+    lista.forEach(f=>{ if(!f.it.impreso_ts) p[f.it.id] = {impreso_ts:ts, impreso_por:userRef.current}; });
+    const n = Object.keys(p).length; if(!n) return;
+    try{ const r = await guardarItemsYa(p); say(n+" carta"+(n===1?"":"s")+" marcada"+(n===1?"":"s")+" como impresa"+(n===1?"":"s")+" (ya no aparece"+(n===1?"":"n")+" en Cartas ni en la exportación)."+(r && r.sinImpreso ? " Ojo: falta correr supabase-migracion-sanciones-lote-impresa.sql en Supabase; hasta entonces queda marcada solo mientras no recargues." : "")); }
+    catch(err){ say("Se abrió la impresión, pero no se pudo marcar como impresa: "+errTxt(err)); }
+  }
+  async function desmarcarImpresa(f){
+    try{ await guardarItemsYa({[f.it.id]:{impreso_ts:null, impreso_por:""}}); say("Volvió a pendiente: "+f.it.legajo+" "+f.it.nombre); }
+    catch(err){ say("No se pudo cambiar: "+errTxt(err)); }
+  }
 
   /* ---- render ---- */
   const sinTablas = error && /PGRST205|42P01|does not exist|schema cache|sanciones_/i.test(error);
@@ -7190,6 +7223,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
       )}
 
       {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
+        nExport={pendientes.length} sinNumOcultas={sinNumOcultas} soloNum={soloNum} setSoloNum={setSoloNum}
         fechaInfo={fechaInfo} justificadasInfo={justificadasInfo}
         textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
           const k = slLeg(leg); const out = [];
@@ -7197,8 +7231,9 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
           items.forEach(it=>{ if(it.lote_id!==lote.id && slLeg(it.legajo)===k && it.incluir && it.enviado_ts) out.push("Lote: "+it.sancion+(it.sancion==="Suspensión" ? " "+slDias(it)+" d" : "")+" enviada "+new Date(it.enviado_ts).toLocaleDateString("es-AR")); });
           return out; }} />}
       {lote && vista==="cartas" && <SlCartas enLote={enLoteOrden} lote={lote} updItem={updItem} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe}
+        impresas={impresas} sinNumOcultas={sinNumOcultas} soloNum={soloNum} setSoloNum={setSoloNum} desmarcarImpresa={desmarcarImpresa}
         pdfUno={pdfUno} pdfTodas={pdfTodas} zipTodas={zipTodas} imprimir={imprimir} busy={busy} />}
-      {lote && vista==="envios" && <SlEnvios enLote={enLoteOrden} lote={lote} envios={envios} setEnvios={setEnvios} mails={mails} setMails={setMails} cfg={cfg} setCfg={setCfg}
+      {lote && vista==="envios" && <SlEnvios enLote={paraEnviar} lote={lote} envios={envios} setEnvios={setEnvios} mails={mails} setMails={setMails} cfg={cfg} setCfg={setCfg}
         esAdmin={esAdmin} periodo={periodo} periodoAuto={periodoAuto} updLote={updLote} notaDe={notaDe} archivoDe={archivoDe} zipDe={zipDe} guardarItemsYa={guardarItemsYa}
         userRef={userRef} say={say} busy={busy} setBusy={setBusy} nombreBase={nombreBase} />}
 
@@ -7210,7 +7245,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
 }
 
 /* ---- 1. Evaluar ---- */
-function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo}){
+function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo, nExport, sinNumOcultas, soloNum, setSoloNum}){
   const [q, setQ] = useKeptState("sl.q", "");
   const [gers, setGers] = useKeptState("sl.gers", null);
   const [sectores, setSectores] = useKeptState("sl.sectores", null);
@@ -7292,9 +7327,14 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
         </div>
         {/* Exportar Excel arriba, CSV abajo */}
         <div style={{display:"flex", flexDirection:"column", gap:10}}>
-          <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!enLote.length}>Exportar Excel</button>
-          <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!enLote.length}>Exportar CSV</button>
+          <button type="button" className="btn secondary small" onClick={exportarXLSX} disabled={!nExport} title="Exporta las tildadas que ya tienen N° interno y todavía no se imprimieron">Exportar Excel ({nExport})</button>
+          <button type="button" className="btn secondary small" onClick={exportarCSV} disabled={!nExport}>Exportar CSV ({nExport})</button>
         </div>
+        <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer", flexBasis:"100%"}} title="Cartas, exportación y envíos incluyen solo a las que ya tienen N° interno (las que definiste). Desactivalo para incluir todas las tildadas.">
+          <input type="checkbox" checked={!!soloNum} onChange={e=>setSoloNum(e.target.checked)} />
+          <span>Cartas y exportación solo con las que ya tienen <b>N° interno</b> (definidas){sinNumOcultas>0 && soloNum ? <span className="hint" style={{color:"var(--warning)", fontWeight:700}}> · {sinNumOcultas} tildada{sinNumOcultas===1?"":"s"} sin N° no se incluye{sinNumOcultas===1?"":"n"} todavía</span> : null}</span>
+          <span className="hint">· Lo ya impreso queda marcado y sale de Cartas y de la exportación.</span>
+        </label>
         <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
           <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
           <span className="hint">Mostrando {vista.length} de {filas.length}</span>
@@ -7323,7 +7363,7 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
                       <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} title={it.incluir ? "Quitá la tilde si no se va a sancionar (te pide el motivo)" : "Volver a incluir"} onChange={e=>updItem(it.id, e.target.checked ? {incluir:true, motivo_omision:""} : {incluir:false})} /></td>
                       <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}
                         {!it.incluir && <SlOmision it={it} onSave={v=>updItem(it.id, {motivo_omision:v})} />}</td>
-                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.impreso_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>🖨 Impresa {new Date(it.impreso_ts).toLocaleDateString("es-AR")}</div> : null}{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
                       <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:250}}>{(it.fechas||[]).map(x=>{
                         // debajo de cada fecha, chiquito, el codpla que tiene HOY en la base; en rojo si ya no es NO JUST (base actualizada después de armar el lote)
                         const fi = fechaInfo(it.legajo, x), mal = !fi.ok;
@@ -7373,9 +7413,39 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
 }
 
 /* ---- 2. Cartas ---- */
-function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pdfTodas, zipTodas, imprimir, busy}){
+function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pdfTodas, zipTodas, imprimir, busy, impresas, sinNumOcultas, soloNum, setSoloNum, desmarcarImpresa}){
   const [sel, setSel] = useState(0);
-  if(!enLote.length) return <div className="card table-card"><h3>No hay notas para emitir</h3><div className="caption" style={{marginTop:0}}>Tildá al menos un empleado en «Evaluar».</div></div>;
+  const fSoloNum = (
+    <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer"}} title="Cartas, exportación y envíos incluyen solo a las que ya tienen N° interno (las que definiste)">
+      <input type="checkbox" checked={!!soloNum} onChange={e=>setSoloNum(e.target.checked)} /> Solo las que ya tienen N° interno
+    </label>);
+  // cartas ya impresas: salen de la lista de pendientes; desde acá se reimprimen o se vuelven a pendiente
+  const cajaImpresas = (impresas||[]).length>0 && (
+    <div className="card" style={{padding:"8px 12px"}}>
+      <details>
+        <summary style={{cursor:"pointer", fontWeight:700}}>Ya impresas ({impresas.length})</summary>
+        {impresas.map(x=>(
+          <div key={x.it.id} style={{display:"flex", justifyContent:"space-between", gap:8, alignItems:"center", padding:"6px 0", borderTop:"1px solid var(--border)"}}>
+            <div><b style={{fontSize:13}}>{x.it.nombre}</b>{x.it.n_interno ? <span className="hint"> · N° {x.it.n_interno}</span> : null}<div className="hint">{x.it.legajo} · impresa {new Date(x.it.impreso_ts).toLocaleDateString("es-AR")}{x.it.impreso_por ? " por "+x.it.impreso_por : ""}</div></div>
+            <span style={{display:"flex", gap:6}}>
+              <button type="button" className="btn secondary small" onClick={()=>imprimir([x])}>Reimprimir</button>
+              <button type="button" className="btn secondary small" onClick={()=>desmarcarImpresa(x)} title="Vuelve a aparecer en Cartas y en la exportación">Volver a pendiente</button>
+            </span>
+          </div>
+        ))}
+      </details>
+    </div>);
+  if(!enLote.length) return (
+    <React.Fragment>
+      <div className="card table-card">
+        <h3>No hay cartas pendientes de imprimir</h3>
+        <div className="caption" style={{marginTop:0}}>
+          {sinNumOcultas>0 ? sinNumOcultas+" tildada"+(sinNumOcultas===1?"":"s")+" todavía no tiene"+(sinNumOcultas===1?"":"n")+" N° interno: numeralas en «Evaluar» (o desactivá la casilla de abajo para incluirlas)." : (impresas||[]).length>0 ? "Ya se imprimieron todas las definidas." : "Tildá al menos un empleado en «Evaluar» y asignale su N° interno."}
+        </div>
+        {fSoloNum}
+      </div>
+      {cajaImpresas}
+    </React.Fragment>);
   const i = Math.min(sel, enLote.length-1), f = enLote[i], susp = f.it.sancion==="Suspensión";
   function setDesde(v){
     if(!v){ updItem(f.it.id, {susp_desde:null}); return; }
@@ -7388,11 +7458,14 @@ function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pd
       <div className="card controls">
         <div className="field"><label>Fecha de la nota</label><input type="date" value={lote.fecha_emision||""} onChange={e=>updLote({fecha_emision:e.target.value})} /></div>
         <label style={{display:"flex", gap:8, alignItems:"center", cursor:"pointer"}}><input type="checkbox" checked={!!lote.completar_fechas} onChange={e=>updLote({completar_fechas:e.target.checked})} /> Completar fechas de suspensión</label>
-        <button type="button" className="btn" onClick={()=>imprimir(enLote)}>Imprimir todas ({enLote.length})</button>
+        <button type="button" className="btn" onClick={()=>imprimir(enLote)} title="Al imprimir quedan marcadas como impresas y salen de esta lista">Imprimir todas ({enLote.length})</button>
         <button type="button" className="btn secondary" onClick={pdfTodas} disabled={!!busy}>{busy==="pdfall" ? "Generando…" : "PDF combinado"}</button>
         <button type="button" className="btn secondary" onClick={zipTodas} disabled={!!busy}>{busy==="zip" ? "Generando…" : "ZIP por sector"}</button>
+        {fSoloNum}
+        {sinNumOcultas>0 && soloNum && <span className="hint" style={{color:"var(--warning)", fontWeight:700}}>{sinNumOcultas} tildada{sinNumOcultas===1?"":"s"} sin N° no se incluye{sinNumOcultas===1?"":"n"} todavía</span>}
       </div>
       <div style={{display:"grid", gridTemplateColumns:"minmax(240px,320px) minmax(0,1fr)", gap:16, alignItems:"start"}}>
+        <div style={{display:"flex", flexDirection:"column", gap:12, minWidth:0}}>
         <div className="card" style={{maxHeight:"75vh", overflowY:"auto"}}>
           {enLote.map((x,k)=>(
             <button key={x.it.id} type="button" onClick={()=>setSel(k)} style={{all:"unset", display:"block", cursor:"pointer", padding:"9px 12px", borderBottom:"1px solid var(--border)", background:k===i ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent", width:"100%", boxSizing:"border-box"}}>
@@ -7400,6 +7473,8 @@ function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pd
               <div className="hint">{x.it.legajo} · {x.it.sector} · <b style={{color:slChipColor(x.it.sancion)}}>{x.it.sancion==="Suspensión" ? "Susp. "+slDias(x.it)+" d" : x.it.sancion}</b></div>
             </button>
           ))}
+        </div>
+        {cajaImpresas}
         </div>
         <div style={{display:"flex", flexDirection:"column", gap:12, minWidth:0}}>
           <div className="card controls" style={{paddingTop:10, paddingBottom:10}}>
