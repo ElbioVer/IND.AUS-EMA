@@ -380,7 +380,6 @@ const PERMISOS_MATRIZ = [
   {grupo:"Menús que ve", filas:Object.keys(PERMISOS_TABS_LABEL).map(k=>({label:PERMISOS_TABS_LABEL[k], ok:p=>p.tabs.includes(k)}))},
   {grupo:"Filtros y alcance de los datos", filas:[
     {label:"Filtros globales: Mes, Gerencia, Departamento, Sector y Empresa", ok:p=>!!p.filtros},
-    {label:"Solo el filtro de Mes", ok:p=>!p.filtros && !!p.soloMes},
     {label:"Elegir qué motivos cuentan para el % de ausentismo", ok:p=>!!p.filtros && !p.motivosPorDefecto},
     {label:"Ve todas las empresas (no solo «Propios»)", ok:p=>!p.soloPropios},
     {label:"Ve todas las Unidades de Negocio (no solo las asignadas)", ok:p=>!p.visor}]},
@@ -2705,6 +2704,40 @@ const CUADRO_AUDIT_COLS = ["Legajo","Nombre","Empresa","Tipo contratación","Est
 function cuadroAuditRow(r){ return [r.legajo, r.nombre, r.empresa, r.tipoContrat||"", r.estado, r.idMotivo, r.motivo]; }
 function dateKeyToLabel(dk){ const p = (dk||"").split("-"); return p.length===3 ? p[2]+"/"+p[1]+"/"+p[0] : (dk||""); }
 
+// Reparte las filas de UN día en las celdas del Cuadro Diario (unidad × columna). La usan el propio Cuadro Diario y la comparación del Cuadro de Presentismo de la Carga Geo
+// (`window.__RADAR.cuadroCalipso`), así los dos hablan de lo mismo. `filas` = cada registro con la unidad y la columna donde quedó.
+function cuadroDiarioClasificar(dayRecords){
+  const servicioMap = new Map(Object.keys(EMPRESA_SERVICIO).map(k=>[normTxt(k), EMPRESA_SERVICIO[k]]));
+  const cells = new Map(); // unidad -> {col: [registros]}
+  const unmapped = new Set(), filas = [];
+  let sinTipo = 0;
+  const cellOf = (unit, col) => {
+    if(!cells.has(unit)) cells.set(unit, {});
+    const o = cells.get(unit);
+    if(!o[col]) o[col] = [];
+    return o[col];
+  };
+  const put = (unit, col, r) => { cellOf(unit, col).push(r); filas.push({r, unit, col}); };
+  UNIT_ORDER.forEach(u=>cells.set(u, {}));
+  dayRecords.forEach(r=>{
+    if(!r.tipoContrat) sinTipo++;
+    const propio = normTxt(r.empresa)==="propios";
+    const eventual = normTxt(r.tipoContrat)==="eventual"; // vacío o cualquier otro valor se trata como Propios
+    if(propio){
+      const unit = r.unidad || "(Sin unidad)";
+      if(r.cat==="P") put(unit, eventual ? "presContr" : "presProp", r);
+      else if(r.cat==="AP") put(unit, "ap", r);
+      else if(r.cat==="ANP") put(unit, "anp", r);
+      else if(r.cat==="CE") put(unit, "ce", r);
+      else if(r.cat==="V") put(unit, "vac", r);
+    } else if(r.cat==="P"){
+      const mapped = servicioMap.get(normTxt(r.empresa));
+      if(!mapped) unmapped.add(r.empresa || "(vacía)");
+      put(mapped || r.unidad || "(Sin unidad)", "sub", r);
+    }
+  });
+  return {cells, unmapped, sinTipo, filas};
+}
 function CuadroDiarioTab({parsed, soloUnidades}){
   // Sin filtros globales (mes, gerencia, empresa, motivos): el cuadro es la foto de UN día completo.
   const base = useMemo(()=> parsed.records.filter(r=>r.valid && r.cat!=="BAJA"), [parsed]);
@@ -2717,34 +2750,7 @@ function CuadroDiarioTab({parsed, soloUnidades}){
   const dayRecords = useMemo(()=> base.filter(r=>r.dateKey===fecha), [base, fecha]);
 
   const model = useMemo(()=>{
-    const servicioMap = new Map(Object.keys(EMPRESA_SERVICIO).map(k=>[normTxt(k), EMPRESA_SERVICIO[k]]));
-    const cells = new Map(); // unidad -> {col: [registros]}
-    const unmapped = new Set();
-    let sinTipo = 0;
-    const cellOf = (unit, col) => {
-      if(!cells.has(unit)) cells.set(unit, {});
-      const o = cells.get(unit);
-      if(!o[col]) o[col] = [];
-      return o[col];
-    };
-    UNIT_ORDER.forEach(u=>cells.set(u, {}));
-    dayRecords.forEach(r=>{
-      if(!r.tipoContrat) sinTipo++;
-      const propio = normTxt(r.empresa)==="propios";
-      const eventual = normTxt(r.tipoContrat)==="eventual"; // vacío o cualquier otro valor se trata como Propios
-      if(propio){
-        const unit = r.unidad || "(Sin unidad)";
-        if(r.cat==="P") cellOf(unit, eventual ? "presContr" : "presProp").push(r);
-        else if(r.cat==="AP") cellOf(unit, "ap").push(r);
-        else if(r.cat==="ANP") cellOf(unit, "anp").push(r);
-        else if(r.cat==="CE") cellOf(unit, "ce").push(r);
-        else if(r.cat==="V") cellOf(unit, "vac").push(r);
-      } else if(r.cat==="P"){
-        const mapped = servicioMap.get(normTxt(r.empresa));
-        if(!mapped) unmapped.add(r.empresa || "(vacía)");
-        cellOf(mapped || r.unidad || "(Sin unidad)", "sub").push(r);
-      }
-    });
+    const {cells, unmapped, sinTipo} = cuadroDiarioClasificar(dayRecords);
     const extra = Array.from(cells.keys()).filter(u=>!UNIT_ORDER.includes(u)).sort();
     const units = UNIT_ORDER.concat(extra);
     const rows = units.map(u=>{
@@ -8597,6 +8603,14 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   window.__RADAR.padron = padronGeo;
   // datos de ausentismo con el nombre de empresa unificado según el plantel (ver withCanonEmpresa)
   const parsed = useMemo(()=> withCanonEmpresa(parsedRaw, plantel), [parsedRaw, plantel]);
+  // el Cuadro de Presentismo de la Carga Geo (iframe) lo usa para compararse con el Cuadro Diario: solo filas reales de Calipso (no las provisorias de Geo)
+  window.__RADAR.cuadroCalipso = dk => {
+    if(!parsed) return null;
+    const recs = parsed.records.filter(r=>r.valid && r.cat!=="BAJA" && r.dateKey===dk && r.origen!=="geo");
+    if(!recs.length) return {dk, vacio:true, filas:[]};
+    return {dk, vacio:false, filas:cuadroDiarioClasificar(recs).filas.map(f=>({legajo:String(f.r.legajo||"").trim().toUpperCase(), nombre:f.r.nombre||"", unidad:CUADRO_UNIT_LABEL[f.unit]||f.unit, col:f.col,
+      cat:f.r.cat, idMotivo:f.r.idMotivo||"", motivo:f.r.motivo||"", empresa:f.r.empresa||"", tipo:f.r.tipoContrat||""}))};
+  };
   // Unidades de Negocio existentes (para que el Administrador asigne las de cada Visor)
   const unidadesDisponibles = useMemo(()=>{
     if(!perms.esAdmin) return [];

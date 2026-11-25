@@ -373,7 +373,7 @@ table.pres td.zero{color:var(--muted)}
     <section class="panel" id="presCheck" hidden></section>
     <section class="panel" id="presDet" hidden>
       <div class="bar"><h2 class="grow" id="presDetT"></h2><button type="button" class="btn" id="presDetX">Cerrar</button></div>
-      <div class="tablebox"><table><thead><tr><th class="nos">Legajo</th><th class="nos">Apellido y nombre</th><th class="nos">UN</th><th class="nos">Sector</th><th class="nos">Empresa</th><th class="nos">Contratación</th><th class="nos">Estado del día</th><th class="nos">Cuenta como</th></tr></thead><tbody id="presDetB"></tbody></table></div>
+      <div class="tablebox"><table><thead id="presDetH"><tr><th class="nos">Legajo</th><th class="nos">Apellido y nombre</th><th class="nos">UN</th><th class="nos">Sector</th><th class="nos">Empresa</th><th class="nos">Contratación</th><th class="nos">Estado del día</th><th class="nos">Cuenta como</th></tr></thead><tbody id="presDetB"></tbody></table></div>
     </section>
   </div>
 
@@ -1188,12 +1188,46 @@ function presCompute(){
     const why=!rec.p?"el empleado no está en el padrón":rec.sub?`empresa subcontratada (${rec.sub}): solo cuenta si está presente`:k.c==="?"?"permiso sin clasificar (clasificalo en «Clasificación de permisos»)":k.c==="X"?"está clasificado como «No contar»":"su UN no está en el cuadro";
     W.novFuera.push({r:rec.r,p:rec.p,k:{...k,why:`Novedad «${nom}» no incluida: ${why}`}})});
   return {cells,tot,W,ev,perms,emps,det}}
+// [Radar] Comparación persona por persona con el «Cuadro Diario» del Radar (que sale del archivo de Calipso): `window.parent.__RADAR.cuadroCalipso(AAAA-MM-DD)` devuelve cómo
+// el Cuadro Diario ubicó a cada empleado ese día (columna y unidad). Fuera del Radar no existe y no se compara nada.
+const radarCal=()=>{try{const R=window.parent&&window.parent!==window?window.parent.__RADAR:null;return R&&typeof R.cuadroCalipso==="function"?R.cuadroCalipso:null}catch(e){return null}};
+const CAL2GEO={presProp:"pp",presContr:"pc",ap:"ap",anp:"anp",ce:"ce",vac:"v",sub:"sub"};
+const PCOL_LAB=k=>(PCOLS.find(c=>c.k===k)||{}).lab||k;
+const CMP_WHY={soloCal:"Lo cuenta el Cuadro Diario (Calipso) y este cuadro (Geo) no",soloGeo:"Lo cuenta este cuadro (Geo) y el Cuadro Diario (Calipso) no",col:"Los dos lo cuentan pero en distinta columna",un:"Los dos lo cuentan en la misma columna pero en distinta unidad (plantel vs Calipso)",sinLegajo:"Sin padrón no se puede cruzar con Calipso"};
+function presComparar(R){
+  const f=radarCal();if(!f||!S.date)return null;
+  const dk=`${S.date.y}-${p2(S.date.m)}-${p2(S.date.d)}`;let C;try{C=f(dk)}catch(e){return null}
+  if(!C)return null;if(C.vacio)return {dk,vacio:true};
+  const legU=p=>String((p&&p.Legajo)||"").trim().toUpperCase(),cal=new Map();C.filas.forEach(x=>{if(!cal.has(x.legajo))cal.set(x.legajo,x)});
+  const calTxt=x=>x?`${PCOL_LAB(CAL2GEO[x.col])} · ${x.unidad}`+(x.cat==="P"?"":` (${[x.idMotivo,x.motivo].filter(Boolean).join(" — ")})`):"No tiene fila ese día en Calipso: no cuenta";
+  const causa=rec=>{const k=rec.k;if(!rec.p)return "sin padrón";if(rec.sub&&k.c!=="P")return `empresa subcontratada (${rec.sub}): solo cuenta si está presente`;if(rec.sub)return "su UN no está en el cuadro";
+    if(k.c==="X")return `clasificado «No contar» (${k.why})`;if(k.c==="?")return k.ni?"No informado sin novedad":`permiso sin clasificar (${k.why})`;return "su UN no está en el cuadro"};
+  const geoLeg=new Set(),difs=[];let iguales=0;
+  R.det.forEach(rec=>{const L=legU(rec.p),nombre=`${rec.r.ape}, ${rec.r.nom}`;
+    if(!L){difs.push({tipo:"sinLegajo",leg:"",nombre,geo:`No cuenta: sin padrón (DNI ${rec.r.dni})`,cal:"No se puede comparar sin legajo"});return}
+    geoLeg.add(L);
+    const gc=rec.cell?rec.cell[1]:null,gu=rec.cell?PROWS[rec.cell[0]].lab:null,x=cal.get(L),cc=x?CAL2GEO[x.col]:null;
+    if(!gc&&!cc){iguales++;return}
+    if(gc&&cc&&gc===cc&&(gc==="sub"||gu===x.unidad)){iguales++;return}
+    difs.push({tipo:gc&&!cc?"soloGeo":!gc&&cc?"soloCal":gc!==cc?"col":"un",leg:L,nombre,
+      geo:gc?`${PCOL_LAB(gc)} · ${gu} (${rec.k.why})`:`No cuenta: ${causa(rec)}`,cal:calTxt(x)})});
+  C.filas.forEach(x=>{if(!geoLeg.has(x.legajo))difs.push({tipo:"soloCal",leg:x.legajo,nombre:x.nombre||x.legajo,geo:"No figura en el archivo de Geo del día (o su legajo del padrón es otro)",cal:calTxt(x)})});
+  difs.forEach(d=>{d.why=CMP_WHY[d.tipo]});
+  const cnt=t=>difs.filter(d=>d.tipo===t).length;
+  return {dk,vacio:false,geoTot:R.tot.ta.length,calTot:C.filas.filter(x=>x.col!=="sub").length,iguales,difs,soloCal:cnt("soloCal"),soloGeo:cnt("soloGeo"),col:cnt("col"),un:cnt("un"),sinLegajo:cnt("sinLegajo")}}
+function showCmp(key,keep,R){const c=R.cmp;presDetKey=key;$("presDet").hidden=false;
+  $("presDetT").textContent=`Diferencias con el Cuadro Diario del Radar (Calipso) (${c&&!c.vacio?c.difs.length:0})`;
+  $("presDetH").innerHTML='<tr><th class="nos">Legajo</th><th class="nos">Apellido y nombre</th><th class="nos">Cuadro de Presentismo (Geo)</th><th class="nos">Cuadro Diario (Calipso)</th><th class="nos">Diferencia</th></tr>';
+  const ord={soloCal:0,soloGeo:1,col:2,un:3,sinLegajo:4},wr='style="white-space:normal;min-width:200px"';
+  $("presDetB").innerHTML=(c&&!c.vacio?[...c.difs]:[]).sort((a,b)=>ord[a.tipo]-ord[b.tipo]||a.nombre.localeCompare(b.nombre,"es")).map(x=>`<tr><td class="mono">${esc(x.leg)}</td><td class="name">${esc(x.nombre)}</td><td ${wr}>${esc(x.geo)}</td><td ${wr}>${esc(x.cal)}</td><td ${wr}>${esc(x.why)}</td></tr>`).join("")||'<tr><td colspan="5" class="note">Sin diferencias.</td></tr>';
+  if(!keep)$("presDet").scrollIntoView({behavior:"smooth",block:"nearest"})}
+const PDET_H0=$("presDetH").innerHTML;
 const fechaLarga=()=>S.date?new Date(S.date.y,S.date.m-1,S.date.d).toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long",year:"numeric"}):"";
 function renderPres(){
   if($("viewPres").hidden)return;
   const ok=!!(S.geo&&S.pad);$("presTbl").hidden=!ok;$("presEmpty").hidden=ok;$("presExport").disabled=!ok;$("presMail").disabled=!ok;
   if(!ok){$("presWarn").innerHTML="";$("presCheck").hidden=true;$("presDet").hidden=true;presCells=null;renderPMap();renderPEmp();return}
-  const R=presCells=presCompute();
+  const R=presCells=presCompute();R.cmp=presComparar(R);
   const td=(list,ri,k)=>`<td class="n${list.length?"":" zero"}"${list.length?` data-r="${ri}" data-c="${k}"`:""}>${list.length}</td>`;
   const totPlant=R.ev.length,totAct=R.tot.ta.length;
   $("presTbl").innerHTML=`<thead><tr><th class="lab"></th>${PCOLS.map(c=>`<th>${c.lab}</th>`).join("")}</tr></thead><tbody>`
@@ -1207,6 +1241,9 @@ function renderPres(){
     <h2>Verificación</h2><div class="chk">${sumCols===totAct&&!rowsBad.length?`<span class="okv">✓ Total Activos (${totAct}) es igual a la suma de las 6 columnas (${ACT.map(k=>R.tot[k].length).join(" + ")}).</span>`:`<span class="badv">✗ Total Activos ${totAct} no coincide con la suma ${sumCols}.</span>`}</div>
     <div class="chk">${PROWS.map((row,i)=>`<span><b>${row.lab}</b>: ${R.cells[i].ta.length} activos${R.cells[i].sub.length?` + ${R.cells[i].sub.length} sub-cont`:""}</span>`).join("")}<span><b>Total</b>: ${totAct} activos + ${R.tot.sub.length} sub-cont</span></div>`;
   const w=[];const unk=[...R.perms.keys()].filter(n=>pmapOf(n)==="?");
+  if(R.cmp&&R.cmp.vacio)w.push(`<div class="wline">El Radar todavía no tiene cargado en Calipso el día ${esc(isoTxt(R.cmp.dk))}: no se puede comparar este cuadro con el Cuadro Diario.</div>`);
+  else if(R.cmp){const c=R.cmp,n=c.difs.length,det=[c.soloCal?`${c.soloCal} solo los cuenta el Cuadro Diario`:"",c.soloGeo?`${c.soloGeo} solo los cuenta este cuadro`:"",c.col?`${c.col} en distinta columna`:"",c.un?`${c.un} en distinta unidad`:"",c.sinLegajo?`${c.sinLegajo} sin padrón`:""].filter(Boolean).join(" · ");
+    w.push(`<div class="wline"><b>Comparación con el Cuadro Diario del Radar (Calipso):</b> este cuadro cuenta <b>${c.geoTot}</b> activos y el Cuadro Diario <b>${c.calTot}</b>. ${n?`<b>${n} empleado${n>1?"s":""} difieren</b> (${esc(det)}). <button data-w="cmp">Ver quiénes</button>`:"Coinciden persona por persona ✓"}</div>`)}
   if(R.W.novFuera.length)w.push(`<div class="wline"><b>${R.W.novFuera.length} empleado${R.W.novFuera.length>1?"s":""} con novedad cargada en «Novedades del día» NO ${R.W.novFuera.length>1?"están incluidos":"está incluido"} en el cuadro</b> (${esc([...new Set(R.W.novFuera.map(x=>x.k.why.replace(/^Novedad «.*?» no incluida: /,"")))].join("; "))}). <button data-w="novFuera">Ver quiénes</button></div>`);
   if(R.W.ni.length)w.push(`<div class="wline">${R.W.ni.length} No informados sin novedad no se cuentan en el cuadro. <button data-w="ni">Ver quiénes</button></div>`);
   if(R.W.de.length)w.push(`<div class="wline">${R.W.de.length} empleados tienen turno Descanso sin fichada ni permiso: no se cuentan. Revisá si el turno está bien asignado. <button data-w="de">Ver quiénes</button></div>`);
@@ -1217,6 +1254,8 @@ function renderPres(){
   $("presWarn").innerHTML=w.join("");renderPMap();renderPEmp();
   if(presDetKey)showDet(presDetKey,true)}
 function showDet(key,keep){if(!presCells)return;const R=presCells;let list,title;
+  if(key.w==="cmp"){showCmp(key,keep,R);return}
+  $("presDetH").innerHTML=PDET_H0;
   if(key.w){list=R.W[key.w];title={ni:"No informados sin novedad",sinClas:"Permisos sin clasificar",otraUN:"UN fuera del cuadro",sinPad:"Sin padrón",de:"Turno Descanso (revisar asignación)",ign:"Novedad cargada que no se usa porque Geo ya informa",novFuera:"Novedades cargadas que NO están en el cuadro"}[key.w]}
   else{const col=PCOLS.find(c=>c.k===key.c);list=key.r==="t"?R.tot[key.c]:R.cells[+key.r][key.c];title=`${key.r==="t"?"Total":PROWS[+key.r].lab} · ${col.lab}`}
   presDetKey=key;$("presDet").hidden=false;$("presDetT").textContent=`${title} (${list.length})`;
