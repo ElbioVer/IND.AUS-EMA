@@ -577,6 +577,10 @@ async function handle(file,kindHint){
     const rows=await readFile(file);
     let kind=kindHint;
     if(findHeader(rows,"identificador")>=0)kind="geo";else if(findHeader(rows,"documento")>=0)kind="pad";
+    // [Radar] El padrón ES el plantel: quien puede cargar el plantel (Administrador y RRHH, con o sin rol en la Carga Geo) lo suelta acá y el Radar
+    // lo lleva a Gestión de Plantel para confirmar las columnas y guardarlo. Quien no puede cargar el plantel solo recibe un aviso (más abajo).
+    if(kind==="pad"&&radarPuedePlantel()){toast("Padrón recibido: se abre Gestión de Plantel para confirmar las columnas y actualizar el plantel.");
+      try{window.parent.postMessage({type:"geo-padron-file",file},location.origin)}catch(e){toast("No pude pasar el archivo a Gestión de Plantel: "+(e&&e.message||e))}return}
     if(CL.on){if(!CL.access){toast("Necesitás un rol asignado para cargar archivos.");return}
       if(kind==="geo"){const g=parseGeo(rows);if(!g.days.length){toast("No pude detectar la fecha en la columna Fecha de la base.");return}
         if(CL.uploading){toast("Esperá a que termine la carga anterior.");return}CL.uploading=true;
@@ -587,7 +591,7 @@ async function handle(file,kindHint){
         finally{CL.uploading=false}
         const f=(a,t)=>a.length?`${t}: ${a.join(", ")}`:"";
         toast(`${file.name}: ${g.days.length} día${g.days.length>1?"s":""}. `+[f(res.new,"Nuevos"),f(res.upd,"Actualizados"),f(res.mrg,"Parciales, sumados a lo que había"),f(res.same,"Sin cambios")].filter(Boolean).join(" · ")+". Elegí el día arriba, en la fecha.")}
-      else{if(radarPad()){toast("El padrón se toma de Gestión de Plantel (mismo archivo): actualizalo allá, no hace falta subirlo acá.");return}
+      else{if(radarPad()){toast("El padrón se toma de Gestión de Plantel (mismo archivo): lo actualiza el Administrador o RRHH desde ese menú.");return}
         const p=parsePad(rows);S.padLocal=p.map;S.padLocalName=file.name;
         $("padInfo").textContent=`${file.name} · ${p.map.size} DNIs`;$("dropPad").classList.add("done");
         if(CL.rowsAll)await cloudSaveRows(CL.rowsAll.map(r=>({...r,pad:padKeep(p.map.get(r.dni))||r.pad})),null,file.name);
@@ -1419,10 +1423,11 @@ const unSlug=u=>unNorm(u).replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"sin-
 const padKeep=p=>{if(!p)return null;const o={};PAD_KEEP.forEach(k=>{if(!empty(p[k]))o[k]=String(p[k])});return o};
 // [Radar] Padrón desde Gestión de Plantel: dentro del Radar el padrón es el plantel (mismo archivo), así que no se sube acá ni se guarda copiado en cada día.
 const radarPad=()=>{try{const R=window.parent&&window.parent!==window?window.parent.__RADAR:null;const p=R&&R.padron;return p&&p.map&&p.map.size?p:null}catch(e){return null}};
+const radarPuedePlantel=()=>{try{const R=window.parent&&window.parent!==window?window.parent.__RADAR:null;return !!(R&&R.puedePlantel)}catch(e){return false}};
 const planPad=dni=>{const p=radarPad();const r=p&&p.map.get(dni);return r?padKeep(r):null};
 function padronUI(){const p=radarPad();if(!p)return false;
-  $("padInfo").textContent=`Se toma de Gestión de Plantel · ${p.n} legajos con documento`;$("dropPad").classList.add("done");$("filePad").disabled=true;
-  $("dropPad").title="El padrón se actualiza en Gestión de Plantel (mismo archivo): no hace falta subirlo acá.";
+  $("padInfo").textContent=`Se toma de Gestión de Plantel · ${p.n} legajos con documento`;$("dropPad").classList.add("done");const puede=radarPuedePlantel();$("filePad").disabled=!puede;
+  $("dropPad").title=puede?"Soltá acá el archivo del padrón (el mismo del plantel): se abre Gestión de Plantel para confirmarlo y actualizar el plantel.":"El padrón se actualiza en Gestión de Plantel (mismo archivo): lo hace el Administrador o RRHH.";
   setStamp("padWhen",p.at,null,"Plantel leído");return true}
 const dayIdOf=d=>`${d.y}-${p2(d.m)}-${p2(d.d)}`;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));

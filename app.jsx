@@ -2150,7 +2150,7 @@ function DbUsageCard({usage, error, checking, onCheck, rowsPerMonth}){
   );
 }
 
-function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs, soloCarga}){
+function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial, plantelUpdatedAt, setPlantelUpdatedAt, plantelActive, globalPlantelStats, scopeMonthKeys, diasPeriodoLabel, dbUsage, dbUsageError, dbChecking, onCheckDb, dbRowsPerMonth, dataStartTs, soloCarga, archivoPendiente, onArchivoTomado}){
   const [stage, setStage] = useState("idle");
   const [rawRows, setRawRows] = useState(null);
   const [fileName, setFileName] = useState("");
@@ -2209,6 +2209,9 @@ function PlantelTab({plantel, setPlantel, plantelHistorial, setPlantelHistorial,
     reader.onerror = () => { setError("No se pudo leer el archivo."); setLoading(false); };
     if(isCsv) reader.readAsText(file, "utf-8"); else reader.readAsArrayBuffer(file);
   }
+
+  // archivo que llegó desde la Carga Geo (tarjeta «Padrón»): se lee igual que si se hubiera subido acá
+  useEffect(()=>{ if(archivoPendiente){ onFile(archivoPendiente); if(onArchivoTomado) onArchivoTomado(); } }, [archivoPendiente]);
 
   const header = rawRows ? rawRows[0] : [];
   const missingRequired = PLANTEL_REQUIRED_FIELDS.filter(f => mapping[f]==null || mapping[f]===-1);
@@ -8269,8 +8272,18 @@ async function geoPermisosActuales(){
 }
 
 const GEO_RETENCION_DIAS = 90;   // los días de Geo más viejos se borran solos (los de Calipso quedan para siempre en el ausentismo)
-function GeoFrame({view, parsed, plantel, puedeCargar, onAplicar, limpiar}){
+function GeoFrame({view, parsed, plantel, puedeCargar, onAplicar, limpiar, onPadron}){
   const ref = useRef(null);
+  const padRef = useRef(onPadron); padRef.current = onPadron;
+  // el archivo de padrón que se suelta en la Carga Geo es el del plantel: se entrega a Gestión de Plantel (solo quien puede cargarlo)
+  useEffect(()=>{
+    const h = ev=>{
+      if(ev.origin!==location.origin || !ev.data || ev.data.type!=="geo-padron-file" || !ev.data.file) return;
+      if(padRef.current) padRef.current(ev.data.file);
+    };
+    window.addEventListener("message", h);
+    return ()=>window.removeEventListener("message", h);
+  }, []);
   useEffect(()=>{ if(limpiar) supabaseClient.rpc("geo_limpiar", {p_dias:GEO_RETENCION_DIAS}).then(()=>{}, ()=>{}); }, []);
   useEffect(()=>{
     const f = t=>{ try{ if(ref.current && ref.current.contentWindow) ref.current.contentWindow.postMessage({type:"radar-theme", theme:t}, location.origin); }catch(e){} };
@@ -8637,7 +8650,7 @@ function SimuladorTab({rankingUnits, objetivo}){
 function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const perms = ROLES[rol] || ROLES.gerencias;
   // lo que la Carga Geo (iframe, mismo sitio) toma del Radar: la conexión a Supabase y quién es el usuario
-  window.__RADAR = {supabase: supabaseClient, userId, email: userEmail, rol, theme: effectiveTheme()};
+  window.__RADAR = {supabase: supabaseClient, userId, email: userEmail, rol, theme: effectiveTheme(), puedePlantel: !!perms.cargar && perms.tabs.includes("plantel")};
   // Visor: solo se trabaja con las filas de su(s) Unidad(es) de Negocio (el servidor ya no le manda las demás; acá se vuelve a filtrar por seguridad)
   // y su caché local es aparte (por usuario y por unidades), para que nunca mezcle datos de otros perfiles del mismo navegador.
   const unidadesSet = perms.visor ? new Set((unidades||[]).map(unidadBase).filter(Boolean)) : null;
@@ -8654,7 +8667,10 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
   const [loading, setLoading] = useState(false);
 
   const [activeTab, setActiveTab] = useState(perms.tabs[0]);
-  const shownTab = perms.tabs.includes(activeTab) ? activeTab : perms.tabs[0]; // nunca se muestra un menú que el perfil no tiene
+  // archivo de padrón subido desde la Carga Geo: se entrega a Gestión de Plantel, que abre el paso de confirmar columnas
+  const [plantelArchivo, setPlantelArchivo] = useState(null);
+  function padronDesdeGeo(file){ setPlantelArchivo(file); setActiveTab("plantel"); }
+  const shownTab =perms.tabs.includes(activeTab) ? activeTab : perms.tabs[0]; // nunca se muestra un menú que el perfil no tiene
   // sanción / intervención por día de ausencia (para los informes de detalle): solo quien ve sanciones; se relee al cambiar de menú
   const [sancIdx, setSancIdx] = useState(null);
   useEffect(()=>{
@@ -9441,12 +9457,12 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} soloRanking={!!perms.visor} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} sinCronicos={!!perms.sinCronicos} />}
-          {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} />}
+          {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} archivoPendiente={plantelArchivo} onArchivoTomado={()=>setPlantelArchivo(null)} />}
           {shownTab==="cronicos" && <CronicosTab parsed={parsedVista} plantel={plantel} idMotivoUniverse={parsed.idMotivoUniverse} puedeEditar={perms.cronicosEditar} parcial={!!perms.cronicosParcial} esAdmin={!!perms.esAdmin} puedeCitar={!!perms.citar} puedeSancionar={!!perms.sancionar} motivosFijos={perms.motivosPorDefecto ? CRONICOS_DEFAULT_MOTIVOS : null} soloTelefono={!!perms.cronicosSoloTelefono} soloListado={!!perms.sinCronicos} />}
           {shownTab==="medicina_laboral" && <MedicinaLaboralTab parsed={parsedVista} plantel={plantel} puedeEditar={!!perms.medicinaEditar} puedeEliminar={!!perms.eliminarCita} puedeCargarExt={!!perms.medicinaExt} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
-          {shownTab==="carga_geo" && <GeoFrame key="geo-full" view="" parsed={parsedRaw} plantel={plantel} puedeCargar={!!perms.cargar} onAplicar={aplicarMergeAus} limpiar={!!perms.esAdmin} />}
+          {shownTab==="carga_geo" && <GeoFrame key="geo-full" view="" parsed={parsedRaw} plantel={plantel} puedeCargar={!!perms.cargar} onAplicar={aplicarMergeAus} limpiar={!!perms.esAdmin} onPadron={window.__RADAR.puedePlantel ? padronDesdeGeo : null} />}
           {shownTab==="presentismo" && <GeoFrame key="geo-pres" view="pres" />}
           {shownTab==="permisos_geo" && <GeoPermisosTab parsed={parsed} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
