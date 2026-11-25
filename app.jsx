@@ -7079,13 +7079,18 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
   const justificadasInfo = useMemo(()=>{ const out = []; filasTodas.forEach(f=>{ if(f.baja && !f.it.enviado_ts) return; f.justificadas.forEach(d=>{ const fi = fechaInfo(f.it.legajo, d); out.push({legajo:f.it.legajo, nombre:f.it.nombre, fecha:d, cod:fi.sinDato ? "sin dato" : fi.cod, motivo:fi.motivo}); }); }); return out; }, [filasTodas]);
   const bloqueados = filas.filter(f=>f.it.incluir && slExcede(f, f.it));
   const enLote = filas.filter(f=>f.it.incluir && !slExcede(f, f.it));
-  // Qué sale en Cartas / exportación / envíos: lo tildado que ya está DEFINIDO (con N° interno; se puede desactivar) y todavía NO se imprimió.
+  // Filtros de «Evaluar» (buscar, gerencias, empresa, sector, sanción): viven acá para que también valgan en Cartas, exportación y Envíos.
+  const fltQ = useKeptState("sl.q", ""), fltGers = useKeptState("sl.gers", null), fltSect = useKeptState("sl.sectores", null), fltTipos = useKeptState("sl.tipos", null), fltEmps = useKeptState("sl.empresas", "__def");   // "__def" = por defecto, solo «Propios»
+  const flt = {q:fltQ[0], setQ:fltQ[1], gers:fltGers[0], setGers:fltGers[1], sectores:fltSect[0], setSectores:fltSect[1], tipos:fltTipos[0], setTipos:fltTipos[1], emps:fltEmps[0], setEmps:fltEmps[1]};
+  const pasaFiltros = slPasaFiltros(filas, flt);
+  // Qué sale en Cartas / exportación / envíos: lo tildado, que se VE con los filtros de Evaluar, que ya está DEFINIDO (con N° interno; se puede desactivar) y todavía NO se imprimió.
   // Al imprimir una carta queda marcada como impresa y se saca de esas listas (se ve aparte, para reimprimirla o volverla a pendiente).
   const definida = f => !soloNum || !!f.it.n_interno;
-  const impresas = enLote.filter(f=>f.it.impreso_ts);
-  const pendientes = enLote.filter(f=>!f.it.impreso_ts && definida(f));
-  const sinNumOcultas = soloNum ? enLote.filter(f=>!f.it.impreso_ts && !f.it.n_interno).length : 0;
-  const paraEnviar = enLote.filter(f=>f.it.impreso_ts || definida(f));   // las impresas siguen en Envíos (falta mandarlas por mail)
+  const enSalida = enLote.filter(pasaFiltros);
+  const impresas = enSalida.filter(f=>f.it.impreso_ts);
+  const pendientes = enSalida.filter(f=>!f.it.impreso_ts && definida(f));
+  const sinNumOcultas = soloNum ? enSalida.filter(f=>!f.it.impreso_ts && !f.it.n_interno).length : 0;
+  const paraEnviar = enSalida.filter(f=>f.it.impreso_ts || definida(f));   // las impresas siguen en Envíos (falta mandarlas por mail)
   const notaDe = f => ({legajo:f.it.legajo, nombre:f.it.nombre, sector:f.it.sector, medida:f.it.sancion, diasSuspension:slDias(f.it), fechas:f.it.fechas||[],
     suspDesde: lote && lote.completar_fechas ? (f.it.susp_desde||"") : "", suspHasta: lote && lote.completar_fechas ? (f.it.susp_hasta||"") : "", suspRetoma: lote && lote.completar_fechas ? (f.it.susp_retoma||"") : "",
     nInterno:f.it.n_interno||"", lugar:"Florida", fechaEmision:(lote && lote.fecha_emision) || hoy});
@@ -7225,7 +7230,7 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
         </div>
       )}
 
-      {lote && vista==="evaluar" && <SlEvaluar filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
+      {lote && vista==="evaluar" && <SlEvaluar flt={flt} pasaFiltros={pasaFiltros} filas={filas} bloqueados={bloqueados} enLote={enLote} lote={lote} updItem={updItem} updItems={updItems} updLote={updLote}
         nExport={pendientes.length} sinNumOcultas={sinNumOcultas} soloNum={soloNum} setSoloNum={setSoloNum}
         fechaInfo={fechaInfo} justificadasInfo={justificadasInfo}
         textoAuto={textoAuto} exportarCSV={exportarCSV} exportarXLSX={exportarXLSX} radarPrevio={leg=>{
@@ -7248,12 +7253,19 @@ function SancionesLoteTab({parsed, plantel, esAdmin}){
 }
 
 /* ---- 1. Evaluar ---- */
-function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo, nExport, sinNumOcultas, soloNum, setSoloNum}){
-  const [q, setQ] = useKeptState("sl.q", "");
-  const [gers, setGers] = useKeptState("sl.gers", null);
-  const [sectores, setSectores] = useKeptState("sl.sectores", null);
-  const [tipos, setTipos] = useKeptState("sl.tipos", null);
-  const [emps, setEmps] = useKeptState("sl.empresas", "__def");   // "__def" = por defecto, solo «Propios»
+// Filtros de «Evaluar» como función: devuelve f => ¿pasa los filtros? (la usan Evaluar, Cartas, exportación y Envíos)
+function slPasaFiltros(filas, flt){
+  const {q, gers, sectores, tipos, emps} = flt;
+  const empresas = Array.from(new Set(filas.map(f=>f.empresa||"(sin empresa)")));
+  const propios = empresas.find(e=>normTxt(e)==="propios");
+  const empSel = emps==="__def" ? (propios ? [propios] : null) : emps;
+  const pasa = (sel, v) => sel==null || sel.includes(v);
+  const qn = normTxt(q);
+  return f => pasa(gers, f.it.gerencia||"(sin gerencia)") && pasa(sectores, f.it.sector||"(sin sector)") && pasa(tipos, f.it.sancion||"") && pasa(empSel, f.empresa||"(sin empresa)")
+    && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn));
+}
+function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, updItems, updLote, textoAuto, exportarCSV, exportarXLSX, radarPrevio, fechaInfo, justificadasInfo, nExport, sinNumOcultas, soloNum, setSoloNum}){
+  const {q, setQ, gers, setGers, sectores, setSectores, tipos, setTipos, emps, setEmps} = flt;
   const [orden, setOrden] = useKeptState("sl.orden", null);
   const [abierto, setAbierto] = useState({});
   // opciones y cantidades de cada filtro (null = todas)
@@ -7271,10 +7283,8 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
   let ordenadas = filas;
   if(orden && SORTS[orden.key]){ const fn = SORTS[orden.key], m = orden.dir==="desc" ? -1 : 1, cf = orden.key==="legajoTxt" ? cmpTxt : cmp;
     ordenadas = filas.map((f,i)=>({f,i,v:fn(f)})).sort((a,b)=>{ const c = cf(a.v,b.v); return (a.v==null||b.v==null) ? c||a.i-b.i : (c*m)||a.i-b.i; }).map(x=>x.f); }
-  const qn = normTxt(q);
-  const vista = ordenadas.filter(f=>pasa(gers, f.it.gerencia||"(sin gerencia)") && pasa(sectores, f.it.sector||"(sin sector)") && pasa(tipos, f.it.sancion||"") && pasa(empSel, f.empresa||"(sin empresa)")
-    && (!qn || normTxt(f.it.legajo).includes(qn) || normTxt(f.it.nombre).includes(qn)));
-  // tildados que los filtros dejan afuera de la pantalla: igual reciben número y nota (se avisa)
+  const vista = ordenadas.filter(pasaFiltros);
+  // tildados que los filtros dejan afuera: igual reciben número al numerar, pero NO salen en Cartas, exportación ni Envíos (se avisa)
   const enVista = new Set(vista.map(f=>f.it.id));
   const ocultosTildados = enLote.filter(f=>!enVista.has(f.it.id)).length;
   const th = (k, label, right) => {
@@ -7341,7 +7351,7 @@ function SlEvaluar({filas, bloqueados, enLote, lote, updItem, updItems, updLote,
         <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
           <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
           <span className="hint">Mostrando {vista.length} de {filas.length}</span>
-          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: igual reciben N° interno al numerar y salen en Cartas y Envíos">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (igual se numeran y tienen nota)</span>}
+          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: NO salen en Cartas, exportación ni Envíos (solo reciben N° interno si usás «Numerar lote»)">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (no salen en Cartas, exportación ni Envíos)</span>}
           {orden && ordenLabel[orden.key] ? <React.Fragment><span className="hint">· Orden: <b>{ordenLabel[orden.key]}</b> {orden.key==="legajoTxt" ? "" : orden.dir==="asc" ? "▲" : "▼"}</span><button type="button" className="cell-link" onClick={()=>setOrden(null)}>quitar orden</button></React.Fragment>
             : <span className="hint">· Orden: gerencia y sector (tocá un título para ordenar)</span>}
           <span className="hint">· «Numerar lote» sigue el orden de la tabla.</span>
