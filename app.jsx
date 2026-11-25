@@ -7295,10 +7295,38 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
   const nOn = vista.filter(f=>f.it.incluir).length, allOn = vista.length>0 && nOn===vista.length;
   function setTodos(v){ const p = {}; vista.forEach(f=>{ if(f.it.incluir!==v) p[f.it.id] = {incluir:v}; }); updItems(p); }
   function aplicarSug(){ const p = {}; vista.forEach(f=>{ p[f.it.id] = {sancion:f.sug.sancion, dias:f.sug.dias||0}; }); updItems(p); }
-  function numerar(){
-    let n = parseInt(lote.start_num, 10); if(isNaN(n)) return;
-    const p = {}; ordenadas.forEach(f=>{ if(f.it.incluir && !slExcede(f, f.it)) p[f.it.id] = {n_interno:String(n++)}; }); updItems(p);
+  // Numeración: sigue el orden de la tabla y SOLO a los que se ven con los filtros y están tildados. Los omitidos se saltean (el número pasa al
+  // siguiente) y pierden el que tenían. Lo ya impreso/enviado conserva su número y ese número no se repite.
+  const bloqueadoNum = f => !!(f.it.impreso_ts || f.it.enviado_ts);
+  function calcNumeracion(){
+    let n = parseInt(lote.start_num, 10); if(isNaN(n)) return null;
+    const objetivo = vista.filter(f=>f.it.incluir && !slExcede(f, f.it) && !bloqueadoNum(f));
+    const idsObj = new Set(objetivo.map(f=>f.it.id));
+    const usados = new Set(); filas.forEach(f=>{ if(bloqueadoNum(f) && f.it.n_interno) usados.add(String(f.it.n_interno)); });
+    const nuevo = new Map(); objetivo.forEach(f=>{ while(usados.has(String(n))) n++; nuevo.set(f.it.id, String(n++)); });
+    const asignados = new Set(nuevo.values());
+    const p = {};
+    filas.forEach(f=>{
+      if(bloqueadoNum(f)) return;
+      const actual = f.it.n_interno ? String(f.it.n_interno) : "";
+      let quiere = actual;
+      if(idsObj.has(f.it.id)) quiere = nuevo.get(f.it.id);
+      else if(actual && ((enVista.has(f.it.id) && !f.it.incluir) || asignados.has(actual))) quiere = "";   // omitido visible, o número repetido de alguien que quedó afuera
+      if(quiere!==actual) p[f.it.id] = {n_interno:quiere};
+    });
+    return p;
   }
+  function numerar(){ const p = calcNumeracion(); if(!p) return; setAutoNum(true); if(Object.keys(p).length) updItems(p); }
+  // después de «Numerar lote», al omitir o volver a tildar un empleado se renumera solo (sin dejar huecos)
+  const [autoNum, setAutoNum] = useKeptState("sl.autoNum|"+(lote ? lote.id : ""), false);
+  const firmaTildados = enLote.map(f=>f.it.id).sort().join(",");
+  const firmaRef = useRef(firmaTildados);
+  useEffect(()=>{
+    if(firmaRef.current===firmaTildados) return;
+    firmaRef.current = firmaTildados;
+    if(!autoNum) return;
+    const p = calcNumeracion(); if(p && Object.keys(p).length) updItems(p);
+  }, [firmaTildados]);
   const sinNum = enLote.filter(f=>!f.it.n_interno).length;
   const cnt = SL_TODAS.map(s=>[s, enLote.filter(f=>f.it.sancion===s).length]).filter(([s,n])=>n>0 || SL_ESC.includes(s));
   const ordenLabel = {legajoTxt:"Legajo como Excel (texto)", legajo:"Legajo", nombre:"Empleado", fechas:"Fechas", ultima:"Última sanción firmada", dias:"Días susp. 12 m", sancion:"Sanción", num:"N° interno"};
@@ -7334,7 +7362,8 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
         <div style={{display:"flex", flexDirection:"column", gap:10, flex:"1 1 340px", minWidth:0}}>
           <div style={{display:"flex", gap:10, alignItems:"flex-end"}}>
             <div className="field"><label>N° interno inicial</label><input type="number" style={{width:120}} value={lote.start_num||""} onChange={e=>updLote({start_num:e.target.value})} placeholder="Ej.: 3501" /></div>
-            <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados, en el orden de la tabla">Numerar lote</button>
+            <button type="button" className="btn secondary small" onClick={numerar} disabled={!lote.start_num} title="Numera a los tildados que se ven con los filtros, en el orden de la tabla (saltea a los omitidos)">Numerar lote</button>
+            <label className="hint" style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}} title="Si omitís o volvés a tildar a alguien, los números se vuelven a asignar solos, sin dejar huecos"><input type="checkbox" checked={!!autoNum} onChange={e=>setAutoNum(e.target.checked)} />Renumerar solo al omitir / tildar</label>
           </div>
           <div className="field"><label>Texto especial (columna del Excel/CSV)</label><input type="text" style={{width:"100%"}} value={lote.texto_especial||""} onChange={e=>updLote({texto_especial:e.target.value})} placeholder={textoAuto} /></div>
         </div>
@@ -7351,10 +7380,10 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
         <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", flexBasis:"100%"}}>
           <button type="button" className="btn secondary small" onClick={aplicarSug}>Aplicar sugerencias a los visibles</button>
           <span className="hint">Mostrando {vista.length} de {filas.length}</span>
-          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: NO salen en Cartas, exportación ni Envíos (solo reciben N° interno si usás «Numerar lote»)">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (no salen en Cartas, exportación ni Envíos)</span>}
+          {ocultosTildados>0 && <span className="hint" style={{color:"var(--warning)", fontWeight:700}} title="Están tildados pero los filtros no los muestran: no se numeran ni salen en Cartas, exportación ni Envíos">· {ocultosTildados} tildado{ocultosTildados===1?"":"s"} fuera de los filtros (no salen en Cartas, exportación ni Envíos)</span>}
           {orden && ordenLabel[orden.key] ? <React.Fragment><span className="hint">· Orden: <b>{ordenLabel[orden.key]}</b> {orden.key==="legajoTxt" ? "" : orden.dir==="asc" ? "▲" : "▼"}</span><button type="button" className="cell-link" onClick={()=>setOrden(null)}>quitar orden</button></React.Fragment>
             : <span className="hint">· Orden: gerencia y sector (tocá un título para ordenar)</span>}
-          <span className="hint">· «Numerar lote» sigue el orden de la tabla.</span>
+          <span className="hint">· «Numerar lote» sigue el orden de la tabla y solo numera a los que se ven con los filtros.</span>
         </div>
       </div>
       <div className="card table-card">
