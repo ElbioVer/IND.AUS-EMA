@@ -355,7 +355,7 @@ function AuthGate(){
 /* ===================== perfiles y permisos ===================== */
 // Qué puede ver y hacer cada perfil. El perfil de cada usuario está en la tabla `perfiles` de Supabase (supabase-permisos-roles.sql);
 // ahí mismo las reglas de acceso (RLS) impiden en el servidor lo que el perfil no permite: esta tabla solo ordena lo que se muestra en pantalla.
-const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel","carga_geo","presentismo","permisos_geo"];
+const TABS_DE_ANALISIS = ["resumen","resumen_gerencia","cuadro_diario","tipos","cronicos","medicina_laboral","sanciones","sanciones_lote","ranking","detalle_empleados","plantel","carga_geo","permisos_geo"];
 const ROLES = {
   admin: {label:"Administrador", desc:"Acceso total: todos los menús, cargas, reemplazo de archivos, Crónicos editable y gestión de usuarios.",
     tabs:[...TABS_DE_ANALISIS, "usuarios"], filtros:true, cargar:true, reemplazar:true, objetivo:true, cronicosEditar:true, plantelCompleto:true, medicinaEditar:true, citar:true, eliminarCita:true, sancionar:true, sancionDefinir:true, esAdmin:true, medicinaExt:true},
@@ -366,16 +366,16 @@ const ROLES = {
     // vista simplificada: solo empresa "Propios" y los filtros de motivo ya resueltos por defecto, sin mostrar esas opciones
     soloPropios:true, motivosPorDefecto:true},
   // Visor: solo mira, y solo la(s) Unidad(es) de Negocio que le asigna el Administrador (tabla perfiles, columna `unidades`).
-  visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Evolución mensual, Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
-    tabs:["resumen","cuadro_diario","evolucion","ranking","detalle_empleados"], filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
-  gerencias: {label:"Gerencias", desc:"Resumen, Resumen por Gerencia, Cuadro Diario, Evolución mensual, Tipos de ausencia, Ranking, Detalle de empleados y Crónicos, con los filtros globales (Mes, Gerencia, Departamento, Sector, Empresa y motivos). Solo lectura. En Crónicos ven el listado de casos con opinión médica (diagnóstico), táctico, posible alta y notificar, sin observaciones, acciones, citaciones, teléfono ni sanciones; en Detalle de empleados no ven el historial de Crónicos.",
-    tabs:["resumen","resumen_gerencia","cuadro_diario","evolucion","tipos","cronicos","ranking","detalle_empleados"], filtros:true, sinCronicos:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
+  visor: {label:"Visor", desc:"Solo lectura de la(s) Unidad(es) de Negocio asignadas por el Administrador: Resumen, Cuadro Diario, Gráficos de evolución (solo la evolución mensual), Ranking de empleados (con el filtro Id Motivo) y Detalle de empleados (ficha, calendario anual y detalle, de empleados de su Unidad). No ve Crónicos, Medicina Laboral, Sanciones ni el Comité de ausentismo.",
+    tabs:["resumen","cuadro_diario","tipos","ranking","detalle_empleados"], soloEvolucion:true, filtros:false, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false, visor:true},
+  gerencias: {label:"Gerencias", desc:"Resumen, Resumen por Gerencia, Cuadro Diario, Gráficos de evolución (evolución mensual y tipos de ausencia), Ranking, Detalle de empleados y Crónicos, con los filtros globales (Mes, Gerencia, Departamento, Sector, Empresa y motivos). Solo lectura. En Crónicos ven el listado de casos con opinión médica (diagnóstico), táctico, posible alta y notificar, sin observaciones, acciones, citaciones, teléfono ni sanciones; en Detalle de empleados no ven el historial de Crónicos.",
+    tabs:["resumen","resumen_gerencia","cuadro_diario","tipos","cronicos","ranking","detalle_empleados"], filtros:true, sinCronicos:true, cargar:false, reemplazar:false, objetivo:false, cronicosEditar:false, plantelCompleto:false, medicinaEditar:false, citar:false}
 };
 
 // Matriz «qué puede ver y hacer cada perfil»: se arma sola a partir de ROLES (misma fuente que usa la app para mostrar u ocultar), así nunca queda desactualizada.
-const PERMISOS_TABS_LABEL = {resumen:"Resumen", resumen_gerencia:"Resumen por Gerencia", cuadro_diario:"Cuadro Diario", evolucion:"Evolución mensual", tipos:"Tipos de ausencia", cronicos:"Crónicos",
+const PERMISOS_TABS_LABEL = {resumen:"Resumen", resumen_gerencia:"Resumen por Gerencia", cuadro_diario:"Cuadro Diario", tipos:"Gráficos de evolución (evolución mensual y tipos de ausencia)", cronicos:"Crónicos",
   medicina_laboral:"Medicina Laboral", sanciones:"Sanciones", sanciones_lote:"Sanciones por lote", ranking:"Ranking (incluye Comité de ausentismo)", detalle_empleados:"Detalle Empleados", plantel:"Gestión de Plantel",
-  carga_geo:"Carga Geo", presentismo:"Presentismo diario", permisos_geo:"Permisos Geo", usuarios:"Usuarios y permisos"};
+  carga_geo:"Carga Geo", permisos_geo:"Permisos Geo", usuarios:"Usuarios y permisos"};
 const PERMISOS_MATRIZ = [
   {grupo:"Menús que ve", filas:Object.keys(PERMISOS_TABS_LABEL).map(k=>({label:PERMISOS_TABS_LABEL[k], ok:p=>p.tabs.includes(k)}))},
   {grupo:"Filtros y alcance de los datos", filas:[
@@ -837,7 +837,10 @@ function parseAusentismoRows(rows2d){
     records.push({legajo, agrup, cat:agrup||"F", unidad, sector, gerencia, departamento, empresa, nombre, idMotivo, motivo, estado, razon, puesto, jefe, presidencia, sindicato, tipoContrat,
       valid:true, dia:d.dia, mes:d.mes, anio:d.anio, ts, monthKey, dateKey});
   });
-  return {error:null, records, invalidCount, hasMotivoCol: idxIdMotivo!==-1 || idxMotivo!==-1,
+  // columnas opcionales que el archivo SÍ trae: si una viene vacía en una fila, esa fila queda vacía (la fusión no conserva el valor viejo)
+  const cols = new Set(["agrup"]);
+  [["unidad",idxUnidad],["sector",idxSector],["gerencia",idxGerencia],["departamento",idxDepartamento],["empresa",idxEmpresa],["nombre",idxNombre],["idMotivo",idxIdMotivo],["motivo",idxMotivo],["estado",idxEstado],["razon",idxRazon],["puesto",idxPuesto],["jefe",idxJefe],["presidencia",idxPresidencia],["sindicato",idxSindicato],["tipoContrat",idxTipoContrat]].forEach(([k,i])=>{ if(i!==-1) cols.add(k); });
+  return {error:null, records, invalidCount, cols, hasMotivoCol: idxIdMotivo!==-1 || idxMotivo!==-1,
     missingTipoContrat: idxTipoContrat===-1 ? "Falta la columna '"+OPTIONAL_COLS.tipoContrat+"': el Cuadro Diario no podrá separar Propios / Contratados." : null};
 }
 
@@ -973,7 +976,10 @@ function withCanonEmpresa(parsedRaw, plantel){
 }
 
 const AUS_UPDATE_CMP_FIELDS =["agrup","unidad","sector","gerencia","departamento","empresa","nombre","idMotivo","motivo","estado","razon","puesto","jefe","presidencia","sindicato","tipoContrat"];
-function mergeAusentismoRecords(existingRecords, newRecords){
+// colsPresentes (Set, opcional): columnas que el archivo nuevo trae. Si la columna existe y una fila la trae vacía, se VACÍA el valor viejo
+// (ej.: un día cargado como «CA» que Calipso corrigió a presente: el Id Motivo/motivo/razón viejos no deben quedar). Si el archivo no trae la
+// columna, o no se informa (carga desde Geo), se conserva el valor ya cargado, como antes.
+function mergeAusentismoRecords(existingRecords, newRecords, colsPresentes){
   const validExisting = existingRecords.filter(r=>r.valid);
   const invalidExisting = existingRecords.filter(r=>!r.valid);
   const validNew = newRecords.filter(r=>r.valid);
@@ -996,7 +1002,7 @@ function mergeAusentismoRecords(existingRecords, newRecords){
       const mergedRow = {...r};
       // fila provisoria de Geo (o la que llega es de Geo): se reemplaza completa; si no, una columna opcional vacía no borra lo ya cargado
       const provisoria = prev.origen==="geo" || r.origen==="geo";
-      if(!provisoria) AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f]) mergedRow[f] = prev[f]; });
+      if(!provisoria) AUS_UPDATE_CMP_FIELDS.forEach(f=>{ if(!mergedRow[f] && prev[f] && !(colsPresentes && colsPresentes.has(f))) mergedRow[f] = prev[f]; });
       // Calipso reemplaza una fila provisoria de Geo: además de los campos, hay que limpiar la marca "geo"
       if(prev.origen==="geo" && r.origen!=="geo"){ mergedRow.origen = ""; mergedRow.origenLimpiar = true; }
       // la empresa se compara sin mayúsculas: escribirla distinto no es un cambio real
@@ -8957,7 +8963,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
         // ahorra datos de subida y evita que todos los usuarios tengan que volver a bajar toda la base.
         const prevRecords = parsedRef.current ? parsedRef.current.records : null;
         const validRecords = parsedRows.records.filter(r=>r.valid);
-        const recordsToUpload = prevRecords ? mergeAusentismoRecords(prevRecords, validRecords).changedRows : validRecords;
+        const recordsToUpload = prevRecords ? mergeAusentismoRecords(prevRecords, validRecords, parsedRows.cols).changedRows : validRecords;
         applyParsedRecords(parsedRows.records, file.name, parsedRows.hasMotivoCol);
         setUploadNotice(parsedRows.missingTipoContrat);
         setActiveTab("resumen");
@@ -8999,7 +9005,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           setLoading(false);
           return;
         }
-        const {merged, nuevos, modificados, sinCambios, nuevosInvalidos, changedRows} = mergeAusentismoRecords(parsed.records, parsedRows.records);
+        const {merged, nuevos, modificados, sinCambios, nuevosInvalidos, changedRows} = mergeAusentismoRecords(parsed.records, parsedRows.records, parsedRows.cols);
         const hasMotivo = parsed.hasMotivo || parsedRows.hasMotivoCol;
         setUploadNotice(parsedRows.missingTipoContrat);
         const nextParsed = buildParsedAggregates(merged, file.name, hasMotivo);
@@ -9277,8 +9283,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
     {key:"resumen", label:"Resumen", color:"#2f80ed"},
     {key:"resumen_gerencia", label:"Resumen por Gerencia", color:"#12a594"},
     {key:"cuadro_diario", label:"Cuadro Diario", color:"#f2771a"},
-    {key:"evolucion", label:"Evolución mensual", color:"#2fa84f"},
-    {key:"tipos", label:"Tipos de ausencia", color:"#8e63e6"},
+    {key:"tipos", label:"Gráficos de evolución", color:"#2fa84f"},
     {key:"cronicos", label:"Crónicos", color:"#e5484d"},
     {key:"medicina_laboral", label:"Medicina Laboral", color:"#b4724a"},
     {key:"sanciones", label:"Sanciones", color:"#c0392b"},
@@ -9287,7 +9292,6 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
     {key:"detalle_empleados", label:"Detalle Empleados", color:"#0ea5c6"},
     {key:"plantel", label:"Gestión de Plantel", color:"#d6409f"},
     {key:"carga_geo", label:"Carga Geo", color:"#1f8a70"},
-    {key:"presentismo", label:"Presentismo diario", color:"#e8590c"},
     {key:"permisos_geo", label:"Permisos Geo", color:"#3a8f8f"},
     {key:"usuarios", label:"Usuarios y permisos", color:"#7b8794"}
   ];
@@ -9492,8 +9496,7 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="resumen" && <ResumenTab rankingUnits={rankingUnits} objetivo={objetivo} scopeUnitsMap={scopeUnitsMap} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} motivoUniverse={scopeMotivoUniverse} scopeEmpleados={scopeEmpleados} scopeAgg={scopeAgg} plantelActive={plantelActive} scopePlantel={scopePlantel} scopeMonthKeys={scopeMonthKeys} dotacionTotal={dotacionDisplay} jornalesTotal={plantelActive && globalPlantelStats ? globalPlantelStats.jornalesDotacion : 0} cutoffTs={cutoffTs} verFiltros={perms.filtros} />}
           {shownTab==="resumen_gerencia" && <ResumenGerenciaTab parsed={parsed} plantel={plantel} objetivo={objetivo} mesFilter={FILTERS.mes} empresaIncluded={empresaIncluded} excludedMotivos={excludedMotivos} setExcludedMotivos={setExcludedMotivos} scopeMonthKeys={scopeMonthKeys} verFiltros={perms.filtros} />}
           {shownTab==="cuadro_diario" && <CuadroDiarioTab parsed={parsed} soloUnidades={unidadesSet} />}
-          {shownTab==="evolucion" && <EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />}
-          {shownTab==="tipos" && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}
+          {shownTab==="tipos" && <div className="tabpanel"><EvolucionTab evoMonths={evoMonths} evoSeries={evoSeries} objetivo={objetivo} />{!perms.soloEvolucion && <TiposTab compositionData={compositionData} apAnpData={apAnpData} motivoEntries={motivoEntries} hasMotivo={parsed.hasMotivo} soloApAnpYMotivo={!perms.filtros} />}</div>}
           {shownTab==="ranking" && <RankingTab scopeUnitsMap={scopeUnitsMap} hasUnidad={parsed.hasUnidad} idMotivoUniverse={parsed.idMotivoUniverse} presidenciaUniverse={parsed.presidenciaUniverse} presidenciaCats={parsed.presidenciaCats||{}} idIncluded={rankingIdIncluded} setIdIncluded={setRankingIdIncluded} presIncluded={rankingPresIncluded} setPresIncluded={setRankingPresIncluded} plantel={plantel} ocultarFiltrosMotivo={!!perms.motivosPorDefecto} soloRanking={!!perms.visor} comiteRecords={comiteRecords} monthKeys={parsed.monthKeys} excludedMotivos={excludedMotivos} />}
           {shownTab==="detalle_empleados" && <DetalleEmpleadosTab parsed={parsedVista} plantel={plantel} motivosPorDefecto={!!perms.motivosPorDefecto || !!perms.visor} puedeVerSanciones={!!perms.sancionar} soloFicha={!!perms.visor} sinCronicos={!!perms.sinCronicos} />}
           {shownTab==="plantel" && <PlantelTab plantel={plantel} setPlantel={setPlantel} plantelHistorial={plantelHistorial} setPlantelHistorial={setPlantelHistorial} plantelUpdatedAt={plantelUpdatedAt} setPlantelUpdatedAt={setPlantelUpdatedAt} plantelActive={plantelActive} globalPlantelStats={plantelConsistencia} scopeMonthKeys={scopeMonthKeys} diasPeriodoLabel={scopeMonthLabel} dbUsage={dbUsage} dbUsageError={dbUsageError} dbChecking={dbChecking} onCheckDb={checkDb} dbRowsPerMonth={dbRowsPerMonth} dataStartTs={parsed ? parsed.minTs : null} soloCarga={!perms.plantelCompleto} archivoPendiente={plantelArchivo} onArchivoTomado={()=>setPlantelArchivo(null)} />}
@@ -9502,7 +9505,6 @@ function App({userEmail, userId, rol, unidades, permisosSinActivar, onSignOut}){
           {shownTab==="sanciones" && <SancionesTab plantel={plantel} parsed={parsedVista} puedeDefinir={!!perms.sancionDefinir} esAdmin={!!perms.esAdmin} />}
           {shownTab==="sanciones_lote" && <SancionesLoteTab parsed={parsed} plantel={plantel} esAdmin={!!perms.esAdmin} />}
           {shownTab==="carga_geo" && <GeoFrame key="geo-full" view="" parsed={parsedRaw} plantel={plantel} puedeCargar={!!perms.cargar} onAplicar={aplicarMergeAus} limpiar={!!perms.esAdmin} onPadron={window.__RADAR.puedePlantel ? padronDesdeGeo : null} />}
-          {shownTab==="presentismo" && <GeoFrame key="geo-pres" view="pres" />}
           {shownTab==="permisos_geo" && <GeoPermisosTab parsed={parsed} esAdmin={!!perms.esAdmin} />}
           {shownTab==="usuarios" && <UsuariosTab userId={userId} unidadesDisponibles={unidadesDisponibles} />}
         </React.Fragment>
