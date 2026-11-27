@@ -3903,7 +3903,9 @@ function DetalleEmpleadosTab({parsed, plantel, motivosPorDefecto, puedeVerSancio
 /* ===================== barra de scroll horizontal arriba de una tabla ancha ===================== */
 function TopScrollSync({targetRef}){
   const topRef = useRef(null);
+  const fixRef = useRef(null);
   const [width, setWidth] = useState(0);
+  const [fx, setFx] = useState(null);   // {top,left,width}: la barra queda fija (copia) justo debajo del menú cuando la de su lugar ya salió de la pantalla
   useEffect(()=>{
     const el = targetRef.current;
     if(!el) return;
@@ -3913,19 +3915,46 @@ function TopScrollSync({targetRef}){
     ro.observe(el);
     const mo = new MutationObserver(sync);
     mo.observe(el, {childList:true, subtree:true});
-    function onBottomScroll(){ if(topRef.current) topRef.current.scrollLeft = el.scrollLeft; }
+    function onBottomScroll(){
+      const l = el.scrollLeft;
+      if(topRef.current && topRef.current.scrollLeft!==l) topRef.current.scrollLeft = l;
+      if(fixRef.current && fixRef.current.scrollLeft!==l) fixRef.current.scrollLeft = l;
+    }
+    // Dónde queda el borde de abajo del menú (se mide en vivo: no depende de un valor guardado) y si la barra de su lugar ya se fue por arriba.
+    function place(){
+      const nav = document.querySelector("nav.tabs");
+      const navB = nav ? Math.round(nav.getBoundingClientRect().bottom) : 0;
+      if(nav){ const h = Math.round(nav.getBoundingClientRect().height)+"px"; if(document.documentElement.style.getPropertyValue("--tabs-h")!==h) document.documentElement.style.setProperty("--tabs-h", h); }
+      const bar = topRef.current;
+      if(!bar){ setFx(null); return; }
+      const b = bar.getBoundingClientRect(), t = el.getBoundingClientRect();
+      if(b.top < navB-1 && t.bottom > navB+30){
+        const nx = {top:navB, left:Math.round(b.left), width:Math.round(b.width)};
+        setFx(p=> (p && p.top===nx.top && p.left===nx.left && p.width===nx.width) ? p : nx);
+      } else setFx(p=> p ? null : p);
+    }
+    window.addEventListener("scroll", place, {passive:true});
+    window.addEventListener("resize", place);
+    place();
     el.addEventListener("scroll", onBottomScroll);
-    return ()=>{ ro.disconnect(); mo.disconnect(); el.removeEventListener("scroll", onBottomScroll); };
+    return ()=>{ ro.disconnect(); mo.disconnect(); el.removeEventListener("scroll", onBottomScroll); window.removeEventListener("scroll", place); window.removeEventListener("resize", place); };
   }, [targetRef]);
+  useEffect(()=>{ if(fx && fixRef.current && targetRef.current) fixRef.current.scrollLeft = targetRef.current.scrollLeft; }, [!!fx]);
   function onTopScroll(e){ if(targetRef.current) targetRef.current.scrollLeft = e.target.scrollLeft; }
   if(width<=0) return null;
   return (
-    <div ref={topRef} onScroll={onTopScroll} className="top-scrollbar">
-      <div style={{width, height:1}}></div>
-    </div>
+    <React.Fragment>
+      <div ref={topRef} onScroll={onTopScroll} className="top-scrollbar">
+        <div style={{width, height:1}}></div>
+      </div>
+      {fx && (
+        <div ref={fixRef} onScroll={onTopScroll} className="top-scrollbar no-print" style={{position:"fixed", top:fx.top, left:fx.left, width:fx.width, zIndex:26, marginBottom:0, boxShadow:"0 2px 6px rgba(0,0,0,.25)"}}>
+          <div style={{width, height:1}}></div>
+        </div>
+      )}
+    </React.Fragment>
   );
 }
-
 /* ===================== encabezado fijo de una tabla ancha =====================
    Al bajar por la página, cuando los títulos de la tabla salen de la pantalla aparece una copia fija justo debajo del menú
    (y de la barra de desplazamiento horizontal), con las mismas columnas, que acompaña el desplazamiento lateral y sigue siendo
@@ -3946,7 +3975,7 @@ function StickyTableHead({targetRef, columns, sortKey, sortDir, onSort}){
       setTotal(table.getBoundingClientRect().width);
     }
     function check(){
-      const tabsH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tabs-h")) || 0;
+      const navEl = document.querySelector("nav.tabs"); const tabsH = navEl ? navEl.getBoundingClientRect().height : (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tabs-h")) || 0);
       const stick = tabsH + 16;
       const head = table.tHead.getBoundingClientRect();
       const tbl = table.getBoundingClientRect();
@@ -4364,7 +4393,7 @@ function abrirNotasSancion(titulo, notas){
     *{box-sizing:border-box;}
     html,body{margin:0;padding:0;}
     body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
-    .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;}
+    .nota{position:relative;display:flex;flex-direction:column;width:auto;min-height:252mm;padding:16mm 18mm 14mm;page-break-after:always;break-after:page;page-break-inside:avoid;break-inside:avoid;}
     .nota:last-child{page-break-after:auto;}
     .top{display:flex;justify-content:space-between;align-items:flex-start;}
     .top img{width:60mm;height:auto;}
@@ -4381,7 +4410,7 @@ function abrirNotasSancion(titulo, notas){
     .firmas{margin:16mm 0 0 55mm;font-size:14px;}
     .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
     .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
-    .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
+    .interno{margin-top:auto;padding-top:10mm;font-size:14px;}
   `;
   const win = window.open("", "_blank");
   if(!win){ alert("El navegador bloqueó la ventana de impresión. Habilitá las ventanas emergentes para este sitio e intentá de nuevo."); return false; }
@@ -6660,7 +6689,7 @@ const SL_NOTA_CSS = `
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;background:#fff;}
   body{font-family:Arial,Helvetica,sans-serif;color:#000;font-size:13px;line-height:1.45;}
-  .nota{position:relative;width:210mm;height:296mm;padding:16mm 18mm;page-break-after:always;overflow:hidden;background:#fff;}
+  .nota{position:relative;display:flex;flex-direction:column;width:auto;min-height:252mm;padding:16mm 18mm 14mm;page-break-after:always;break-after:page;page-break-inside:avoid;break-inside:avoid;background:#fff;}
   .nota:last-child{page-break-after:auto;}
   .top{display:flex;justify-content:space-between;align-items:flex-start;}
   .top img{width:60mm;height:auto;}
@@ -6677,7 +6706,7 @@ const SL_NOTA_CSS = `
   .firmas{margin:16mm 0 0 55mm;font-size:14px;}
   .firmas div{margin:0 0 9mm;display:flex;align-items:flex-end;}
   .firmas span{display:inline-block;border-bottom:1px solid #000;flex:1;margin-left:3mm;height:1em;}
-  .interno{position:absolute;left:18mm;bottom:16mm;font-size:14px;}
+  .interno{margin-top:auto;padding-top:10mm;font-size:14px;}
 `;
 function slNotaHtml(d, logoUrl){
   const e = escHtml, ps = slParrafos(d);
