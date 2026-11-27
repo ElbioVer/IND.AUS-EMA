@@ -6242,6 +6242,7 @@ function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
   const [hasta, setHasta] = useKeptState("san.hasta", "");
   const [estadoF, setEstadoF] = useKeptState("san.estado", "__todas");
   const [search, setSearch] = useKeptState("san.search", "");
+  const [ocultarImp, setOcultarImp] = useKeptState("san.ocultarImpresas", false);   // oculta las ya emitidas (impresas)
   const [openId, setOpenId] = useState(null);
   const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState(null);
@@ -6272,10 +6273,11 @@ function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
       if(desde && iso && iso<desde) return false;
       if(hasta && iso && iso>hasta) return false;
       if(estadoF!=="__todas" && r.estado!==estadoF) return false;
+      if(ocultarImp && r.estado==="emitida") return false;
       if(q && !normTxt(r.legajo).includes(q) && !normTxt(r.nombre).includes(q)) return false;
       return true;
     });
-  }, [todas, desde, hasta, estadoF, search]);
+  }, [todas, desde, hasta, estadoF, search, ocultarImp]);
   const nPor = est => todas.filter(r=>r.estado===est).length;
   const definidas = lista.filter(r=>r.estado==="definida");
 
@@ -6355,8 +6357,9 @@ function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
             <option value="emitida">Emitidas ({nPor("emitida")})</option>
           </select>
         </div>
+        <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer", alignSelf:"flex-end", paddingBottom:8}} title="Oculta de la lista las sanciones cuya nota ya se imprimió (estado Emitida)"><input type="checkbox" checked={!!ocultarImp} onChange={e=>setOcultarImp(e.target.checked)} /> Ocultar las ya impresas ({nPor("emitida")})</label>
         <div className="field"><label>Buscar</label><input type="text" placeholder="Legajo o nombre…" value={search} onChange={e=>setSearch(e.target.value)} style={{minWidth:180}} /></div>
-        {(desde || hasta || search || estadoF!=="__todas") && <button type="button" className="btn secondary" onClick={()=>{ setDesde(""); setHasta(""); setSearch(""); setEstadoF("__todas"); }}>Quitar filtros</button>}
+        {(desde || hasta || search || ocultarImp || estadoF!=="__todas") && <button type="button" className="btn secondary" onClick={()=>{ setDesde(""); setHasta(""); setSearch(""); setEstadoF("__todas"); setOcultarImp(false); }}>Quitar filtros</button>}
         <button type="button" className="btn secondary" onClick={actualizar} disabled={loading} title="Vuelve a leer lo que marcaron los demás usuarios">Actualizar datos</button>
         {puedeDefinir && <button type="button" className="btn" onClick={()=>emitir(definidas)} disabled={!definidas.length} title="Genera todas las notas definidas de la lista en una sola hoja de impresión (un PDF)">Emitir todas las definidas ({definidas.length})</button>}
         <span className="hint">{status}</span>
@@ -6387,7 +6390,7 @@ function SancionesTab({plantel, parsed, puedeDefinir, esAdmin}){
                       <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}>{r.marcadaTs ? new Date(r.marcadaTs).toLocaleDateString("es-AR") : "—"}<div className="hint">{r.marcadaPor||""}</div></td>
                       <td style={{verticalAlign:"top", minWidth:150}}>{(SANCION_MOTIVOS[r.motivoSancion]||SANCION_MOTIVOS.ausencias).corto}{r.motivoSancion==="control" && r.fechaControl ? <div className="hint">Control del {isoToDMY(r.fechaControl)}</div> : null}</td>
                       <td style={{verticalAlign:"top"}}>{r.medida ? <b>{r.medida}</b> : "—"}{r.medida==="Suspensión" && r.diasSuspension ? <div className="hint">{jornadasTexto(r.diasSuspension)}</div> : null}</td>
-                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}><b style={{color:est.color}}>{est.txt}</b>{r.estado==="emitida" && r.emitidaTs ? <div className="hint">{new Date(r.emitidaTs).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{verticalAlign:"top", whiteSpace:"nowrap"}}><b style={{color:est.color}}>{est.txt}</b>{r.estado==="emitida" ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>🖨 Impresa {r.emitidaTs ? fechaHoraAR(r.emitidaTs) : ""}{r.emitidaPor ? " · "+r.emitidaPor : ""}</div> : null}</td>
                       <td style={{whiteSpace:"nowrap", verticalAlign:"top"}}>
                         {puedeDefinir && (
                           <React.Fragment>
@@ -6718,6 +6721,7 @@ function slNotaHtml(d, logoUrl){
     "<div class='firmas'><div>Me notifico: <span></span></div><div>Aclaración: <span></span></div><div>DNI: <span></span></div></div>"+
     "<div class='interno'>N° interno: "+e(d.nInterno||"")+"</div></section>";
 }
+const fechaHoraAR = ts => { const d = new Date(ts); return d.toLocaleDateString("es-AR")+" "+d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",hour12:false}); };
 const slLogoUrl = () => new URL("logo-ema.png", location.href).href;
 function slAbrirNotas(titulo, notas){
   const win = window.open("", "_blank");
@@ -7318,10 +7322,12 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
   let ordenadas = filas;
   if(orden && SORTS[orden.key]){ const fn = SORTS[orden.key], m = orden.dir==="desc" ? -1 : 1, cf = orden.key==="legajoTxt" ? cmpTxt : cmp;
     ordenadas = filas.map((f,i)=>({f,i,v:fn(f)})).sort((a,b)=>{ const c = cf(a.v,b.v); return (a.v==null||b.v==null) ? c||a.i-b.i : (c*m)||a.i-b.i; }).map(x=>x.f); }
-  const vista = ordenadas.filter(pasaFiltros);
+  const [impF, setImpF] = useKeptState("sl.impF", "todas");   // «todas» | «sin» (oculta las ya impresas) | «imp» (solo las impresas)
+  const vista = ordenadas.filter(pasaFiltros).filter(f=> impF==="sin" ? !f.it.impreso_ts : impF==="imp" ? !!f.it.impreso_ts : true);
   // tildados que los filtros dejan afuera: igual reciben número al numerar, pero NO salen en Cartas, exportación ni Envíos (se avisa)
   const enVista = new Set(vista.map(f=>f.it.id));
-  const ocultosTildados = enLote.filter(f=>!enVista.has(f.it.id)).length;
+  const ocultosTildados = enLote.filter(f=>!enVista.has(f.it.id) && pasaFiltros(f)===false).length;
+  const nImpresasFila = filas.filter(f=>f.it.impreso_ts).length;
   const th = (k, label, right) => {
     const cur = orden && orden.key; const on = cur===k || (k==="legajo" && cur==="legajoTxt"); const dir = on ? orden.dir : null;
     const next = !on ? {key:k, dir:"asc"} : (dir==="asc" && cur!=="legajoTxt") ? {key:k, dir:"desc"} : (k==="legajo" && cur==="legajo") ? {key:"legajoTxt", dir:"asc"} : null;
@@ -7393,6 +7399,13 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
         <SlMulti label="Empresa" all={empO.all} counts={empO.counts} value={empSel} onChange={setEmps} />
         <SlMulti label="Sector" all={secO.all} counts={secO.counts} value={sectores} onChange={setSectores} />
         <SlMulti label="Sanción" all={tipO.all} counts={tipO.counts} value={tipos} onChange={setTipos} />
+        <div className="field" style={{width:SL_FILTRO_W, flex:"none"}}><label>Impresión</label>
+          <select value={impF} onChange={e=>setImpF(e.target.value)} title="Las cartas ya impresas salen de Cartas y de la exportación; acá además podés ocultarlas de la lista">
+            <option value="todas">Todas ({filas.length})</option>
+            <option value="sin">Sin imprimir ({filas.length-nImpresasFila})</option>
+            <option value="imp">Ya impresas ({nImpresasFila})</option>
+          </select>
+        </div>
         {/* N° interno + Numerar arriba, Texto especial abajo */}
         <div style={{display:"flex", flexDirection:"column", gap:10, flex:"1 1 340px", minWidth:0}}>
           <div style={{display:"flex", gap:10, alignItems:"flex-end"}}>
@@ -7440,7 +7453,7 @@ function SlEvaluar({flt, pasaFiltros, filas, bloqueados, enLote, lote, updItem, 
                       <td style={{verticalAlign:"top"}}><input type="checkbox" checked={!!it.incluir} title={it.incluir ? "Quitá la tilde si no se va a sancionar (te pide el motivo)" : "Volver a incluir"} onChange={e=>updItem(it.id, e.target.checked ? {incluir:true, motivo_omision:""} : {incluir:false})} /></td>
                       <td style={{verticalAlign:"top", fontVariantNumeric:"tabular-nums"}}>{it.legajo}{!f.enPlantel && <div className="hint" style={{color:"var(--critical)"}}>sin plantel</div>}{f.baja && <div className="hint" style={{color:"var(--critical)"}}>dado de baja</div>}
                         {!it.incluir && <SlOmision it={it} onSave={v=>updItem(it.id, {motivo_omision:v})} />}</td>
-                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.impreso_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>🖨 Impresa {new Date(it.impreso_ts).toLocaleDateString("es-AR")}</div> : null}{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
+                      <td style={{verticalAlign:"top", minWidth:190}}><b>{it.nombre}</b><div className="hint">{it.sector} · {it.gerencia}</div>{it.impreso_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>🖨 Impresa {fechaHoraAR(it.impreso_ts)}{it.impreso_por ? " · "+it.impreso_por : ""}</div> : null}{it.enviado_ts ? <div className="hint" style={{color:"var(--good)", fontWeight:700}}>✔ Enviada {new Date(it.enviado_ts).toLocaleDateString("es-AR")}</div> : null}</td>
                       <td style={{verticalAlign:"top"}}><div style={{display:"flex", flexWrap:"wrap", gap:4, maxWidth:250}}>{(it.fechas||[]).map(x=>{
                         // debajo de cada fecha, chiquito, el codpla que tiene HOY en la base; en rojo si ya no es NO JUST (base actualizada después de armar el lote)
                         const fi = fechaInfo(it.legajo, x), mal = !fi.ok;
@@ -7503,7 +7516,7 @@ function SlCartas({enLote, lote, updItem, updLote, notaDe, archivoDe, pdfUno, pd
         <summary style={{cursor:"pointer", fontWeight:700}}>Ya impresas ({impresas.length})</summary>
         {impresas.map(x=>(
           <div key={x.it.id} style={{display:"flex", justifyContent:"space-between", gap:8, alignItems:"center", padding:"6px 0", borderTop:"1px solid var(--border)"}}>
-            <div><b style={{fontSize:13}}>{x.it.nombre}</b>{x.it.n_interno ? <span className="hint"> · N° {x.it.n_interno}</span> : null}<div className="hint">{x.it.legajo} · impresa {new Date(x.it.impreso_ts).toLocaleDateString("es-AR")}{x.it.impreso_por ? " por "+x.it.impreso_por : ""}</div></div>
+            <div><b style={{fontSize:13}}>{x.it.nombre}</b>{x.it.n_interno ? <span className="hint"> · N° {x.it.n_interno}</span> : null}<div className="hint">{x.it.legajo} · impresa {fechaHoraAR(x.it.impreso_ts)}{x.it.impreso_por ? " por "+x.it.impreso_por : ""}</div></div>
             <span style={{display:"flex", gap:6}}>
               <button type="button" className="btn secondary small" onClick={()=>imprimir([x])}>Reimprimir</button>
               <button type="button" className="btn secondary small" onClick={()=>desmarcarImpresa(x)} title="Vuelve a aparecer en Cartas y en la exportación">Volver a pendiente</button>
